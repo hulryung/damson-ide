@@ -28,6 +28,12 @@ public struct ReadinessSnapshot: Sendable {
     /// Whether a new OSC 133 prompt mark appeared since the current task was delivered.
     public let newPromptMarkSinceTaskStart: Bool
 
+    /// An out-of-band status the agent reported directly (Tier 1 lifecycle hook or Tier 2
+    /// OSC 9999), fresher and more reliable than screen-scraping. When present it is
+    /// authoritative over the engine's fingerprint `classify` — see `ReadinessDetector`.
+    /// nil when no recent structured signal exists (fall back to fingerprints).
+    public let externalSignal: AgentRuntimeState?
+
     public init(
         lines: [String],
         cursorRow: Int,
@@ -41,7 +47,8 @@ public struct ReadinessSnapshot: Sendable {
         processExited: Bool,
         exitCode: Int32?,
         isRunningForegroundJob: Bool,
-        newPromptMarkSinceTaskStart: Bool
+        newPromptMarkSinceTaskStart: Bool,
+        externalSignal: AgentRuntimeState? = nil
     ) {
         self.lines = lines
         self.cursorRow = cursorRow
@@ -56,6 +63,7 @@ public struct ReadinessSnapshot: Sendable {
         self.exitCode = exitCode
         self.isRunningForegroundJob = isRunningForegroundJob
         self.newPromptMarkSinceTaskStart = newPromptMarkSinceTaskStart
+        self.externalSignal = externalSignal
     }
 
     /// The bottom `n` non-empty lines (where agent TUIs draw their input/approval region).

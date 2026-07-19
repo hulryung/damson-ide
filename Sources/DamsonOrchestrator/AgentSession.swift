@@ -20,6 +20,10 @@ public final class AgentSession: ObservableObject, Identifiable {
     /// re-type the prompt.
     public private(set) var hasDeliveredInitialPrompt = false
 
+    /// Unguessable per-run token embedded in this agent's hook config, so the loopback
+    /// `HookServer` can route the agent CLI's lifecycle events back to this session.
+    public let hookToken = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+
     private let detector: ReadinessDetector
     private var cancellables = Set<AnyCancellable>()
     private var tick: Timer?
@@ -35,6 +39,16 @@ public final class AgentSession: ObservableObject, Identifiable {
     /// Guards `autoResponseKeys` so a benign gate is auto-cleared at most once per entry.
     private var autoRespondedThisApproval = false
 
+    // Tier 1/2 out-of-band status (hook events / OSC 9999). Authoritative while fresh.
+    private var externalState: AgentRuntimeState?
+    private var externalStateAt = Date.distantPast
+    /// Beyond this, a stale external status is dropped and we fall back to fingerprints
+    /// (guards against a broken/uninstalled hook wedging the state forever).
+    private let externalFreshness: TimeInterval = 30
+    /// Set on `interrupt()`. Claude Code doesn't fire `Stop` on Ctrl-C, so once output
+    /// goes quiet we synthesize `.idle` ourselves (Tier 3 interrupt inference).
+    private var pendingInterruptAt: Date?
+
     /// Called on every state change (the controller hooks scheduling here).
     public var onStateChange: ((AgentRuntimeState) -> Void)?
 
@@ -47,6 +61,11 @@ public final class AgentSession: ObservableObject, Identifiable {
 
         session.gridChanged
             .sink { [weak self] in self?.onGridChanged() }
+            .store(in: &cancellables)
+        // Tier 2: watch parsed OSC sequences for an agent-status escape (OSC 9999),
+        // the generic fallback for engines without lifecycle hooks.
+        session.outputEvents
+            .sink { [weak self] event in self?.onOutputEvent(event) }
             .store(in: &cancellables)
         session.onExit = { [weak self] code in
             Task { @MainActor in
@@ -95,7 +114,42 @@ public final class AgentSession: ObservableObject, Identifiable {
         }
     }
 
-    public func interrupt() { damsonSession.write(Data([0x03])) } // Ctrl-C
+    public func interrupt() {
+        damsonSession.write(Data([0x03])) // Ctrl-C
+        pendingInterruptAt = Date()       // Tier 3: infer idle once output quiets
+    }
+
+    // MARK: - External status (Tier 1 hooks / Tier 2 OSC)
+
+    /// Apply an out-of-band status the agent reported directly. Called by the controller
+    /// when a lifecycle hook arrives (Tier 1), and internally for OSC 9999 (Tier 2). nil is
+    /// ignored so an engine can choose not to disturb the state on an uninteresting event.
+    public func applyExternalSignal(_ state: AgentRuntimeState?) {
+        guard let state else { return }
+        externalState = state
+        externalStateAt = Date()
+        pendingInterruptAt = nil   // a real signal supersedes interrupt inference
+        evaluate()
+    }
+
+    /// Map an OSC 9999 agent-status escape to a state. Payload is either JSON with a
+    /// `status` field or a bare keyword: working / idle|done / blocked|waiting.
+    private func onOutputEvent(_ event: DamsonOutputEvent) {
+        guard case let .osc(params) = event, params.first == "9999", params.count >= 2 else { return }
+        let payload = params[1]
+        var keyword = payload.trimmingCharacters(in: .whitespaces).lowercased()
+        if let data = payload.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let status = obj["status"] as? String {
+            keyword = status.lowercased()
+        }
+        switch keyword {
+        case "working", "busy", "running": applyExternalSignal(.working)
+        case "idle", "done", "ready", "finished": applyExternalSignal(.idle)
+        case "blocked", "waiting", "approval", "permission": applyExternalSignal(.awaitingApproval)
+        default: break
+        }
+    }
 
     /// Raw text injection (no trailing Enter) — used by the control CLI's `send-text`.
     public func sendText(_ text: String) {
@@ -143,6 +197,7 @@ public final class AgentSession: ObservableObject, Identifiable {
     }
 
     private func evaluate() {
+        inferInterruptIfNeeded()
         let snap = makeSnapshot()
         let newState = detector.update(snap)
         setState(newState)
@@ -164,6 +219,28 @@ public final class AgentSession: ObservableObject, Identifiable {
         guard s != state else { return }
         state = s
         onStateChange?(s)
+    }
+
+    /// Tier 3: after a Ctrl-C, Claude Code prints its cancellation and returns to the
+    /// input box but never fires a `Stop` hook. Once output has been quiet for a moment,
+    /// synthesize `.idle`; give up after a few seconds and let fingerprints take over.
+    private func inferInterruptIfNeeded() {
+        guard let at = pendingInterruptAt else { return }
+        let now = Date()
+        if now.timeIntervalSince(at) > 0.5, now.timeIntervalSince(lastDataTime) > 0.8 {
+            externalState = .idle
+            externalStateAt = now
+            pendingInterruptAt = nil
+        } else if now.timeIntervalSince(at) > 8 {
+            pendingInterruptAt = nil
+        }
+    }
+
+    /// The external status if still fresh, else nil (fall back to fingerprints).
+    private func freshExternalSignal() -> AgentRuntimeState? {
+        guard let s = externalState,
+              Date().timeIntervalSince(externalStateAt) < externalFreshness else { return nil }
+        return s
     }
 
     private func makeSnapshot() -> ReadinessSnapshot {
@@ -191,7 +268,8 @@ public final class AgentSession: ObservableObject, Identifiable {
             processExited: damsonSession.processExited,
             exitCode: capturedExitCode,
             isRunningForegroundJob: damsonSession.hasRunningForegroundJob,
-            newPromptMarkSinceTaskStart: false
+            newPromptMarkSinceTaskStart: false,
+            externalSignal: freshExternalSignal()
         )
     }
 }

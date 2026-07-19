@@ -21,6 +21,26 @@ Early. The core loop works: spawn an agent in a fresh worktree, drive its PTY,
 detect when its turn completes, queue and schedule tasks across a concurrency
 limit, and steer it from the UI or the `orchard-cli` control socket.
 
+### Turn-completion detection (3 tiers)
+
+Knowing whether an agent is **working**, **waiting on you**, or **done** is the
+hard part. Orchard layers three signals, most-reliable first:
+
+1. **Lifecycle hooks (primary).** On spawn, Orchard writes a scoped
+   `.claude/settings.local.json` into the agent's worktree that POSTs Claude
+   Code's own lifecycle events (`UserPromptSubmit`, `PreToolUse`/`PostToolUse`,
+   `Notification`, `Stop`) to a loopback hook server, tagged with a per-agent
+   token. Structured and race-free — the agent tells us its state directly.
+2. **OSC 9999 (fallback).** For engines without hooks, an `\e]9999;{status}\e\\`
+   escape in the PTY output is parsed straight from Damson's VT event stream.
+3. **Screen fingerprints + interrupt inference (last resort).** The original
+   screen-scraper (spinner/input-box/approval matchers) still runs when no
+   structured signal is present, plus a synthesized idle after a Ctrl-C (which
+   Claude Code doesn't emit a `Stop` for).
+
+A structured signal always overrides fingerprints; a permission prompt never
+reads as idle.
+
 ## Build & run
 
 Requires macOS 13+ and a Swift 5.9+ toolchain.

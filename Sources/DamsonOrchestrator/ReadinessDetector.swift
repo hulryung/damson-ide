@@ -67,8 +67,14 @@ public final class ReadinessDetector {
             return state
         }
 
-        // Raw classification: engine-specific verdict, else generic process signals.
-        let raw = engine.classify(snap) ?? genericClassify(snap)
+        // Classification precedence:
+        //   1. External signal (Tier 1 hook / Tier 2 OSC) — a structured status the agent
+        //      reported directly. Authoritative: it's precise and race-free (the agent's
+        //      own UserPromptSubmit/Stop/permission events), so it overrides screen-scraping.
+        //   2. Engine fingerprint (`classify`) — screen-scraped fallback for when hooks
+        //      aren't wired (older CLI, hook install refused, engine without hook support).
+        //   3. Generic process signals (foreground-job / prompt marks) for non-TUI engines.
+        let raw = snap.externalSignal ?? engine.classify(snap) ?? genericClassify(snap)
 
         guard let candidate = raw else {
             // Uncertain. Stay put — but never linger in `.starting` forever once the

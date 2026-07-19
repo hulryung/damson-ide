@@ -19,6 +19,9 @@ public final class OrchestratorController: ObservableObject {
 
     private let worktrees: WorktreeManager
     private let worktreesRoot: URL
+    /// Loopback server that receives agent lifecycle hooks (Tier-1 turn detection).
+    /// One per run; each agent's events route back by its `hookToken`.
+    private let hookServer = HookServer()
     /// Template config new agents are built from; per-agent argv/cwd/env are overlaid on a
     /// copy. Mutable so the app can re-theme (see `applyTheme`).
     public var configTemplate: DamsonConfig
@@ -37,6 +40,18 @@ public final class OrchestratorController: ObservableObject {
 
     /// Validate the repo and pin the base commit. Call once before enqueuing.
     public func start() throws {
+        // Bring up the hook server (best-effort — agents just fall back to fingerprints
+        // if it can't bind). Route each event to its agent by token, on the main actor.
+        _ = hookServer.start()
+        hookServer.onEvent = { [weak self] event in
+            Task { @MainActor in
+                guard let self,
+                      let agent = self.agents.first(where: { $0.hookToken == event.token })
+                else { return }
+                agent.applyExternalSignal(
+                    agent.engine.hookSignal(event: event.event, body: event.body))
+            }
+        }
         try worktrees.validateReady(baseRepo)
         // If worktrees live inside the repo, hide that dir from the main checkout's
         // `git status` via local exclude (no commit, no change to tracked .gitignore).
@@ -121,6 +136,16 @@ public final class OrchestratorController: ObservableObject {
             guard let self, let agent else { return }
             self.agentStateChanged(agent, state: state)
         }
+
+        // Tier-1 hooks: give this agent a per-worktree hook config so its CLI POSTs
+        // lifecycle events to our loopback server. Best-effort — a write failure or a
+        // CLI without hook support just means we lean on fingerprints for this agent.
+        if let events = engine.hookEvents, hookServer.port != 0 {
+            worktrees.ensureExcluded(".claude/settings.local.json", in: wt.path)
+            HookInstaller.install(worktree: wt.path, port: hookServer.port,
+                                  token: agent.hookToken, events: events)
+        }
+
         agents.append(agent)
         onAgentSpawned?(agent)
     }
@@ -185,5 +210,6 @@ public final class OrchestratorController: ObservableObject {
             onAgentRetired?(agent)
         }
         agents.removeAll()
+        hookServer.stop()
     }
 }

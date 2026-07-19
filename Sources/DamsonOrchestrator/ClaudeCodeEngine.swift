@@ -44,6 +44,43 @@ public struct ClaudeCodeEngine: AgentEngine {
     public func autoResponseKeys(_ snapshot: ReadinessSnapshot) -> [String]? {
         ClaudeFingerprints.isTrustPrompt(snapshot.bottomLines(12)) ? ["enter"] : nil
     }
+
+    // MARK: - Tier-1 lifecycle hooks
+
+    /// Claude Code lifecycle events Orchard registers as `command` hooks (each POSTs the
+    /// event to the loopback hook server). Kept to the well-documented, stable set:
+    /// prompt submit + tool activity (→ working), Notification (→ approval/idle), Stop
+    /// (→ turn done), SessionEnd (→ shutdown; process exit is the real authority).
+    public var hookEvents: [String]? {
+        ["UserPromptSubmit", "PreToolUse", "PostToolUse", "Notification", "Stop", "SessionEnd"]
+    }
+
+    public func hookSignal(event: String, body: Data) -> AgentRuntimeState? {
+        switch event {
+        case "UserPromptSubmit", "PreToolUse", "PostToolUse":
+            // The agent is mid-turn: it submitted a prompt or is running tools.
+            return .working
+        case "Stop":
+            // The main agent finished responding → back at its input box, ready.
+            return .idle
+        case "Notification":
+            // Notification means Claude wants attention. Distinguish "needs permission /
+            // approval" (blocked on the human) from "waiting for your input" (idle) by the
+            // payload text, since the exact discriminator field varies across releases.
+            let text = String(decoding: body, as: UTF8.self).lowercased()
+            if text.contains("permission") || text.contains("approve") || text.contains("proceed") {
+                return .awaitingApproval
+            }
+            if text.contains("waiting for your input") || text.contains("idle") {
+                return .idle
+            }
+            return nil   // unknown notification — don't disturb the current state
+        case "SessionEnd":
+            return nil    // process exit (onExit) is authoritative for termination
+        default:
+            return nil
+        }
+    }
 }
 
 /// Version-sensitive fingerprints for Claude Code's TUI. **These are a maintained

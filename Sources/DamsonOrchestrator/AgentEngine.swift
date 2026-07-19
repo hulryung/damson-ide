@@ -47,6 +47,19 @@ public protocol AgentEngine {
     /// (e.g. a startup workspace-trust prompt) by returning the key names to send. Return
     /// `nil` for real task approvals so a human decides. Called at most once per gate entry.
     func autoResponseKeys(_ snapshot: ReadinessSnapshot) -> [String]?
+
+    /// Lifecycle-hook event names this engine can be configured to POST to Orchard's
+    /// loopback hook server (Tier 1 turn detection). `nil` = the engine has no hook
+    /// mechanism (Orchard then relies on fingerprints/OSC). When non-nil, Orchard writes
+    /// a per-worktree hook config registering each of these events, and maps incoming
+    /// events through `hookSignal`.
+    var hookEvents: [String]? { get }
+
+    /// Map one received hook event (name + the JSON body the CLI sent) to a runtime
+    /// state, or `nil` to ignore it (leave the state unchanged). This is where an engine
+    /// encodes "PostToolUse means working, Stop means idle, permission Notification means
+    /// awaiting approval". Terminal states are NOT reported here — process exit owns those.
+    func hookSignal(event: String, body: Data) -> AgentRuntimeState?
 }
 
 public extension AgentEngine {
@@ -56,6 +69,8 @@ public extension AgentEngine {
     func env(base: [String: String]) -> [String: String] { base }
     func classify(_ snapshot: ReadinessSnapshot) -> AgentRuntimeState? { nil }
     func autoResponseKeys(_ snapshot: ReadinessSnapshot) -> [String]? { nil }
+    var hookEvents: [String]? { nil }
+    func hookSignal(event: String, body: Data) -> AgentRuntimeState? { nil }
 }
 
 /// Built-in engine registry. Keyed by `id`. UI/controller resolve engines from here.
