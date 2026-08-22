@@ -46,8 +46,9 @@ public final class DamsonTerminalSession: TerminalSession {
             .compactMap { event -> TerminalOutputEvent? in
                 switch event {
                 case .text(let s): return .text(s)
+                case .execute(let byte): return .control(byte)
                 case .osc(let params): return .osc(params)
-                case .execute, .csi: return nil
+                case .csi: return nil
                 }
             }
             .eraseToAnyPublisher()

@@ -56,12 +56,13 @@ public final class AgentSession: ObservableObject, Identifiable {
     /// Called on every state change (the supervisor hooks event emission here).
     public var onStateChange: ((AgentRuntimeState) -> Void)?
 
-    public init(engine: AgentEngine, terminal: TerminalSession, worktree: Worktree?, task: AgentTask?) {
+    public init(engine: AgentEngine, terminal: TerminalSession, worktree: Worktree?, task: AgentTask?,
+                detectorConfig: ReadinessDetector.Config = ReadinessDetector.Config()) {
         self.engine = engine
         self.terminal = terminal
         self.worktree = worktree
         self.task = task
-        self.detector = ReadinessDetector(engine: engine)
+        self.detector = ReadinessDetector(engine: engine, config: detectorConfig)
 
         terminal.gridChanged
             .sink { [weak self] in self?.onGridChanged() }
@@ -102,6 +103,16 @@ public final class AgentSession: ObservableObject, Identifiable {
             terminal.write(Data(prompt.utf8))
         }
         terminal.write(Data(keyNameToBytes("enter") ?? [0x0D]))
+        taskDeliveredAt = Date()
+        hasDeliveredInitialPrompt = true
+        detector.noteTaskDelivered()
+        setState(detector.state)
+    }
+
+    /// Record that a task prompt was delivered by an external pipeline (the terminal
+    /// service's verified injection path writes to the PTY itself). Arms the same
+    /// once-only guard and post-delivery idle debounce that `deliverPrompt` does.
+    public func notePromptDelivered() {
         taskDeliveredAt = Date()
         hasDeliveredInitialPrompt = true
         detector.noteTaskDelivered()
