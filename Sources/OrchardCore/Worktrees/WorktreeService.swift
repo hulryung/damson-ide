@@ -142,6 +142,11 @@ public final class WorktreeService {
         WorktreeNaming.suggestName(taken: takenNames)
     }
 
+    /// Suggested name that also honors a repo's permanently-retired generated-name pool.
+    public func suggestedName(retired: RetiredNameRegistry) -> String {
+        WorktreeNaming.suggestName(taken: takenNames, retired: retired)
+    }
+
     public func availableBaseRefs() -> [String] {
         manager.localBranches(in: baseRepo)
     }
@@ -182,6 +187,11 @@ public final class WorktreeService {
         manager.setupScript(for: record.worktree)
     }
 
+    /// The project's `orchard.yaml` archive command, if it declares one.
+    public func archiveScript(for record: WorktreeRecord) -> String? {
+        manager.archiveScript(for: record.worktree)
+    }
+
     /// Run the project's `orchard.yaml` setup script in a fresh worktree, honoring the
     /// `runsSetupScripts` toggle.
     ///
@@ -218,22 +228,54 @@ public final class WorktreeService {
         manager.deletionPreflight(record.worktree)
     }
 
+    /// Outcome of a delete, including the `--run-hooks` warning Orca surfaces when an
+    /// archive script exists but wasn't requested.
+    public struct DeletionResult: Sendable {
+        public let removed: Bool
+        /// Archive-hook skip or failure. Empty when there was no archive script, or
+        /// it ran successfully.
+        public let warning: String?
+        public init(removed: Bool, warning: String? = nil) {
+            self.removed = removed
+            self.warning = warning
+        }
+    }
+
     /// Remove a worktree and drop it from the list.
     ///
     /// The caller is responsible for stopping any agent running inside first — git can't
     /// remove a directory a live process is sitting in (in v1 the controller did both; the
     /// agent half now belongs to `AgentSupervisor`).
     ///
-    /// Returns `false` when the worktree was dirty and `force` wasn't set, leaving everything
-    /// in place; the caller re-asks with `force: true` after showing the preflight warnings.
+    /// Returns `removed: false` when the worktree was dirty and `force` wasn't set, leaving
+    /// everything in place; the caller re-asks with `force: true` after showing the
+    /// preflight warnings.
+    ///
+    /// `runHooks` is the `--run-hooks` flag: the `orchard.yaml` archive script runs only
+    /// when this is true. A declared-but-skipped script produces a warning rather than
+    /// running. A failed archive hook is also a warning — deletion still proceeds
+    /// (matching Orca: archive is best-effort teardown).
     @discardableResult
     public func deleteWorktree(_ record: WorktreeRecord, force: Bool = false,
-                               deleteBranch: Bool = false) throws -> Bool {
+                               deleteBranch: Bool = false,
+                               runHooks: Bool = false) throws -> DeletionResult {
+        var warning: String?
+        if let script = manager.archiveScript(for: record.worktree) {
+            if runHooks {
+                let result = SetupRunner.run(script: script, in: record.path,
+                                             environment: manager.hookEnvironment(for: record.worktree))
+                if !result.succeeded {
+                    warning = "archive hook failed: \(result.output)"
+                }
+            } else {
+                warning = "orchard.yaml archive hook skipped for \(record.path.path); pass --run-hooks to run it."
+            }
+        }
         let removed = try manager.remove(record.worktree, force: force, deleteBranch: deleteBranch)
-        guard removed else { return false }
+        guard removed else { return DeletionResult(removed: false, warning: warning) }
         worktrees.removeAll { $0.id == record.id }
         eventSink.yield(.worktreeRemoved(worktreeID: record.id, branch: record.branch))
-        return true
+        return DeletionResult(removed: true, warning: warning)
     }
 
     /// Whether a branch survived a safe delete because it still holds unmerged commits.

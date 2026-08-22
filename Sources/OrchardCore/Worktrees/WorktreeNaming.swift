@@ -34,21 +34,43 @@ public enum WorktreeNaming {
 
     /// Friendly default names, so a user who just wants to start an agent doesn't have to
     /// invent a label first. Orca uses marine creatures; the orchard theme here is fruit.
+    /// The generated-name pool is also the retirement vocabulary: a spent name is never
+    /// reissued (the old directory may still hold agent conversation state keyed to it).
     public static let suggestedNames = [
         "apricot", "bramble", "cherry", "damson", "elderberry", "fig", "greengage",
         "hazel", "juniper", "kumquat", "lychee", "mulberry", "nectarine", "olive",
         "peach", "quince", "russet", "sloe", "tamarind", "vine", "walnut", "yuzu",
+        "apple", "blackberry", "blueberry", "cantaloupe", "clementine", "cranberry",
+        "date", "gooseberry", "grapefruit", "honeydew", "lemon", "lime", "mango",
+        "papaya", "pear", "persimmon", "pineapple", "plum", "pomegranate",
+        "raspberry", "strawberry", "tangerine",
     ]
 
-    /// First suggested name not already taken, falling back to a numbered variant once the
-    /// list is exhausted.
-    public static func suggestName(taken: Set<String>) -> String {
-        for name in suggestedNames where !taken.contains(name) { return name }
+    public static let suggestedNameSet: Set<String> = Set(suggestedNames)
+
+    /// First suggested name not already taken (and not permanently retired), falling
+    /// back to a numbered variant once the list is exhausted. Collision suffixes
+    /// (`-2`, `-3`) are the v1 uniquifier and stay; retirement is an additional
+    /// never-reissue gate on top.
+    public static func suggestName(taken: Set<String>,
+                                   isRetired: (String) -> Bool = { _ in false }) -> String {
+        for name in suggestedNames where !taken.contains(name) && !isRetired(name) {
+            return name
+        }
         var n = 2
         while true {
-            for name in suggestedNames where !taken.contains("\(name)-\(n)") { return "\(name)-\(n)" }
+            for name in suggestedNames {
+                let candidate = "\(name)-\(n)"
+                if !taken.contains(candidate) && !isRetired(candidate) { return candidate }
+            }
             n += 1
         }
+    }
+
+    public static func suggestName(taken: Set<String>,
+                                   retired: RetiredNameRegistry) -> String {
+        let lookup = RetiredNames.lookup(retired, pool: suggestedNameSet)
+        return suggestName(taken: taken, isRetired: lookup)
     }
 
     /// Branch prefix, so every agent branch is namespaced away from the user's own branches

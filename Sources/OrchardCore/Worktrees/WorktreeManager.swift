@@ -255,9 +255,26 @@ public final class WorktreeManager {
     /// The project's `orchard.yaml` setup script for a worktree, if it declares one. The
     /// caller runs it in a visible terminal so a failing install isn't silent.
     public func setupScript(for wt: Worktree) -> String? {
-        let script = OrchardProjectConfig.load(from: wt.path).setup?
+        scriptField(\.setup, for: wt)
+    }
+
+    /// The project's `orchard.yaml` archive script, run just before deletion when the
+    /// caller opted in with `--run-hooks`. v1 parsed this and never executed it.
+    public func archiveScript(for wt: Worktree) -> String? {
+        scriptField(\.archive, for: wt)
+    }
+
+    private func scriptField(_ keyPath: KeyPath<OrchardProjectConfig, String?>,
+                             for wt: Worktree) -> String? {
+        let script = OrchardProjectConfig.load(from: wt.path)[keyPath: keyPath]?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return (script?.isEmpty ?? true) ? nil : script
+    }
+
+    /// HEAD of a worktree (empty string if git can't answer). Folder workspaces have no
+    /// HEAD; callers that project both shapes treat empty as "not a git checkout".
+    public func headCommit(_ wt: Worktree) -> String {
+        git.line(in: wt.path, ["rev-parse", "HEAD"]) ?? ""
     }
 
     /// Environment a setup or archive script runs with, so scripts can locate both ends of
@@ -385,6 +402,15 @@ public final class WorktreeManager {
             warnings.append("\(atRisk) \(atRisk == 1 ? "commit is" : "commits are") not pushed anywhere")
         }
         return WorktreeDeletionPreflight(worktree: wt, status: status, warnings: warnings)
+    }
+
+    /// Run the `orchard.yaml` archive script inside `wt`. Returns nil when the project
+    /// declares none. Failures are returned rather than thrown — Orca logs a failed
+    /// archive hook and still proceeds with deletion (the hook is best-effort
+    /// teardown: stop containers, free ports).
+    public func runArchiveHook(for wt: Worktree) -> SetupRunner.Result? {
+        guard let script = archiveScript(for: wt) else { return nil }
+        return SetupRunner.run(script: script, in: wt.path, environment: hookEnvironment(for: wt))
     }
 
     // MARK: - Remove
