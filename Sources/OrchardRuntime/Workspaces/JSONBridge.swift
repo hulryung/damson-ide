@@ -57,16 +57,7 @@ enum JSONBridge {
 }
 
 extension JSONValue {
-    var boolValue: Bool? {
-        if case let .bool(b) = self { return b }
-        return nil
-    }
-
-    var numberValue: Double? {
-        if case let .number(n) = self { return n }
-        return nil
-    }
-
+    // boolValue/numberValue/objectValue/stringValue come from OrchardProtocol.
     var intValue: Int? {
         numberValue.map { Int($0) }
     }
