@@ -1,16 +1,19 @@
 import Foundation
 import Combine
-import DamsonTerminal
 import DamsonControl
+import OrchardCore
 
-/// Wraps one `DamsonSession` running a CLI agent, and drives a `ReadinessDetector` from
+/// Wraps one `TerminalSession` running a CLI agent, and drives a `ReadinessDetector` from
 /// the live grid. This is the bridge between the terminal engine and the orchestrator:
 /// it reads the screen into `ReadinessSnapshot`s and exposes a single `@Published state`.
+///
+/// v2: rewritten against the `TerminalSession` protocol — the session never touches
+/// `DamsonSession` directly, so it can be exercised in tests with a scripted fake.
 @MainActor
 public final class AgentSession: ObservableObject, Identifiable {
     public let id = UUID()
     public let engine: AgentEngine
-    public let damsonSession: DamsonSession
+    public let terminal: TerminalSession
     public let worktree: Worktree?
     public private(set) var task: AgentTask?
 
@@ -28,14 +31,13 @@ public final class AgentSession: ObservableObject, Identifiable {
     private var cancellables = Set<AnyCancellable>()
     private var tick: Timer?
 
-    /// When this agent's process was spawned — drives the UI's elapsed-time display.
+    /// When this agent's process was spawned — drives elapsed-time displays.
     public let startedAt = Date()
 
     // Timing inputs for the detector.
     private var lastDataTime = Date()
     private var lastSyncFrameTime: Date?
     private var prevInSyncOutput = false
-    private var promptMarkBaseline = 0
     private var taskDeliveredAt: Date?
     private var capturedExitCode: Int32?
     /// Guards `autoResponseKeys` so a benign gate is auto-cleared at most once per entry.
@@ -51,25 +53,25 @@ public final class AgentSession: ObservableObject, Identifiable {
     /// goes quiet we synthesize `.idle` ourselves (Tier 3 interrupt inference).
     private var pendingInterruptAt: Date?
 
-    /// Called on every state change (the controller hooks scheduling here).
+    /// Called on every state change (the supervisor hooks event emission here).
     public var onStateChange: ((AgentRuntimeState) -> Void)?
 
-    public init(engine: AgentEngine, session: DamsonSession, worktree: Worktree?, task: AgentTask?) {
+    public init(engine: AgentEngine, terminal: TerminalSession, worktree: Worktree?, task: AgentTask?) {
         self.engine = engine
-        self.damsonSession = session
+        self.terminal = terminal
         self.worktree = worktree
         self.task = task
         self.detector = ReadinessDetector(engine: engine)
 
-        session.gridChanged
+        terminal.gridChanged
             .sink { [weak self] in self?.onGridChanged() }
             .store(in: &cancellables)
         // Tier 2: watch parsed OSC sequences for an agent-status escape (OSC 9999),
         // the generic fallback for engines without lifecycle hooks.
-        session.outputEvents
+        terminal.outputEvents
             .sink { [weak self] event in self?.onOutputEvent(event) }
             .store(in: &cancellables)
-        session.onExit = { [weak self] code in
+        terminal.onExit = { [weak self] code in
             Task { @MainActor in
                 self?.capturedExitCode = code
                 self?.evaluate()
@@ -92,15 +94,14 @@ public final class AgentSession: ObservableObject, Identifiable {
     /// Deliver the task prompt and submit it. Uses bracketed paste when the agent enabled
     /// it, so embedded newlines don't each submit a partial line.
     public func deliverPrompt(_ prompt: String) {
-        let session = damsonSession
-        if session.bracketedPasteEnabled {
-            session.write(Data([0x1B] + Array("[200~".utf8)))
-            session.write(Data(prompt.utf8))
-            session.write(Data([0x1B] + Array("[201~".utf8)))
+        if terminal.bracketedPasteEnabled {
+            terminal.write(Data([0x1B] + Array("[200~".utf8)))
+            terminal.write(Data(prompt.utf8))
+            terminal.write(Data([0x1B] + Array("[201~".utf8)))
         } else {
-            session.write(Data(prompt.utf8))
+            terminal.write(Data(prompt.utf8))
         }
-        session.write(Data(keyNameToBytes("enter") ?? [0x0D]))
+        terminal.write(Data(keyNameToBytes("enter") ?? [0x0D]))
         taskDeliveredAt = Date()
         hasDeliveredInitialPrompt = true
         detector.noteTaskDelivered()
@@ -110,20 +111,20 @@ public final class AgentSession: ObservableObject, Identifiable {
     /// Send a single named key (e.g. "1", "enter", "ctrl-c") — used for approval responses.
     public func sendKey(_ name: String) {
         if let bytes = keyNameToBytes(name) {
-            damsonSession.write(Data(bytes))
+            terminal.write(Data(bytes))
         } else if name.count == 1 {
-            damsonSession.write(Data(name.utf8))
+            terminal.write(Data(name.utf8))
         }
     }
 
     public func interrupt() {
-        damsonSession.write(Data([0x03])) // Ctrl-C
-        pendingInterruptAt = Date()       // Tier 3: infer idle once output quiets
+        terminal.write(Data([0x03])) // Ctrl-C
+        pendingInterruptAt = Date()   // Tier 3: infer idle once output quiets
     }
 
     // MARK: - External status (Tier 1 hooks / Tier 2 OSC)
 
-    /// Apply an out-of-band status the agent reported directly. Called by the controller
+    /// Apply an out-of-band status the agent reported directly. Called by the supervisor
     /// when a lifecycle hook arrives (Tier 1), and internally for OSC 9999 (Tier 2). nil is
     /// ignored so an engine can choose not to disturb the state on an uninteresting event.
     public func applyExternalSignal(_ state: AgentRuntimeState?) {
@@ -136,7 +137,7 @@ public final class AgentSession: ObservableObject, Identifiable {
 
     /// Map an OSC 9999 agent-status escape to a state. Payload is either JSON with a
     /// `status` field or a bare keyword: working / idle|done / blocked|waiting.
-    private func onOutputEvent(_ event: DamsonOutputEvent) {
+    private func onOutputEvent(_ event: TerminalOutputEvent) {
         guard case let .osc(params) = event, params.first == "9999", params.count >= 2 else { return }
         let payload = params[1]
         var keyword = payload.trimmingCharacters(in: .whitespaces).lowercased()
@@ -153,33 +154,27 @@ public final class AgentSession: ObservableObject, Identifiable {
         }
     }
 
-    /// Raw text injection (no trailing Enter) — used by the control CLI's `send-text`.
+    /// Raw text injection (no trailing Enter).
     public func sendText(_ text: String) {
-        if damsonSession.bracketedPasteEnabled {
-            damsonSession.write(Data([0x1B] + Array("[200~".utf8)))
-            damsonSession.write(Data(text.utf8))
-            damsonSession.write(Data([0x1B] + Array("[201~".utf8)))
+        if terminal.bracketedPasteEnabled {
+            terminal.write(Data([0x1B] + Array("[200~".utf8)))
+            terminal.write(Data(text.utf8))
+            terminal.write(Data([0x1B] + Array("[201~".utf8)))
         } else {
-            damsonSession.write(Data(text.utf8))
+            terminal.write(Data(text.utf8))
         }
     }
 
-    /// Short, human-friendly id used by the control CLI to address this agent.
+    /// Short, human-friendly id used to address this agent from a CLI.
     public var shortID: String { String(id.uuidString.prefix(8)).lowercased() }
 
     /// The git branch this agent's worktree lives on — its isolation lane.
     public var branchName: String? { worktree?.branch }
 
-    /// The visible grid as plain text (one line per row, trailing blanks trimmed) — the
-    /// CLI's `agent-output`, so an external AI can read what the agent is showing.
+    /// The visible grid as plain text (one line per row, trailing blanks trimmed) — so an
+    /// external AI can read what the agent is showing.
     public func gridText() -> String {
-        let grid = damsonSession.grid
-        var lines: [String] = []
-        for r in 0..<grid.rows {
-            var s = String(grid.row(r).map { $0.char })
-            while let last = s.last, last == " " { s.removeLast() }
-            lines.append(s)
-        }
+        var lines = terminal.gridSnapshot().lines
         while let last = lines.last, last.isEmpty { lines.removeLast() }
         return lines.joined(separator: "\n")
     }
@@ -187,23 +182,26 @@ public final class AgentSession: ObservableObject, Identifiable {
     public func terminate() {
         tick?.invalidate()
         tick = nil
-        damsonSession.terminate()
+        terminal.terminate()
     }
 
     // MARK: - Snapshot + evaluation
 
     private func onGridChanged() {
         lastDataTime = Date()
-        // Detect a synchronized-output frame edge (false→true) for cadence tracking.
-        let now = damsonSession.grid.inSyncOutputMode
-        if now && !prevInSyncOutput { lastSyncFrameTime = Date() }
-        prevInSyncOutput = now
         evaluate()
     }
 
     private func evaluate() {
         inferInterruptIfNeeded()
-        let snap = makeSnapshot()
+        let grid = terminal.gridSnapshot()
+        // Detect a synchronized-output frame edge (false→true) for cadence tracking.
+        // Sync mode only changes when output arrives, so observing it here (rather than
+        // only on gridChanged as v1 did) sees the same edges.
+        if grid.inSyncOutputMode && !prevInSyncOutput { lastSyncFrameTime = Date() }
+        prevInSyncOutput = grid.inSyncOutputMode
+
+        let snap = makeSnapshot(from: grid)
         let newState = detector.update(snap)
         setState(newState)
 
@@ -248,31 +246,22 @@ public final class AgentSession: ObservableObject, Identifiable {
         return s
     }
 
-    private func makeSnapshot() -> ReadinessSnapshot {
-        let grid = damsonSession.grid
-        var lines: [String] = []
-        lines.reserveCapacity(grid.rows)
-        for r in 0..<grid.rows {
-            let chars = grid.row(r).map { $0.char }
-            var s = String(chars)
-            while let last = s.last, last == " " { s.removeLast() }
-            lines.append(s)
-        }
+    private func makeSnapshot(from grid: TerminalGridSnapshot) -> ReadinessSnapshot {
         let now = Date()
         let sinceSync = lastSyncFrameTime.map { now.timeIntervalSince($0) } ?? .infinity
         return ReadinessSnapshot(
-            lines: lines,
+            lines: grid.lines,
             cursorRow: grid.cursorRow,
             cursorCol: grid.cursorCol,
             cols: grid.cols,
             rows: grid.rows,
-            isAltScreen: grid.isAltScreenActive,
+            isAltScreen: grid.isAltScreen,
             timeSinceLastData: now.timeIntervalSince(lastDataTime),
             timeSinceLastSyncFrame: sinceSync,
             timeSinceSpawn: now.timeIntervalSince(startedAt),
-            processExited: damsonSession.processExited,
-            exitCode: capturedExitCode,
-            isRunningForegroundJob: damsonSession.hasRunningForegroundJob,
+            processExited: terminal.processExited,
+            exitCode: capturedExitCode ?? terminal.exitCode,
+            isRunningForegroundJob: terminal.hasRunningForegroundJob,
             newPromptMarkSinceTaskStart: false,
             externalSignal: freshExternalSignal()
         )
