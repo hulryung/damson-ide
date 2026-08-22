@@ -1,19 +1,40 @@
 # Orchard
 
-**A native macOS cockpit for running CLI coding agents side by side — each in its own git worktree.**
+**A native macOS multi-agent orchestrator IDE — agents in persistent git worktrees, driven by a runtime with an agent-facing CLI.**
 
-Orchard drives multiple agents (Claude Code today; more engines planned) in
-parallel, each isolated in its own `git worktree`, and tracks them in one place:
-a sidebar of projects and worktrees, a per-worktree Agent / Diff / Terminal pane,
-a native diff reviewer, a task queue, and turn-completion detection so you can
-see at a glance which agent is working, waiting on you, or done.
+Orchard is being rebuilt (v2) into a native equivalent of
+[Orca](https://github.com/stablyai/orca): orchestration
+(runs / tasks / dispatch / messaging between a coordinator agent and workers),
+workspace & worktree management, terminals with 3-tier turn-completion
+detection, and — in later waves — a file manager and embedded browser. The
+architecture is **runtime-first**: a UI-free runtime owns worktrees, terminals,
+and orchestration state behind a local RPC socket; the SwiftUI app is a client
+of it, and so is the `orchard` CLI that agents themselves call. There is
+deliberately **no scheduler** — coordinators are LLM agents driving the loop
+through the CLI.
 
-It's the orchestration counterpart to [Damson](https://github.com/hulryung/damson),
-the GPU terminal it reuses — Orchard renders each agent's PTY with Damson's own
-Metal terminal engine (`DamsonTerminal`) rather than reimplementing one.
+The plan, the module layout, and the task breakdown live in
+[`docs/REBUILD-PLAN.md`](docs/REBUILD-PLAN.md); what moved where from v1 is
+recorded in [`docs/MIGRATION-V2.md`](docs/MIGRATION-V2.md). Modules today:
 
-> Same product space as [Orca](https://github.com/stablyai/orca), but native
-> Swift/AppKit, macOS-only, and built on Damson's terminal engine.
+```
+OrchardCore           UI-free foundation: git, worktrees, config (no damson import)
+OrchardTerminals      terminal + agent layer (the only damson-importing library)
+OrchardOrchestration  SQLite orchestration store + semantics        (wave 1)
+OrchardProtocol       RPC envelope + command specs (shared server/CLI)
+OrchardRuntime        runtime assembly: socket server, services, handlers
+orchard               the agent-facing CLI executable
+OrchardApp            the app (binary is `OrchardApp`; the bundle stays Orchard.app)
+```
+
+It remains the orchestration counterpart to
+[Damson](https://github.com/hulryung/damson), the GPU terminal it reuses —
+each agent's PTY renders through Damson's Metal terminal engine
+(`DamsonTerminal`, pinned `from: 0.4.1`) rather than reimplementing one.
+
+> The sections below describe the v1 behaviors being carried forward
+> (worktree model, setup scripts, turn detection); the v1 single-window app,
+> task queue, and `orchard-cli` control socket are gone.
 
 ## The model: worktrees outlive agents
 
