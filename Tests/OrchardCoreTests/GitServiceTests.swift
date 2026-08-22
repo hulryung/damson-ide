@@ -1,5 +1,5 @@
 import XCTest
-@testable import DamsonOrchestrator
+@testable import OrchardCore
 
 /// Exercises `GitService` against a real fixture repo — the parsing here is all about
 /// git's actual `-z` output framing, so a mocked runner would test the wrong thing.

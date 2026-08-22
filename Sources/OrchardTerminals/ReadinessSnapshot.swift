@@ -1,4 +1,5 @@
 import Foundation
+import OrchardCore
 
 /// An immutable view of an agent session at one instant, fed to `ReadinessDetector`
 /// and to each `AgentEngine.classify`. Deliberately decoupled from `DamsonSession`

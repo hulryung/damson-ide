@@ -1,5 +1,6 @@
 import XCTest
-@testable import DamsonOrchestrator
+import OrchardCore
+@testable import OrchardTerminals
 
 final class ReadinessDetectorTests: XCTestCase {
 

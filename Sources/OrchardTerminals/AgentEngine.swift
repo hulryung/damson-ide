@@ -1,4 +1,5 @@
 import Foundation
+import OrchardCore
 
 /// How a task prompt is delivered to a freshly-spawned agent.
 public enum PromptDelivery: Sendable {

@@ -1,5 +1,5 @@
 import XCTest
-@testable import DamsonOrchestrator
+@testable import OrchardCore
 
 final class WorktreeManagerTests: XCTestCase {
     private var tmp: URL!

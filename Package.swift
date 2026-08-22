@@ -1,63 +1,116 @@
 // swift-tools-version: 5.9
 import PackageDescription
 
-// damson-ide — Orchard: a native macOS cockpit that runs CLI coding agents
-// (Claude Code, …) side by side, each in its own git worktree.
+// damson-ide — Orchard v2: a native macOS multi-agent orchestrator IDE
+// (see docs/REBUILD-PLAN.md). Runtime-first: a UI-free runtime owns worktrees,
+// terminals, and orchestration state; the app is a client of it.
 //
-// Reuses damson's GPU terminal engine + control layer via the DamsonTerminal and
-// DamsonControl library products, pinned to a released damson tag so the daily
-// churn in that repo can't break Orchard's build. Bump the dependency version
-// deliberately when Orchard should pick up newer engine work.
+// Dependency rule: OrchardCore ← {OrchardTerminals, OrchardOrchestration} ←
+// OrchardRuntime ← OrchardApp. The `orchard` CLI depends only on OrchardProtocol.
+// Only OrchardTerminals and the app may import damson products.
+//
+// Naming note: the plan's `Orchard` app product/target collides with the `orchard`
+// CLI on a case-insensitive filesystem (both the Sources/ directories and the
+// .build output binaries are the same path), so the app target/product is
+// `OrchardApp`; the user-visible identity stays "Orchard.app" via OrchardTrampoline.
 let package = Package(
     name: "damson-ide",
     platforms: [.macOS(.v13)],
     products: [
-        .executable(name: "Orchard", targets: ["Orchard"]),
-        .executable(name: "orchard-cli", targets: ["orchard-cli"]),
+        .executable(name: "OrchardApp", targets: ["OrchardApp"]),
+        .executable(name: "orchard", targets: ["orchard"]),
+        .library(name: "OrchardCore", targets: ["OrchardCore"]),
+        .library(name: "OrchardTerminals", targets: ["OrchardTerminals"]),
+        .library(name: "OrchardOrchestration", targets: ["OrchardOrchestration"]),
+        .library(name: "OrchardProtocol", targets: ["OrchardProtocol"]),
+        .library(name: "OrchardRuntime", targets: ["OrchardRuntime"]),
     ],
     dependencies: [
-        // Pinned to a specific damson commit (the one that dropped the Orchard
-        // targets — earlier tags still declare them and collide by module name).
-        // Deterministic + immune to damson's daily churn; bump this sha, or switch
-        // to `from: "0.3.8"`, when Orchard should pick up newer engine work.
-        .package(url: "https://github.com/hulryung/damson.git",
-                 revision: "e4d14f95b8ab3ed12ec4522aa0dd2de279ca68f4"),
+        // damson's terminal engine + control wire, pinned to a released tag so the
+        // daily churn in that repo can't break Orchard. Bump deliberately.
+        .package(url: "https://github.com/hulryung/damson.git", from: "0.4.1"),
     ],
     targets: [
+        // UI-free foundation: git, worktrees, per-repo config, shared utilities.
+        // Must never import damson.
         .target(
-            name: "DamsonOrchestrator",
+            name: "OrchardCore",
+            path: "Sources/OrchardCore"
+        ),
+        // Terminal + agent layer — the sole damson-importing library. Owns the
+        // TerminalSession seam, agent engines, readiness detection, and hooks.
+        .target(
+            name: "OrchardTerminals",
             dependencies: [
+                "OrchardCore",
                 .product(name: "DamsonTerminal", package: "damson"),
                 .product(name: "DamsonControl", package: "damson"),
             ],
-            path: "Sources/DamsonOrchestrator"
+            path: "Sources/OrchardTerminals"
         ),
+        // SQLite orchestration store + semantics (runs/tasks/dispatch/messaging).
+        // T1 fills this in; the target exists so its seams are addressable now.
         .target(
-            name: "OrchardControl",
-            dependencies: [
-                .product(name: "DamsonControl", package: "damson"),
-            ],
-            path: "Sources/OrchardControl"
+            name: "OrchardOrchestration",
+            dependencies: ["OrchardCore"],
+            path: "Sources/OrchardOrchestration"
         ),
+        // Codable wire types + RPC envelope + command specs. Shared by the runtime
+        // server and the CLI; no other dependencies by design.
+        .target(
+            name: "OrchardProtocol",
+            path: "Sources/OrchardProtocol"
+        ),
+        // Runtime assembly: socket server, handler registry, and the domain
+        // services behind RPC. T2–T4 fill in the subdirectories.
+        .target(
+            name: "OrchardRuntime",
+            dependencies: [
+                "OrchardCore",
+                "OrchardTerminals",
+                "OrchardOrchestration",
+                "OrchardProtocol",
+            ],
+            path: "Sources/OrchardRuntime"
+        ),
+        // The agent-facing CLI. Client of the runtime socket; agent-context and
+        // guides must keep working with no runtime running.
         .executableTarget(
-            name: "Orchard",
+            name: "orchard",
+            dependencies: ["OrchardProtocol"],
+            path: "Sources/orchard"
+        ),
+        // The app: SwiftUI shell hosting OrchardRuntime in-process.
+        .executableTarget(
+            name: "OrchardApp",
             dependencies: [
                 .product(name: "DamsonTerminal", package: "damson"),
-                "DamsonOrchestrator",
-                "OrchardControl",
+                "OrchardCore",
+                "OrchardTerminals",
+                "OrchardRuntime",
             ],
-            path: "Sources/Orchard",
+            path: "Sources/OrchardApp",
             resources: [.copy("Resources/Orchard.icns")]
         ),
-        .executableTarget(
-            name: "orchard-cli",
-            dependencies: ["OrchardControl"],
-            path: "Sources/orchard-cli"
+        .testTarget(
+            name: "OrchardCoreTests",
+            dependencies: ["OrchardCore"],
+            path: "Tests/OrchardCoreTests"
         ),
         .testTarget(
-            name: "DamsonOrchestratorTests",
-            dependencies: ["DamsonOrchestrator"],
-            path: "Tests/DamsonOrchestratorTests"
+            name: "OrchardTerminalsTests",
+            dependencies: ["OrchardTerminals", "OrchardCore"],
+            path: "Tests/OrchardTerminalsTests"
+        ),
+        .testTarget(
+            name: "OrchardOrchestrationTests",
+            dependencies: ["OrchardOrchestration"],
+            path: "Tests/OrchardOrchestrationTests"
+        ),
+        .testTarget(
+            name: "OrchardRuntimeTests",
+            dependencies: ["OrchardRuntime", "OrchardProtocol"],
+            path: "Tests/OrchardRuntimeTests"
         ),
     ]
 )

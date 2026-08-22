@@ -1,4 +1,5 @@
 import Foundation
+import OrchardCore
 
 /// First-class engine for Anthropic's `claude` CLI (Claude Code).
 ///

@@ -1,4 +1,5 @@
 import Foundation
+import OrchardCore
 
 /// Infers an `AgentRuntimeState` from a stream of `ReadinessSnapshot`s.
 ///

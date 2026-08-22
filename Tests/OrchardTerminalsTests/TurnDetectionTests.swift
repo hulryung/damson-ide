@@ -1,5 +1,6 @@
 import XCTest
-@testable import DamsonOrchestrator
+import OrchardCore
+@testable import OrchardTerminals
 
 /// Covers the 3-tier turn-completion detection: the loopback hook server transport,
 /// the Claude Code event→state mapping, and the detector precedence that makes a
