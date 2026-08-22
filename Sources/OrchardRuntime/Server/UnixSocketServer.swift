@@ -1,0 +1,100 @@
+import Darwin
+import Foundation
+import OrchardProtocol
+
+public enum UnixSocketServerError: Error { case pathTooLong, bindFailed(Int32), listenFailed(Int32) }
+
+public final class UnixSocketServer: @unchecked Sendable {
+    public let metadata: RuntimeMetadata
+    private let registry: CommandRegistry
+    private let socketFD: Int32
+    private let queue = DispatchQueue(label: "orchard.runtime.socket", attributes: .concurrent)
+    private var source: DispatchSourceRead?
+
+    public init(registry: CommandRegistry, fileManager: FileManager = .default,
+                runtimeId: String = "rt_" + UUID().uuidString,
+                authToken: String = UUID().uuidString.replacingOccurrences(of: "-", with: "")) throws {
+        RuntimeDiscovery.sweepStale(fileManager: fileManager)
+        let paths = try RuntimePaths.prepare(fileManager: fileManager)
+        let socketURL = paths.run.appendingPathComponent("orchard-\(getpid()).sock")
+        guard socketURL.path.utf8.count < MemoryLayout.size(ofValue: sockaddr_un().sun_path) else {
+            throw UnixSocketServerError.pathTooLong
+        }
+        try? fileManager.removeItem(at: socketURL)
+        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        var address = sockaddr_un(); address.sun_family = sa_family_t(AF_UNIX)
+        withUnsafeMutableBytes(of: &address.sun_path) { bytes in
+            if let base = bytes.baseAddress { memset(base, 0, bytes.count) }
+            socketURL.path.utf8CString.withUnsafeBytes { source in bytes.copyBytes(from: source) }
+        }
+        let length = socklen_t(MemoryLayout<sa_family_t>.size + socketURL.path.utf8.count + 1)
+        let result = withUnsafePointer(to: &address) { pointer in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(fd, $0, length) }
+        }
+        guard result == 0 else { Darwin.close(fd); throw UnixSocketServerError.bindFailed(errno) }
+        chmod(socketURL.path, 0o600)
+        guard Darwin.listen(fd, 32) == 0 else { Darwin.close(fd); throw UnixSocketServerError.listenFailed(errno) }
+        socketFD = fd; self.registry = registry
+        metadata = RuntimeMetadata(runtimeId: runtimeId, pid: getpid(), socketPath: socketURL.path,
+                                   authToken: authToken)
+        try fileManager.createDirectory(at: paths.data, withIntermediateDirectories: true,
+                                        attributes: [.posixPermissions: 0o700])
+        let data = try JSONEncoder.orchard.encode(metadata)
+        let temp = RuntimePaths.metadataURL(fileManager: fileManager).appendingPathExtension("tmp")
+        try data.write(to: temp, options: .atomic)
+        chmod(temp.path, 0o600)
+        let destination = RuntimePaths.metadataURL(fileManager: fileManager)
+        if fileManager.fileExists(atPath: destination.path) { _ = try fileManager.replaceItemAt(destination, withItemAt: temp) }
+        else { try fileManager.moveItem(at: temp, to: destination) }
+    }
+
+    public func start() {
+        let source = DispatchSource.makeReadSource(fileDescriptor: socketFD, queue: queue)
+        source.setEventHandler { [weak self] in self?.acceptAvailable() }
+        source.setCancelHandler { [socketFD] in Darwin.close(socketFD) }
+        self.source = source; source.resume()
+    }
+
+    public func stop(fileManager: FileManager = .default) {
+        source?.cancel(); source = nil
+        try? fileManager.removeItem(atPath: metadata.socketPath)
+        if let current = try? RuntimeDiscovery.load(fileManager: fileManager), current.runtimeId == metadata.runtimeId {
+            try? fileManager.removeItem(at: RuntimePaths.metadataURL(fileManager: fileManager))
+        }
+    }
+
+    private func acceptAvailable() {
+        let fd = Darwin.accept(socketFD, nil, nil)
+        guard fd >= 0 else { return }
+        queue.async { [weak self] in self?.serve(fd); Darwin.close(fd) }
+    }
+
+    private func serve(_ fd: Int32) {
+        var data = Data(); var byte: UInt8 = 0
+        while data.count < 4 * 1024 * 1024 {
+            let count = Darwin.read(fd, &byte, 1)
+            if count <= 0 || byte == 10 { break }
+            data.append(byte)
+        }
+        guard let request = try? JSONDecoder.orchard.decode(RPCRequest.self, from: data) else {
+            write(.failure(id: "unknown", error: RPCError(code: "invalid_request", message: "request is not valid JSON")), to: fd); return
+        }
+        guard request.authToken == metadata.authToken else {
+            write(.failure(id: request.id, error: RPCError(code: "unauthorized", message: "invalid runtime auth token")), to: fd); return
+        }
+        let semaphore = DispatchSemaphore(value: 0)
+        var response: RPCResponse?
+        Task { response = await registry.route(request); semaphore.signal() }
+        while semaphore.wait(timeout: .now() + 15) == .timedOut {
+            _ = Darwin.write(fd, Array("{\"_keepalive\":true}\n".utf8), 20)
+        }
+        let routed = response ?? .failure(id: request.id, error: RPCError(code: "internal_error", message: "handler returned no response"))
+        write(RPCResponse(id: routed.id, ok: routed.ok, result: routed.result, error: routed.error,
+                          meta: RPCMeta(runtimeId: metadata.runtimeId)), to: fd)
+    }
+
+    private func write(_ response: RPCResponse, to fd: Int32) {
+        guard var data = try? JSONEncoder.orchard.encode(response) else { return }
+        data.append(10); data.withUnsafeBytes { if let base = $0.baseAddress { _ = Darwin.write(fd, base, data.count) } }
+    }
+}

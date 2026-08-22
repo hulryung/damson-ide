@@ -15,11 +15,16 @@ public struct RPCRequest: Codable, Equatable, Sendable {
     /// Verb-specific arguments. Kept schemaless at the envelope layer; each handler
     /// decodes what it needs.
     public let params: JSONValue?
+    /// Runtime metadata auth token. Local filesystem permissions are the first boundary;
+    /// this token prevents unrelated local clients that merely discover the socket path.
+    public let authToken: String?
 
-    public init(id: String = UUID().uuidString, method: String, params: JSONValue? = nil) {
+    public init(id: String = UUID().uuidString, method: String, params: JSONValue? = nil,
+                authToken: String? = nil) {
         self.id = id
         self.method = method
         self.params = params
+        self.authToken = authToken
     }
 }
 
@@ -130,4 +135,8 @@ public indirect enum JSONValue: Codable, Equatable, Sendable {
         if case let .object(o) = self { return o }
         return nil
     }
+
+    public var boolValue: Bool? { if case let .bool(value) = self { return value }; return nil }
+    public var numberValue: Double? { if case let .number(value) = self { return value }; return nil }
+    public var arrayValue: [JSONValue]? { if case let .array(value) = self { return value }; return nil }
 }
