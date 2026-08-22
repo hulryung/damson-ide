@@ -1,0 +1,414 @@
+import Foundation
+import OrchardCore
+
+/// The terminal domain service behind the `terminal *` RPC verbs: creation, listing,
+/// two-source reads, verified sends, tui-idle/exit waits, per-terminal agent-status
+/// streams, close and rename. UI-free; the app and the runtime server both drive it.
+///
+/// Concurrency shape: the whole service lives on the main actor with the sessions and
+/// detectors it composes. Long operations (`send`, `wait`) suspend, never block; sends
+/// are additionally serialized per PTY through each record's `SerialGate`.
+@MainActor
+public final class TerminalService {
+    private let registry: TerminalRegistry
+    private let factory: TerminalSessionFactory
+    private let pipeline: SendPipelineConfig
+    private let detectorConfig: ReadinessDetector.Config
+
+    /// Default `terminal wait` timeout (the "default timeout enforced" rule — a wait
+    /// with no bound would hang a coordinator forever on a wedged agent).
+    public static let defaultWaitTimeout: TimeInterval = 60
+
+    public init(registry: TerminalRegistry = TerminalRegistry(),
+                factory: @escaping TerminalSessionFactory,
+                pipeline: SendPipelineConfig = SendPipelineConfig(),
+                detectorConfig: ReadinessDetector.Config = ReadinessDetector.Config()) {
+        self.registry = registry
+        self.factory = factory
+        self.pipeline = pipeline
+        self.detectorConfig = detectorConfig
+    }
+
+    // MARK: - Create / list / close / rename
+
+    @discardableResult
+    public func create(worktreeId: String? = nil, cwd: String? = nil,
+                       engineID: String = "shell", prompt: String = "",
+                       title: String? = nil) throws -> TerminalSummary {
+        guard let engine = AgentEngineRegistry.engine(id: engineID) else {
+            throw TerminalServiceError.unknownEngine(engineID)
+        }
+        let spec = TerminalCreateSpec(
+            handle: TerminalRegistry.mintHandle(),
+            paneKey: TerminalRegistry.mintPaneKey(),
+            worktreeId: worktreeId,
+            cwd: cwd,
+            engineID: engineID,
+            prompt: prompt,
+            title: title)
+        let record = try spawn(spec: spec, engine: engine)
+        registry.register(record)
+        record.tracker.lastPrompt = prompt
+        return record.summary()
+    }
+
+    public func list(worktreeId: String? = nil) -> [TerminalSummary] {
+        registry.list(worktreeId: worktreeId).map { $0.summary() }
+    }
+
+    public func close(handle: String) throws {
+        let record = try registry.resolve(handle)
+        if !record.exited {
+            record.session.terminate()
+        }
+        record.exited = true
+        // A deliberate close settles every outstanding wait: exit waiters resolve,
+        // tui-idle waiters reject (the pane can never reach idle again).
+        settleWaiters(record, exitCode: record.exitCode ?? record.session.exitCode)
+        for continuation in record.statusContinuations.values { continuation.finish() }
+        record.statusContinuations.removeAll()
+        registry.unregister(record)
+    }
+
+    @discardableResult
+    public func rename(handle: String, title: String?) throws -> TerminalSummary {
+        let record = try registry.resolve(handle)
+        record.title = title
+        return record.summary()
+    }
+
+    /// Re-issue a pane's handle (registry-level identity churn; the process is
+    /// untouched). Returns the new summary; the old handle answers stale.
+    @discardableResult
+    public func remintHandle(paneKey: String) throws -> TerminalSummary {
+        try registry.remintHandle(paneKey: paneKey).summary()
+    }
+
+    /// Spawn a fresh PTY into an existing pane (respawn): new handle, incremented
+    /// incarnation, continuous stream buffer. The old handle answers stale.
+    @discardableResult
+    public func respawn(paneKey: String) throws -> TerminalSummary {
+        guard let record = registry.record(forPaneKey: paneKey) else {
+            throw TerminalServiceError.notFound(handle: paneKey)
+        }
+        let handle = TerminalRegistry.mintHandle()
+        let spec = TerminalCreateSpec(
+            handle: handle, paneKey: record.paneKey, worktreeId: record.worktreeId,
+            cwd: record.spec.cwd, engineID: record.engine.id, prompt: "",
+            title: record.title)
+        // Spawn first: a factory failure must leave the current incarnation intact,
+        // its handle still live.
+        let session = try makeSession(spec: spec, engine: record.engine)
+        if !record.exited && !record.session.processExited {
+            record.session.terminate()
+        }
+        settleWaiters(record, exitCode: record.session.exitCode)
+        registry.retireHandle(record.handle, paneKey: record.paneKey)
+        let agentSession = makeAgentSession(spec: spec, engine: record.engine, session: session)
+        record.adopt(handle: handle, session: session, agentSession: agentSession)
+        registry.register(record)
+        wireStateChanges(record)
+        return record.summary()
+    }
+
+    // MARK: - Read
+
+    public func read(handle: String, cursor: Int? = nil, limit: Int = 200,
+                     screen: Bool = false) throws -> TerminalReadResult {
+        let record = try registry.resolve(handle)
+        let status = record.connected ? "running" : "exited"
+        if screen {
+            let grid = record.session.gridSnapshot()
+            var lines = grid.lines
+            while let last = lines.last, last.isEmpty { lines.removeLast() }
+            if grid.rows > 0 {
+                return TerminalReadResult(
+                    handle: record.handle, status: status, lines: lines, source: .screen,
+                    oldestCursor: nil, nextCursor: nil, latestCursor: nil,
+                    truncated: false, returnedLineCount: lines.count)
+            }
+            // No renderable frame — fall through to the stream, and say so.
+            let page = record.buffer.page(cursor: cursor, limit: limit)
+            return streamResult(record, status: status, page: page, source: .screenUnavailable)
+        }
+        let page = record.buffer.page(cursor: cursor, limit: limit)
+        return streamResult(record, status: status, page: page, source: .stream)
+    }
+
+    private func streamResult(_ record: TerminalRecord, status: String,
+                              page: TerminalStreamBuffer.Page,
+                              source: TerminalReadResult.Source) -> TerminalReadResult {
+        TerminalReadResult(
+            handle: record.handle, status: status, lines: page.lines, source: source,
+            oldestCursor: record.buffer.oldestCursor, nextCursor: page.nextCursor,
+            latestCursor: record.buffer.latestCursor, truncated: page.truncated,
+            returnedLineCount: page.lines.count)
+    }
+
+    // MARK: - Send
+
+    /// Deliver input to a terminal. Prompt submissions to an idle agent TUI go through
+    /// the full verified injection pipeline; the agent-sendable guard produces the
+    /// typed `no-agent` / `permission` refusals.
+    ///
+    /// `requireAgent` mirrors Orca's `requireAgentStatus: 'sendable'`: nil (default)
+    /// guards exactly the sends that need it — text submissions into an agent-TUI
+    /// terminal; `true` demands a sendable agent for any terminal (a shell then refuses
+    /// `no-agent`); `false` skips the guard for a raw write the caller takes
+    /// responsibility for.
+    public func send(handle: String, text: String? = nil, enter: Bool = false,
+                     interrupt: Bool = false,
+                     requireAgent: Bool? = nil) async throws -> TerminalSendResult {
+        let record = try registry.resolve(handle)
+        return try await record.sendGate.run { [self] in
+            try await performSend(record: record, text: text, enter: enter,
+                                  interrupt: interrupt, requireAgent: requireAgent)
+        }
+    }
+
+    private func performSend(record: TerminalRecord, text: String?, enter: Bool,
+                             interrupt: Bool,
+                             requireAgent: Bool?) async throws -> TerminalSendResult {
+        if record.exited || record.session.processExited {
+            throw TerminalServiceError.exited(handle: record.handle)
+        }
+        let hasText = !(text ?? "").isEmpty
+        let agentTerminal = record.engine.usesLongRunningTUI
+        let guarded = requireAgent ?? (hasText && enter && agentTerminal)
+        if guarded {
+            guard record.isRunningAgent else {
+                return .refused(handle: record.handle, reason: .noAgent)
+            }
+            if record.tracker.currentState.runtimeProjection == .permission {
+                return .refused(handle: record.handle, reason: .permission)
+            }
+        }
+
+        var written = 0
+        if interrupt {
+            record.agentSession.interrupt()   // Ctrl-C + Tier-3 idle inference
+            written += 1
+        }
+        guard let text, hasText else {
+            if enter {
+                record.session.write(Data([0x0D]))
+                written += 1
+            }
+            return .delivered(handle: record.handle, bytesWritten: written)
+        }
+
+        let sanitized = PromptInjector.sanitize(text)
+        let wasIdle = record.agentSession.state == .idle
+        written += await PromptInjector.type(sanitized, into: record.session,
+                                             chunkSize: pipeline.chunkSize)
+        if enter {
+            if agentTerminal {
+                if wasIdle {
+                    // The full verified path: delayed CR, then proof the agent left
+                    // idle. Only an idle start makes "left idle" meaningful.
+                    try await PromptInjector.submitAndVerify(
+                        session: record.session, handle: record.handle,
+                        config: pipeline) { record.agentSession.state }
+                    record.tracker.lastPrompt = text
+                    record.agentSession.notePromptDelivered()
+                } else {
+                    // Queued into a busy agent: still give the TUI its settle beat,
+                    // but there is no idle departure to verify.
+                    try? await Task.sleep(nanoseconds: UInt64(pipeline.submitDelay * 1_000_000_000))
+                    record.session.write(Data([0x0D]))
+                }
+            } else {
+                record.session.write(Data([0x0D]))
+            }
+            written += 1
+        }
+        return .delivered(handle: record.handle, bytesWritten: written)
+    }
+
+    // MARK: - Wait
+
+    /// Wait for `tui-idle` or `exit` (orca-inventory §3 rules): only `idle` satisfies
+    /// tui-idle (`permission` does not); an already-idle last status fast-paths; any
+    /// transition to idle resolves; the last-status record is never cleared by a
+    /// consuming waiter; PTY exit rejects tui-idle waiters immediately; the default
+    /// timeout is enforced and returns a checkpoint, not an error.
+    public func wait(handle: String, for condition: TerminalWaitCondition,
+                     timeout: TimeInterval? = nil) async throws -> TerminalWaitResult {
+        let record = try registry.resolve(handle)
+        let timeout = timeout ?? Self.defaultWaitTimeout
+
+        // Fast paths off the (never-cleared) factual record.
+        switch condition {
+        case .exit:
+            if record.exited || record.session.processExited {
+                return waitResult(record, condition: .exit, satisfied: true, timedOut: false)
+            }
+        case .tuiIdle:
+            if record.exited || record.session.processExited {
+                throw TerminalServiceError.exited(handle: record.handle)
+            }
+            if record.tracker.currentState == .idle {
+                return waitResult(record, condition: .tuiIdle, satisfied: true, timedOut: false)
+            }
+        }
+
+        let waiterID = UUID()
+        return try await withCheckedThrowingContinuation { continuation in
+            record.waiters[waiterID] = TerminalRecord.Waiter(condition: condition,
+                                                            continuation: continuation)
+            // A fired timeout that finds its waiter already resolved is a no-op —
+            // whoever removes the waiter from the map owns the (single) resume.
+            Task { @MainActor [weak self, weak record] in
+                try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+                guard let self, let record,
+                      let waiter = record.waiters.removeValue(forKey: waiterID) else { return }
+                waiter.continuation.resume(returning: self.waitResult(
+                    record, condition: waiter.condition, satisfied: false, timedOut: true))
+            }
+        }
+    }
+
+    private func waitResult(_ record: TerminalRecord, condition: TerminalWaitCondition,
+                            satisfied: Bool, timedOut: Bool) -> TerminalWaitResult {
+        TerminalWaitResult(
+            handle: record.handle,
+            condition: condition,
+            satisfied: satisfied,
+            timedOut: timedOut,
+            agentState: record.isRunningAgent ? record.tracker.currentState.runtimeProjection : nil,
+            exitCode: record.exitCode ?? record.session.exitCode)
+    }
+
+    // MARK: - Agent status
+
+    /// The current `AgentStatusEntry`-shaped snapshot for one terminal.
+    public func agentStatus(handle: String) throws -> AgentStatusSnapshot {
+        try registry.resolve(handle).statusSnapshot()
+    }
+
+    /// A live stream of status snapshots for one terminal. Emits the current snapshot
+    /// immediately (the never-cleared last status), then one per state update; finishes
+    /// when the terminal is closed.
+    public func agentStatusUpdates(handle: String) throws -> AsyncStream<AgentStatusSnapshot> {
+        let record = try registry.resolve(handle)
+        let id = UUID()
+        return AsyncStream { continuation in
+            continuation.yield(record.statusSnapshot())
+            record.statusContinuations[id] = continuation
+            continuation.onTermination = { _ in
+                Task { @MainActor in
+                    record.statusContinuations.removeValue(forKey: id)
+                }
+            }
+        }
+    }
+
+    // MARK: - Spawn plumbing
+
+    private func spawn(spec: TerminalCreateSpec, engine: AgentEngine) throws -> TerminalRecord {
+        let session = try makeSession(spec: spec, engine: engine)
+        let agentSession = makeAgentSession(spec: spec, engine: engine, session: session)
+        let record = TerminalRecord(handle: spec.handle, spec: spec, engine: engine,
+                                    session: session, agentSession: agentSession)
+        wireStateChanges(record)
+        return record
+    }
+
+    private func makeSession(spec: TerminalCreateSpec, engine: AgentEngine) throws -> TerminalSession {
+        do {
+            return try factory(spec, engine)
+        } catch let error as TerminalServiceError {
+            throw error
+        } catch {
+            throw TerminalServiceError.spawnFailed(String(describing: error))
+        }
+    }
+
+    private func makeAgentSession(spec: TerminalCreateSpec, engine: AgentEngine,
+                                  session: TerminalSession) -> AgentSession {
+        let task = AgentTask(title: spec.title ?? engine.displayName,
+                             prompt: spec.prompt,
+                             engineID: engine.id,
+                             baseRepoPath: "")
+        return AgentSession(engine: engine, terminal: session, worktree: nil, task: task,
+                            detectorConfig: detectorConfig)
+    }
+
+    /// Route every fused-state transition into the tracker, the status streams, the
+    /// waiters, and the once-only initial prompt delivery.
+    private func wireStateChanges(_ record: TerminalRecord) {
+        record.agentSession.onStateChange = { [weak self, weak record] state in
+            guard let self, let record else { return }
+            self.stateChanged(record, state: state)
+        }
+    }
+
+    private func stateChanged(_ record: TerminalRecord, state: AgentRuntimeState) {
+        record.tracker.note(state)
+        let snapshot = record.statusSnapshot()
+        for continuation in record.statusContinuations.values {
+            continuation.yield(snapshot)
+        }
+
+        switch state {
+        case .idle:
+            resolveWaiters(record, condition: .tuiIdle, satisfied: true)
+            deliverInitialPromptIfNeeded(record)
+        case .finished(let code):
+            record.exited = true
+            record.exitCode = code
+            settleWaiters(record, exitCode: code)
+        case .errored:
+            if record.session.processExited {
+                record.exited = true
+                record.exitCode = record.session.exitCode
+                settleWaiters(record, exitCode: record.exitCode)
+            }
+        default:
+            break
+        }
+    }
+
+    /// `.typeWhenIdle` engines get the task prompt exactly once, on the first idle,
+    /// through the same verified pipeline `send` uses.
+    private func deliverInitialPromptIfNeeded(_ record: TerminalRecord) {
+        guard record.engine.promptDelivery == .typeWhenIdle,
+              !record.spec.prompt.isEmpty,
+              !record.initialPromptStarted,
+              !record.agentSession.hasDeliveredInitialPrompt else { return }
+        record.initialPromptStarted = true
+        let prompt = record.spec.prompt
+        Task { @MainActor [weak self, weak record] in
+            guard let self, let record else { return }
+            _ = try? await self.send(handle: record.handle, text: prompt, enter: true)
+        }
+    }
+
+    /// PTY exit (or deliberate close) settles all waiters: exit waiters resolve
+    /// satisfied; tui-idle waiters reject — the pane can never reach idle.
+    private func settleWaiters(_ record: TerminalRecord, exitCode: Int32?) {
+        record.exitCode = record.exitCode ?? exitCode
+        let waiters = record.waiters
+        record.waiters.removeAll()
+        for waiter in waiters.values {
+            switch waiter.condition {
+            case .exit:
+                waiter.continuation.resume(returning: waitResult(
+                    record, condition: .exit, satisfied: true, timedOut: false))
+            case .tuiIdle:
+                waiter.continuation.resume(
+                    throwing: TerminalServiceError.exited(handle: record.handle))
+            }
+        }
+    }
+
+    private func resolveWaiters(_ record: TerminalRecord, condition: TerminalWaitCondition,
+                                satisfied: Bool) {
+        let matching = record.waiters.filter { $0.value.condition == condition }
+        for (id, waiter) in matching {
+            record.waiters.removeValue(forKey: id)
+            waiter.continuation.resume(returning: waitResult(
+                record, condition: condition, satisfied: satisfied, timedOut: false))
+        }
+    }
+}

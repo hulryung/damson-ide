@@ -12,6 +12,7 @@ public struct ClaudeCodeEngine: AgentEngine {
 
     public var id: String { "claude-code" }
     public var displayName: String { "Claude Code" }
+    public var agentType: String { "claude" }
     public var usesLongRunningTUI: Bool { true }
     public var promptDelivery: PromptDelivery { .typeWhenIdle }
 

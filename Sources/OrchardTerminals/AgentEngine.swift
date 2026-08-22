@@ -61,6 +61,11 @@ public protocol AgentEngine {
     /// encodes "PostToolUse means working, Stop means idle, permission Notification means
     /// awaiting approval". Terminal states are NOT reported here — process exit owns those.
     func hookSignal(event: String, body: Data) -> AgentRuntimeState?
+
+    /// The agent-type keyword used in status entries and `@<agent>` group addresses
+    /// (Orca's `AgentType` vocabulary: "claude", "codex", "grok", "cursor", …).
+    /// Defaults to `id`; engines whose id differs from the keyword override it.
+    var agentType: String { get }
 }
 
 public extension AgentEngine {
@@ -72,12 +77,16 @@ public extension AgentEngine {
     func autoResponseKeys(_ snapshot: ReadinessSnapshot) -> [String]? { nil }
     var hookEvents: [String]? { nil }
     func hookSignal(event: String, body: Data) -> AgentRuntimeState? { nil }
+    var agentType: String { id }
 }
 
 /// Built-in engine registry. Keyed by `id`. UI/controller resolve engines from here.
 public enum AgentEngineRegistry {
     public static let all: [AgentEngine] = [
         ClaudeCodeEngine(),
+        CodexEngine(),
+        GrokEngine(),
+        CursorAgentEngine(),
         GenericShellEngine(),
     ]
 

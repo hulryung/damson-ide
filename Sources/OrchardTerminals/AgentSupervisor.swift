@@ -76,8 +76,8 @@ public final class AgentSupervisor {
 
         var config = configTemplate
         config.cwd = worktree?.path.path ?? config.cwd
-        config.argv = launchArgv(engine: engine, task: task,
-                                 worktree: worktree?.path ?? URL(fileURLWithPath: config.cwd ?? "/"))
+        config.argv = EngineLaunch.argv(engine: engine, task: task,
+                                        worktree: worktree?.path ?? URL(fileURLWithPath: config.cwd ?? "/"))
         // Let the engine shape the child environment. Without this an agent inherits
         // whatever launched Orchard — including, when Orchard is started from inside
         // another agent's session, that session's markers, which silently change how the
@@ -105,20 +105,6 @@ public final class AgentSupervisor {
         eventSink.yield(.agentSpawned(agentID: agent.id, worktreeID: worktree?.id,
                                       engineID: engineID))
         return agent
-    }
-
-    /// Wrap the engine's argv in a login shell (for PATH) unless it already is one.
-    private func launchArgv(engine: AgentEngine, task: AgentTask, worktree: URL) -> [String] {
-        let inner = engine.launchArgv(task: task, worktree: worktree)
-        if engine.launchesOwnShell { return inner }
-        let shell = DamsonConfig.loginShellPath()
-        let cmd = "exec " + inner.map(Self.shellQuote).joined(separator: " ")
-        return [shell, "-l", "-c", cmd]
-    }
-
-    private static func shellQuote(_ s: String) -> String {
-        if s.allSatisfy({ $0.isLetter || $0.isNumber || "-_./:=@".contains($0) }) { return s }
-        return "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     // MARK: - Agent state reactions

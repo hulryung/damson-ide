@@ -73,12 +73,16 @@ public struct TerminalGridSnapshot: Sendable {
 }
 
 /// The engine-agnostic subset of parsed terminal output the agent layer consumes.
-/// Deliberately smaller than damson's `DamsonOutputEvent` (no CSI/execute cases): the
-/// agent layer reads semantic signals, not the render stream. T3 extends this as the
-/// terminal service grows a real read pipeline.
+/// Deliberately smaller than damson's `DamsonOutputEvent` (no CSI case): the agent
+/// layer and the read pipeline consume semantic signals plus enough of the raw text
+/// stream to accumulate lines — cursor-movement/repaint sequences stay out, which is
+/// exactly why a repainted line shows up in the stream as stacked fragments.
 public enum TerminalOutputEvent: Sendable {
     /// Plain printed text.
     case text(String)
+    /// A C0 control byte (LF/CR/TAB/BS…) — the line-structure signal the accumulated
+    /// text stream needs; everything else about it is ignored.
+    case control(UInt8)
     /// A parsed OSC sequence's parameters (e.g. `["9999", "{...}"]` for agent status).
     case osc([String])
 }
