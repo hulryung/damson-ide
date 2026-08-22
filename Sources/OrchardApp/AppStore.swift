@@ -1,0 +1,525 @@
+import AppKit
+import Combine
+import DamsonTerminal
+import Foundation
+import UserNotifications
+import OrchardCore
+import OrchardRuntime
+import OrchardTerminals
+
+/// Top-level app client of the in-process runtime.
+///
+/// T2–T4's RPC handlers aren't in this worktree (`allow-stale-base`); the UI
+/// talks to `WorktreeService` / `AgentSupervisor` and observes their
+/// `AsyncStream<OrchardEvent>`. Views must not spawn PTYs or keep engine
+/// sessions of their own — shells live here, keyed by tab id.
+@MainActor
+final class AppStore: ObservableObject {
+    let settings: OrchardSettings
+    let meta: WorkspaceMetaStore
+    /// Reserved so the app hosts OrchardRuntime in-process from day one.
+    let runtimeServer: InMemoryRuntimeServer
+
+    @Published var projects: [ProjectSession] = []
+    @Published var selectedProjectID: UUID?
+    @Published var selection: WorkbenchKey?
+    @Published var filterProjectID: UUID?
+    @Published var filterStatus: WorkspaceStatus?
+    @Published var ordering: CardOrdering = .manual
+
+    @Published var composerProjectID: UUID?
+    @Published var pendingDeletion: PendingDeletion?
+    @Published var isJumpPaletteOpen = false
+
+    /// Done-bucket cards stay highlighted until the user focuses them.
+    @Published var unackedDoneAgentIDs: Set<UUID> = []
+
+    /// Currently focused tab group, so split/new-tab commands have a target.
+    @Published var focusedGroupID: UUID?
+
+    @Published var layouts: [WorkbenchKey: SplitNode] = [:]
+
+    var focusMainWindow: (() -> Void)?
+    var showDashboard: (() -> Void)?
+    var showSettings: (() -> Void)?
+
+    private var shells: [UUID: DamsonSession] = [:]
+    private var cancellables = Set<AnyCancellable>()
+    private let defaults = UserDefaults.standard
+    private let workspacesKey = "orchard.workspaces"
+    private var notificationsAuthorized = false
+
+    struct PendingDeletion: Identifiable {
+        let id: UUID
+        let projectID: UUID
+        let record: WorktreeRecord
+    }
+
+    init(settings: OrchardSettings, meta: WorkspaceMetaStore? = nil) {
+        self.settings = settings
+        self.meta = meta ?? WorkspaceMetaStore()
+        let registry = CommandRegistry()
+        _ = registry.registeredVerbs
+        self.runtimeServer = InMemoryRuntimeServer(registry: registry)
+        settings.onTerminalConfigChange = { [weak self] in
+            self?.applyTerminalConfigToAll()
+        }
+        self.meta.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &cancellables)
+        requestNotificationPermission()
+    }
+
+    var selectedProject: ProjectSession? {
+        projects.first { $0.id == selectedProjectID }
+    }
+
+    var selectedRecord: WorktreeRecord? {
+        guard case let .worktree(id) = selection else { return nil }
+        for project in projects {
+            if let record = project.record(id: id) { return record }
+        }
+        return nil
+    }
+
+    var canCreateWorktree: Bool {
+        selectedProject?.worktrees.isGitRepository ?? false
+    }
+
+    var visibleProjects: [ProjectSession] {
+        if let filterProjectID {
+            return projects.filter { $0.id == filterProjectID }
+        }
+        return projects
+    }
+
+    func visibleRecords(in project: ProjectSession) -> [WorktreeRecord] {
+        var cards = project.records
+        if let filterStatus {
+            cards = cards.filter { meta.status(for: $0.id) == filterStatus }
+        }
+        switch ordering {
+        case .manual:
+            cards.sort { meta.sortOrder(for: $0.id) < meta.sortOrder(for: $1.id) }
+        case .recent:
+            cards.sort { meta.lastActivity(for: $0.id) > meta.lastActivity(for: $1.id) }
+        }
+        return cards
+    }
+
+    func project(owning record: WorktreeRecord) -> ProjectSession? {
+        projects.first { $0.record(id: record.id) != nil }
+    }
+
+    func project(containingAgent id: UUID) -> ProjectSession? {
+        projects.first { $0.agents.agents.contains { $0.id == id } }
+    }
+
+    // MARK: - Selection
+
+    func select(_ record: WorktreeRecord, in project: ProjectSession) {
+        selectedProjectID = project.id
+        selection = .worktree(record.id)
+        record.hasUnseenActivity = false
+        meta.touch(record.id)
+        ensureLayout(for: .worktree(record.id))
+        Task { await record.refresh() }
+    }
+
+    func selectProjectRoot(_ project: ProjectSession) {
+        selectedProjectID = project.id
+        selection = .projectRoot(project.id)
+        ensureLayout(for: .projectRoot(project.id))
+        Task { await project.refreshCheckout() }
+    }
+
+    func focus(agentID: UUID) {
+        guard let project = project(containingAgent: agentID),
+              let agent = project.agents.agents.first(where: { $0.id == agentID })
+        else { return }
+        unackedDoneAgentIDs.remove(agentID)
+        if let worktreeID = agent.worktree?.id, let record = project.record(id: worktreeID) {
+            select(record, in: project)
+            bindAgentTab(agent, key: .worktree(worktreeID))
+        } else {
+            selectProjectRoot(project)
+            bindAgentTab(agent, key: .projectRoot(project.id))
+        }
+        focusMainWindow?()
+    }
+
+    // MARK: - Projects
+
+    func restore() {
+        guard let paths = defaults.stringArray(forKey: workspacesKey) else { return }
+        for path in paths {
+            let url = URL(fileURLWithPath: path)
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue
+            else { continue }
+            addProject(repo: url, silent: true)
+        }
+    }
+
+    func addProjectViaPanel() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Open Project"
+        panel.message = "Choose a git repository to orchestrate agents in."
+        NSApp.activate(ignoringOtherApps: true)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        addProject(repo: url)
+    }
+
+    func addProject(repo: URL, silent: Bool = false) {
+        if let existing = projects.first(where: {
+            $0.repo.standardizedFileURL == repo.standardizedFileURL
+        }) {
+            selectedProjectID = existing.id
+            selection = defaultSelection(for: existing)
+            return
+        }
+        do {
+            let project = try ProjectSession(repo: repo, settings: settings)
+            project.onEvent = { [weak self] project, event in
+                self?.handle(event, from: project)
+            }
+            for record in project.records {
+                _ = meta.ensure(record.id)
+            }
+            projects.append(project)
+            selectedProjectID = project.id
+            selection = defaultSelection(for: project)
+            persistProjects()
+        } catch {
+            guard !silent else { return }
+            let alert = NSAlert()
+            alert.messageText = "Couldn't open project"
+            alert.informativeText = String(describing: error)
+            alert.runModal()
+        }
+    }
+
+    func removeProject(_ project: ProjectSession) {
+        project.shutdown()
+        dropWorkbench(for: project)
+        projects.removeAll { $0.id == project.id }
+        if selectedProjectID == project.id {
+            selectedProjectID = projects.first?.id
+            selection = projects.first.map(defaultSelection(for:))
+        }
+        persistProjects()
+    }
+
+    private func defaultSelection(for project: ProjectSession) -> WorkbenchKey {
+        if let last = project.records.last { return .worktree(last.id) }
+        return .projectRoot(project.id)
+    }
+
+    private func persistProjects() {
+        defaults.set(projects.map { $0.repo.path }, forKey: workspacesKey)
+    }
+
+    func shutdownAll() {
+        for project in projects { project.shutdown() }
+        for session in shells.values { session.terminate() }
+        shells.removeAll()
+    }
+
+    // MARK: - Composer / delete
+
+    func requestNewWorktree() {
+        guard let project = selectedProject else {
+            addProjectViaPanel()
+            return
+        }
+        guard project.worktrees.isGitRepository else { return }
+        composerProjectID = project.id
+    }
+
+    func compose(project: ProjectSession, name: String, prompt: String,
+                 engine: ComposerEngine, baseRef: String?, count: Int) throws {
+        let engineID = engine.resolvedEngineID
+        guard AgentEngineRegistry.engine(id: engineID) != nil else {
+            throw GitError("\(engine.displayName) isn't registered in this build — it lands with the terminal service.")
+        }
+        var first: WorktreeRecord?
+        for _ in 0..<max(1, count) {
+            let record = try project.worktrees.createWorktree(
+                name: name, baseRef: baseRef, title: name)
+            project.worktrees.runSetupScriptIfEnabled(for: record)
+            _ = meta.ensure(record.id, status: .inProgress)
+            meta.setStatus(.inProgress, for: record.id)
+            let agent = try project.agents.spawnAgent(
+                engineID: engineID, prompt: prompt, in: record.worktree, title: name)
+            record.agentState = agent.state
+            record.lastPrompt = prompt.isEmpty ? nil : prompt
+            bindAgentTab(agent, key: .worktree(record.id))
+            if first == nil { first = record }
+        }
+        project.syncRecords()
+        if let first { select(first, in: project) }
+    }
+
+    func startAgent(in record: WorktreeRecord, project: ProjectSession, engine: ComposerEngine) throws {
+        let engineID = engine.resolvedEngineID
+        guard AgentEngineRegistry.engine(id: engineID) != nil else {
+            throw GitError("\(engine.displayName) isn't registered in this build.")
+        }
+        let agent = try project.agents.spawnAgent(
+            engineID: engineID,
+            prompt: record.lastPrompt ?? "",
+            in: record.worktree,
+            title: record.title)
+        record.agentState = agent.state
+        bindAgentTab(agent, key: .worktree(record.id))
+        select(record, in: project)
+    }
+
+    func requestDelete(_ record: WorktreeRecord, in project: ProjectSession) {
+        pendingDeletion = PendingDeletion(id: record.id, projectID: project.id, record: record)
+    }
+
+    func deleteWorktree(_ record: WorktreeRecord, in project: ProjectSession,
+                        force: Bool, deleteBranch: Bool) throws -> Bool {
+        project.agents.retireAgents(inWorktree: record.id)
+        let removed = try project.worktrees.deleteWorktree(
+            record, force: force, deleteBranch: deleteBranch)
+        guard removed else { return false }
+        meta.remove(record.id)
+        layouts[.worktree(record.id)] = nil
+        if case .worktree(let id) = selection, id == record.id {
+            selection = defaultSelection(for: project)
+        }
+        project.syncRecords()
+        return true
+    }
+
+    // MARK: - Workbench
+
+    func layout(for key: WorkbenchKey) -> SplitNode {
+        ensureLayout(for: key)
+        return layouts[key] ?? .makeDefault()
+    }
+
+    @discardableResult
+    func ensureLayout(for key: WorkbenchKey) -> SplitNode {
+        if let existing = layouts[key] { return existing }
+        let node = SplitNode.makeDefault()
+        layouts[key] = node
+        focusedGroupID = node.firstGroupID()
+        return node
+    }
+
+    func updateLayout(_ key: WorkbenchKey, _ body: (inout SplitNode) -> Void) {
+        var node = layout(for: key)
+        body(&node)
+        layouts[key] = node
+    }
+
+    func addTab(_ kind: TabKind, to groupID: UUID, key: WorkbenchKey, agentID: UUID? = nil) {
+        let tab = WorkbenchTab(kind: kind, agentID: agentID)
+        updateLayout(key) { node in
+            _ = node.mutateGroup(groupID) { group in
+                group.tabs.append(tab)
+                group.selectedID = tab.id
+            }
+        }
+    }
+
+    func selectTab(_ tabID: UUID, in groupID: UUID, key: WorkbenchKey) {
+        updateLayout(key) { node in
+            _ = node.mutateGroup(groupID) { group in
+                group.selectedID = tabID
+            }
+        }
+        focusedGroupID = groupID
+    }
+
+    func closeTab(_ tabID: UUID, in groupID: UUID, key: WorkbenchKey) {
+        if let session = shells.removeValue(forKey: tabID) {
+            session.terminate()
+        }
+        updateLayout(key) { node in
+            _ = node.mutateGroup(groupID) { group in
+                guard group.tabs.count > 1 else { return }
+                group.tabs.removeAll { $0.id == tabID }
+                if group.selectedID == tabID {
+                    group.selectedID = group.tabs.last?.id ?? group.selectedID
+                }
+            }
+        }
+    }
+
+    func splitFocused(axis: SplitAxis) {
+        guard let key = selection, let groupID = focusedGroupID else { return }
+        updateLayout(key) { node in
+            _ = node.splitGroup(groupID, axis: axis)
+        }
+    }
+
+    func bindAgentTab(_ agent: AgentSession, key: WorkbenchKey) {
+        var node = ensureLayout(for: key)
+        var bound = false
+        if let groupID = node.firstGroupID() {
+            _ = node.mutateGroup(groupID) { group in
+                if let index = group.tabs.firstIndex(where: { $0.agentID == agent.id }) {
+                    group.selectedID = group.tabs[index].id
+                    bound = true
+                } else if let index = group.tabs.firstIndex(where: {
+                    $0.kind == .terminal && $0.agentID == nil
+                }) {
+                    group.tabs[index].agentID = agent.id
+                    group.tabs[index].title = agent.engine.displayName
+                    group.selectedID = group.tabs[index].id
+                    bound = true
+                }
+            }
+        }
+        if !bound, let groupID = node.firstGroupID() {
+            let tab = WorkbenchTab(kind: .terminal, title: agent.engine.displayName, agentID: agent.id)
+            _ = node.mutateGroup(groupID) { group in
+                group.tabs.append(tab)
+                group.selectedID = tab.id
+            }
+        }
+        layouts[key] = node
+        objectWillChange.send()
+    }
+
+    func selectKind(_ kind: TabKind) {
+        guard let key = selection else { return }
+        let node = layout(for: key)
+        guard let groupID = focusedGroupID ?? node.firstGroupID() else { return }
+        if let tab = node.selectedTab(in: groupID), tab.kind == kind { return }
+        var found: UUID?
+        _ = {
+            var copy = node
+            _ = copy.mutateGroup(groupID) { group in
+                found = group.tabs.first { $0.kind == kind }?.id
+            }
+        }()
+        if let found {
+            selectTab(found, in: groupID, key: key)
+        } else {
+            addTab(kind, to: groupID, key: key)
+        }
+    }
+
+    /// Damson session for a terminal tab. Agent tabs use the supervisor's session;
+    /// shells are owned here so views never spawn a PTY.
+    func damsonSession(for tab: WorkbenchTab, cwd: URL) -> DamsonSession? {
+        if let agentID = tab.agentID {
+            for project in projects {
+                if let agent = project.agents.agents.first(where: { $0.id == agentID }),
+                   let session = (agent.terminal as? DamsonTerminalSession)?.session {
+                    return session
+                }
+            }
+        }
+        if let existing = shells[tab.id] { return existing }
+        var config = settings.terminalConfig()
+        config.cwd = cwd.path
+        config.argv = DamsonConfig.defaultArgv()
+        let session = DamsonSession(config: config)
+        shells[tab.id] = session
+        return session
+    }
+
+    func applyShellAppearance(_ config: DamsonConfig) {
+        for session in shells.values {
+            var updated = session.config
+            updated.theme = config.theme
+            updated.fontSize = config.fontSize
+            updated.fontFamily = config.fontFamily
+            session.updateConfig(updated)
+        }
+    }
+
+    private func applyTerminalConfigToAll() {
+        let config = settings.terminalConfig()
+        for project in projects {
+            project.apply(settings)
+            project.applyTerminalConfig(config)
+        }
+        applyShellAppearance(config)
+        objectWillChange.send()
+    }
+
+    private func dropWorkbench(for project: ProjectSession) {
+        layouts[.projectRoot(project.id)] = nil
+        for record in project.records {
+            layouts[.worktree(record.id)] = nil
+        }
+    }
+
+    // MARK: - Events
+
+    private func handle(_ event: OrchardEvent, from project: ProjectSession) {
+        switch event {
+        case .agentSpawned(let agentID, let worktreeID, _):
+            meta.touch(worktreeID ?? project.id)
+            if let worktreeID, let agent = project.agents.agents.first(where: { $0.id == agentID }) {
+                bindAgentTab(agent, key: .worktree(worktreeID))
+            }
+        case .agentStateChanged(_, let worktreeID, let state):
+            if let worktreeID { meta.touch(worktreeID) }
+            if case .finished = state { /* highlighted via needsAttention */ break }
+            if case .errored = state { break }
+            _ = state
+        case .agentNeedsAttention(let agentID, let worktreeID, let state):
+            if state.dashboardBucket == .done {
+                unackedDoneAgentIDs.insert(agentID)
+            }
+            let onScreen: Bool = {
+                guard case let .worktree(id) = selection, id == worktreeID else { return false }
+                return NSApp.isActive
+            }()
+            if !onScreen, let worktreeID, let record = project.record(id: worktreeID) {
+                notify(record: record, project: project, state: state)
+            }
+        case .worktreeCreated(let worktree):
+            _ = meta.ensure(worktree.id)
+        case .worktreeRemoved(let worktreeID, _):
+            meta.remove(worktreeID)
+            layouts[.worktree(worktreeID)] = nil
+        default:
+            break
+        }
+        objectWillChange.send()
+    }
+
+    // MARK: - Notifications
+
+    private func requestNotificationPermission() {
+        guard Bundle.main.bundleIdentifier != nil else { return }
+        UNUserNotificationCenter.current()
+            .requestAuthorization(options: [.alert, .sound]) { [weak self] granted, _ in
+                Task { @MainActor in self?.notificationsAuthorized = granted }
+            }
+    }
+
+    private func notify(record: WorktreeRecord, project: ProjectSession, state: AgentRuntimeState) {
+        guard notificationsAuthorized, settings.notificationsEnabled else { return }
+        if settings.notifyOnlyWhenBlocked {
+            switch state {
+            case .awaitingApproval, .awaitingInput, .errored: break
+            default: return
+            }
+        }
+        let content = UNMutableNotificationContent()
+        content.title = "\(record.title) · \(project.name)"
+        switch state {
+        case .awaitingApproval: content.body = "Waiting for your approval."
+        case .awaitingInput: content.body = "Waiting for your input."
+        case .finished: content.body = "Finished."
+        case .errored: content.body = "Stopped with an error."
+        default: content.body = "Finished a turn."
+        }
+        content.sound = (state == .awaitingApproval || state == .awaitingInput) ? .default : nil
+        UNUserNotificationCenter.current().add(
+            UNNotificationRequest(identifier: record.id.uuidString, content: content, trigger: nil))
+    }
+}
