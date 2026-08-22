@@ -28,8 +28,10 @@ public final class AgentSession: ObservableObject, Identifiable {
     private var cancellables = Set<AnyCancellable>()
     private var tick: Timer?
 
+    /// When this agent's process was spawned — drives the UI's elapsed-time display.
+    public let startedAt = Date()
+
     // Timing inputs for the detector.
-    private let spawnTime = Date()
     private var lastDataTime = Date()
     private var lastSyncFrameTime: Date?
     private var prevInSyncOutput = false
@@ -165,6 +167,9 @@ public final class AgentSession: ObservableObject, Identifiable {
     /// Short, human-friendly id used by the control CLI to address this agent.
     public var shortID: String { String(id.uuidString.prefix(8)).lowercased() }
 
+    /// The git branch this agent's worktree lives on — its isolation lane.
+    public var branchName: String? { worktree?.branch }
+
     /// The visible grid as plain text (one line per row, trailing blanks trimmed) — the
     /// CLI's `agent-output`, so an external AI can read what the agent is showing.
     public func gridText() -> String {
@@ -264,7 +269,7 @@ public final class AgentSession: ObservableObject, Identifiable {
             isAltScreen: grid.isAltScreenActive,
             timeSinceLastData: now.timeIntervalSince(lastDataTime),
             timeSinceLastSyncFrame: sinceSync,
-            timeSinceSpawn: now.timeIntervalSince(spawnTime),
+            timeSinceSpawn: now.timeIntervalSince(startedAt),
             processExited: damsonSession.processExited,
             exitCode: capturedExitCode,
             isRunningForegroundJob: damsonSession.hasRunningForegroundJob,

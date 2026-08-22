@@ -24,7 +24,11 @@ struct AgentGridView: View {
                         ForEach(0..<cols, id: \.self) { c in
                             let idx = r * cols + c
                             if idx < n {
-                                AgentTileView(agent: agents[idx]) { store.focus(agents[idx].id) }
+                                AgentTileView(
+                                    agent: agents[idx],
+                                    onMaximize: { store.focus(agents[idx].id) },
+                                    onClose: { controller.retire(agents[idx]) }
+                                )
                                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                             } else {
                                 Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -68,6 +72,7 @@ struct AgentTileView: View {
     @ObservedObject var agent: AgentSession
     @StateObject private var surfaceRef = SurfaceRef()
     var onMaximize: () -> Void
+    var onClose: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -87,17 +92,28 @@ struct AgentTileView: View {
     private var header: some View {
         HStack(spacing: 8) {
             Circle().fill(agent.state.color).frame(width: 9, height: 9)
-            Text(agent.task?.title ?? "agent")
-                .fontWeight(.medium)
-                .lineLimit(1)
-            Text(agent.state.label)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(agent.task?.title ?? "agent")
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                HStack(spacing: 6) {
+                    Text(agent.state.label)
+                    if let branch = agent.branchName {
+                        Label(branch, systemImage: "arrow.triangle.branch")
+                            .labelStyle(.titleAndIcon)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                    ElapsedLabel(since: agent.startedAt)
+                }
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Spacer()
+            }
+            Spacer(minLength: 6)
             actions
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        .padding(.vertical, 6)
         .background(store.theme.swiftElevated)
         .foregroundStyle(store.theme.swiftForeground)
     }
@@ -116,5 +132,8 @@ struct AgentTileView: View {
             .help("Interrupt (Ctrl-C)").controlSize(.small).buttonStyle(.borderless)
         Button(action: onMaximize) { Image(systemName: "arrow.up.left.and.arrow.down.right") }
             .help("Maximize (open in tabbed view)").controlSize(.small).buttonStyle(.borderless)
+        Button(action: onClose) { Image(systemName: "xmark") }
+            .help(agent.state.isTerminal ? "Dismiss this agent" : "Stop and dismiss this agent")
+            .controlSize(.small).buttonStyle(.borderless)
     }
 }

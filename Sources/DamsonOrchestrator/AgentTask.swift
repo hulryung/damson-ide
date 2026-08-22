@@ -21,6 +21,10 @@ public struct AgentTask: Codable, Equatable, Identifiable, Sendable {
     public var baseRepoPath: String
     /// Optional explicit branch name; otherwise derived from `title`.
     public var branchHint: String?
+    /// Ref the worktree forks from. `nil` uses the workspace's default base (probed
+    /// `origin/main` / `main` / …) rather than whatever happens to be checked out, so an
+    /// agent never silently inherits half-finished local work.
+    public var baseRef: String?
     public var status: Status
 
     public var createdAt: Date
@@ -34,6 +38,7 @@ public struct AgentTask: Codable, Equatable, Identifiable, Sendable {
         engineID: String,
         baseRepoPath: String,
         branchHint: String? = nil,
+        baseRef: String? = nil,
         status: Status = .pending,
         createdAt: Date = Date(),
         startedAt: Date? = nil,
@@ -45,6 +50,7 @@ public struct AgentTask: Codable, Equatable, Identifiable, Sendable {
         self.engineID = engineID
         self.baseRepoPath = baseRepoPath
         self.branchHint = branchHint
+        self.baseRef = baseRef
         self.status = status
         self.createdAt = createdAt
         self.startedAt = startedAt

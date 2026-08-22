@@ -39,8 +39,43 @@ public struct WorkspaceInfo: Codable, Sendable {
     public let name: String
     public let path: String
     public let agentCount: Int
-    public init(index: Int, name: String, path: String, agentCount: Int) {
-        self.index = index; self.name = name; self.path = path; self.agentCount = agentCount
+    public let worktreeCount: Int
+    /// Namespace new agent branches are created under (`<prefix>/<name>`).
+    public let branchPrefix: String
+    /// Ref new worktrees fork from by default.
+    public let baseRef: String
+
+    public init(index: Int, name: String, path: String, agentCount: Int,
+                worktreeCount: Int = 0, branchPrefix: String = "", baseRef: String = "") {
+        self.index = index; self.name = name; self.path = path
+        self.agentCount = agentCount; self.worktreeCount = worktreeCount
+        self.branchPrefix = branchPrefix; self.baseRef = baseRef
+    }
+}
+
+/// A persistent worktree as reported by `list-worktrees` — the durable unit, listed whether
+/// or not an agent happens to be running in it right now.
+public struct WorktreeInfo: Codable, Sendable {
+    public let id: String            // short id
+    public let workspace: Int
+    public let title: String
+    public let branch: String
+    public let path: String
+    public let state: String
+    /// Short id of the agent running here, or nil when the worktree is dormant.
+    public let agent: String?
+    public let filesChanged: Int
+    public let added: Int
+    public let deleted: Int
+    public let commitsAhead: Int
+
+    public init(id: String, workspace: Int, title: String, branch: String, path: String,
+                state: String, agent: String?, filesChanged: Int, added: Int,
+                deleted: Int, commitsAhead: Int) {
+        self.id = id; self.workspace = workspace; self.title = title; self.branch = branch
+        self.path = path; self.state = state; self.agent = agent
+        self.filesChanged = filesChanged; self.added = added
+        self.deleted = deleted; self.commitsAhead = commitsAhead
     }
 }
 
@@ -63,12 +98,15 @@ public struct OrchardResponse: Codable, Sendable {
     public var message: String?
     public var workspaces: [WorkspaceInfo]?
     public var agents: [AgentInfo]?
+    public var worktrees: [WorktreeInfo]?
     public var output: String?
 
     public init(ok: Bool, err: String? = nil, message: String? = nil,
-                workspaces: [WorkspaceInfo]? = nil, agents: [AgentInfo]? = nil, output: String? = nil) {
+                workspaces: [WorkspaceInfo]? = nil, agents: [AgentInfo]? = nil,
+                worktrees: [WorktreeInfo]? = nil, output: String? = nil) {
         self.ok = ok; self.err = err; self.message = message
-        self.workspaces = workspaces; self.agents = agents; self.output = output
+        self.workspaces = workspaces; self.agents = agents
+        self.worktrees = worktrees; self.output = output
     }
 
     public static func ok(_ message: String? = nil) -> Self { .init(ok: true, message: message) }

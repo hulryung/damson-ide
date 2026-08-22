@@ -33,6 +33,29 @@ public struct ClaudeCodeEngine: AgentEngine {
         [executablePath]
     }
 
+    /// Environment variables that mark a process as living *inside* an existing Claude Code
+    /// session. They must not reach a spawned agent.
+    ///
+    /// Orchard is frequently launched from a terminal that is itself running Claude Code, and
+    /// these markers are inherited straight through. The child then believes it is a
+    /// subprocess of that session and changes behavior — most visibly by disabling transcript
+    /// saving ("Transcript saving is off — inherited CLAUDE_CODE_CHILD_SESSION marker"). Each
+    /// agent Orchard starts is a genuinely independent top-level session, so the slate is
+    /// wiped rather than inherited.
+    static let inheritedSessionMarkers = [
+        "CLAUDECODE",
+        "CLAUDE_CODE_CHILD_SESSION",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_SSE_PORT",
+        "CLAUDE_CODE_SESSION_ID",
+    ]
+
+    public func env(base: [String: String]) -> [String: String] {
+        var env = base
+        for key in Self.inheritedSessionMarkers { env.removeValue(forKey: key) }
+        return env
+    }
+
     public func classify(_ snapshot: ReadinessSnapshot) -> AgentRuntimeState? {
         ClaudeFingerprints.classify(snapshot)
     }

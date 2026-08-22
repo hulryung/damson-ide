@@ -16,21 +16,40 @@ app.run()
 final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
     private var store: WorkspaceStore!
     private var window: NSWindow?
+    private var settingsWindow: NSWindow?
     private var controlServer: OrchardControlServer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         MainActor.assumeIsolated {
-            let store = WorkspaceStore()
+            // Orchard is a dark-only app. Pinning the appearance (rather than following the
+            // system) keeps the chrome consistent with the terminal surfaces it frames —
+            // every built-in agent theme is dark, and a light sidebar wrapped around a dark
+            // terminal reads as a rendering bug. Every semantic color in `Tokens` resolves
+            // through this, so nothing else has to know.
+            NSApp.appearance = NSAppearance(named: .darkAqua)
+
+            let store = WorkspaceStore(settings: OrchardSettings())
             self.store = store
             store.restore()
             startControlServer(store: store)
             buildMenu()
 
-            let hosting = NSHostingController(rootView: RootView().environmentObject(store))
+            NotificationCenter.default.addObserver(
+                forName: .orchardShowSettings, object: nil, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.showSettings(nil) }
+                }
+
+            let hosting = NSHostingController(
+                rootView: RootView()
+                    .environmentObject(store)
+                    .preferredColorScheme(.dark))
             let win = NSWindow(contentViewController: hosting)
             win.title = "Orchard"
             win.setContentSize(NSSize(width: 1180, height: 760))
             win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            win.appearance = NSAppearance(named: .darkAqua)
+            // A unified dark titlebar rather than a light strip above a dark sidebar.
+            win.titlebarAppearsTransparent = false
             win.center()
             win.makeKeyAndOrderFront(nil)
             self.window = win
@@ -68,13 +87,47 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Menu actions
 
+    /// Cmd-Shift-O — open another git repo as a project.
     @MainActor @objc func newWorkspace(_ sender: Any?) { store.addWorkspaceViaPanel() }
-    /// Cmd-T — new mission-less session as a TAB (stacked): pick engine, type mission in-terminal.
-    @MainActor @objc func newTask(_ sender: Any?) { store.requestNewSession(mode: .tabs) }
-    /// Cmd-D — new mission-less session BESIDE (grid/side-by-side).
-    @MainActor @objc func newAgentBeside(_ sender: Any?) { store.requestNewSession(mode: .grid) }
-    /// Compose a pre-defined mission (the old Cmd-T behavior) — also on the toolbar "+".
-    @MainActor @objc func addMission(_ sender: Any?) { store.requestAddTaskForSelected() }
+    /// Cmd-N — the primary action: create a worktree and start an agent in it.
+    @MainActor @objc func newWorktree(_ sender: Any?) { store.requestNewWorktree() }
+    /// Cmd-J — jump to any worktree across every open project.
+    @MainActor @objc func openJumpPalette(_ sender: Any?) { store.isJumpPaletteOpen = true }
+    /// Cmd-1/2/3 — switch the main pane between Agent, Diff, and Terminal.
+    @MainActor @objc func showAgentTab(_ sender: Any?) { store.mainTab = .agent }
+    @MainActor @objc func showDiffTab(_ sender: Any?) { store.mainTab = .diff }
+    @MainActor @objc func showTerminalTab(_ sender: Any?) { store.mainTab = .terminal }
+    /// Cmd-G — every agent terminal at once.
+    @MainActor @objc func toggleGridOverview(_ sender: Any?) {
+        store.showsGridOverview.toggle()
+    }
+    /// Cmd-R — re-read the selected worktree's diff.
+    @MainActor @objc func refreshDiff(_ sender: Any?) {
+        if let record = store.selectedWorktree { Task { await record.refresh() } }
+    }
+
+    /// Cmd-, — preferences. A single reused window: reopening Settings should return you to
+    /// the tab you were on, not stack another copy.
+    @MainActor @objc func showSettings(_ sender: Any?) {
+        if let settingsWindow {
+            settingsWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let hosting = NSHostingController(
+            rootView: SettingsView(settings: store.settings)
+                .environmentObject(store)
+                .preferredColorScheme(.dark))
+        let win = NSWindow(contentViewController: hosting)
+        win.title = "Settings"
+        win.styleMask = [.titled, .closable]
+        win.appearance = NSAppearance(named: .darkAqua)
+        win.isReleasedWhenClosed = false
+        win.center()
+        win.makeKeyAndOrderFront(nil)
+        settingsWindow = win
+        NSApp.activate(ignoringOtherApps: true)
+    }
 
     // Global zoom — apply to every agent terminal in the front window. (Per-terminal zoom
     // is handled by the plain Zoom In/Out items, which target the focused surface via the
@@ -105,24 +158,22 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
         appItem.submenu = appMenu
         appMenu.addItem(withTitle: "About Orchard", action: nil, keyEquivalent: "")
         appMenu.addItem(.separator())
+        let prefs = NSMenuItem(title: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
+        prefs.target = self
+        appMenu.addItem(prefs)
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit Orchard", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         let fileItem = NSMenuItem()
         mainMenu.addItem(fileItem)
         let fileMenu = NSMenu(title: "File")
         fileItem.submenu = fileMenu
-        let nw = NSMenuItem(title: "New Workspace…", action: #selector(newWorkspace(_:)), keyEquivalent: "n")
-        nw.target = self
+        let nwt = NSMenuItem(title: "New Worktree…", action: #selector(newWorktree(_:)), keyEquivalent: "n")
+        nwt.target = self
+        fileMenu.addItem(nwt)
+        let nw = NSMenuItem(title: "Open Project…", action: #selector(newWorkspace(_:)), keyEquivalent: "o")
+        nw.keyEquivalentModifierMask = [.command, .shift]; nw.target = self
         fileMenu.addItem(nw)
-        let nt = NSMenuItem(title: "New Session (Tab)…", action: #selector(newTask(_:)), keyEquivalent: "t")
-        nt.target = self
-        fileMenu.addItem(nt)
-        let nb = NSMenuItem(title: "New Session Beside…", action: #selector(newAgentBeside(_:)), keyEquivalent: "d")
-        nb.target = self
-        fileMenu.addItem(nb)
-        let am = NSMenuItem(title: "Add Mission…", action: #selector(addMission(_:)), keyEquivalent: "t")
-        am.keyEquivalentModifierMask = [.command, .shift]; am.target = self
-        fileMenu.addItem(am)
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
 
@@ -134,6 +185,29 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+
+        let goItem = NSMenuItem()
+        mainMenu.addItem(goItem)
+        let goMenu = NSMenu(title: "Go")
+        goItem.submenu = goMenu
+        let jump = NSMenuItem(title: "Jump to Worktree…", action: #selector(openJumpPalette(_:)), keyEquivalent: "j")
+        jump.target = self
+        goMenu.addItem(jump)
+        goMenu.addItem(.separator())
+        for (index, item) in [("Agent", #selector(showAgentTab(_:))),
+                              ("Diff", #selector(showDiffTab(_:))),
+                              ("Terminal", #selector(showTerminalTab(_:)))].enumerated() {
+            let menuItem = NSMenuItem(title: item.0, action: item.1, keyEquivalent: "\(index + 1)")
+            menuItem.target = self
+            goMenu.addItem(menuItem)
+        }
+        goMenu.addItem(.separator())
+        let grid = NSMenuItem(title: "All Agents", action: #selector(toggleGridOverview(_:)), keyEquivalent: "g")
+        grid.target = self
+        goMenu.addItem(grid)
+        let refresh = NSMenuItem(title: "Refresh Diff", action: #selector(refreshDiff(_:)), keyEquivalent: "r")
+        refresh.target = self
+        goMenu.addItem(refresh)
 
         let viewItem = NSMenuItem()
         mainMenu.addItem(viewItem)

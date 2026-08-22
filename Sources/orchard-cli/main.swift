@@ -24,14 +24,20 @@ func usage() -> Never {
     COMMANDS:
       list-workspaces
       add-workspace <repo-path>
+      list-worktrees [--workspace N]
+      worktree-diff <worktreeId> [--file PATH]
+      delete-worktree <worktreeId> [--force]
       list-agents [--workspace N]
       add-task --workspace N --prompt "…" [--engine claude-code] [--title T]
       agent-output <agentId>
       send-text <agentId> <text…>
       send-key  <agentId> <key> [key…]
       interrupt <agentId>
+      terminal-info
+      set-terminal [--font NAME] [--size N] [--theme NAME]
 
-    Agent ids come from `list-agents`. Output is JSON.
+    Worktree ids come from `list-worktrees`; agent ids from `list-agents`.
+    Output is JSON.
     """
     FileHandle.standardError.write(Data((text + "\n").utf8))
     exit(2)
@@ -78,6 +84,16 @@ case "add-workspace":
     command = OrchardCommand(cmd: "add-workspace", path: need(rest.first, "repo path required"))
 case "list-agents":
     command = OrchardCommand(cmd: "list-agents", workspace: flags["workspace"].flatMap(Int.init))
+case "list-worktrees":
+    command = OrchardCommand(cmd: "list-worktrees", workspace: flags["workspace"].flatMap(Int.init))
+case "worktree-diff":
+    command = OrchardCommand(cmd: "worktree-diff",
+                             agent: need(rest.first, "worktree id required"),
+                             text: flags["file"])
+case "delete-worktree":
+    command = OrchardCommand(cmd: "delete-worktree",
+                             agent: need(rest.first, "worktree id required"),
+                             text: flags["force"] != nil ? "force" : nil)
 case "set-concurrency":
     command = OrchardCommand(
         cmd: "set-concurrency",
@@ -98,6 +114,15 @@ case "view":
     command = OrchardCommand(cmd: "view", text: need(rest.first, "grid|tabs required"))
 case "show-new-session":
     command = OrchardCommand(cmd: "show-new-session")
+case "show-settings":
+    command = OrchardCommand(cmd: "show-settings")
+case "terminal-info":
+    command = OrchardCommand(cmd: "terminal-info")
+case "set-terminal":
+    command = OrchardCommand(cmd: "set-terminal",
+                             title: flags["theme"],
+                             text: flags["font"],
+                             count: flags["size"].flatMap(Int.init))
 case "new-session":
     command = OrchardCommand(
         cmd: "new-session",

@@ -92,4 +92,148 @@ final class WorktreeManagerTests: XCTestCase {
         try FileManager.default.createDirectory(at: notRepo, withIntermediateDirectories: true)
         XCTAssertThrowsError(try mgr.detectBaseRepo(from: notRepo))
     }
+
+    // MARK: - Persistence
+
+    /// The point of worktree persistence: a *different* manager instance — standing in for
+    /// a relaunched app — rebuilds the full list from the repo's git config alone.
+    func testRestoreRebuildsWorktreesAfterRelaunch() throws {
+        let repo = try makeRepo()
+        let root = tmp.appendingPathComponent("worktrees")
+        let mgr = WorktreeManager(root: root)
+        let base = try mgr.detectBaseRepo(from: repo)
+        let ref = try mgr.resolveRef("HEAD", in: base)
+
+        let one = try mgr.create(base: base, branch: "orchard/fix-parser", from: ref, title: "Fix parser")
+        let two = try mgr.create(base: base, branch: "orchard/add-tests", from: ref, title: "Add tests")
+
+        let restored = WorktreeManager(root: root).restore(repo: base)
+        XCTAssertEqual(restored.count, 2)
+
+        let byBranch = Dictionary(uniqueKeysWithValues: restored.map { ($0.branch, $0) })
+        XCTAssertEqual(byBranch["orchard/fix-parser"]?.title, "Fix parser")
+        XCTAssertEqual(byBranch["orchard/fix-parser"]?.baseRef, ref)
+        XCTAssertEqual(byBranch["orchard/fix-parser"]?.id, one.id)
+        XCTAssertEqual(byBranch["orchard/add-tests"]?.title, "Add tests")
+        XCTAssertEqual(byBranch["orchard/add-tests"]?.path.path, two.path.path)
+    }
+
+    /// A worktree removed behind the app's back must not come back as a ghost row.
+    func testRestoreDropsMetadataForVanishedWorktrees() throws {
+        let repo = try makeRepo()
+        let root = tmp.appendingPathComponent("worktrees")
+        let mgr = WorktreeManager(root: root)
+        let base = try mgr.detectBaseRepo(from: repo)
+        let ref = try mgr.resolveRef("HEAD", in: base)
+
+        let wt = try mgr.create(base: base, branch: "orchard/gone", from: ref)
+        XCTAssertEqual(mgr.restore(repo: base).count, 1)
+
+        // Remove it the way a user would, outside the app.
+        XCTAssertEqual(try git(["worktree", "remove", wt.path.path], cwd: repo), 0)
+
+        XCTAssertTrue(mgr.restore(repo: base).isEmpty)
+        // …and the stale config section is gone too, not merely filtered out of the result.
+        XCTAssertTrue(mgr.restore(repo: base).isEmpty)
+    }
+
+    func testRemoveClearsPersistedMetadata() throws {
+        let repo = try makeRepo()
+        let mgr = WorktreeManager(root: tmp.appendingPathComponent("worktrees"))
+        let base = try mgr.detectBaseRepo(from: repo)
+        let ref = try mgr.resolveRef("HEAD", in: base)
+        let wt = try mgr.create(base: base, branch: "orchard/temp", from: ref)
+
+        XCTAssertTrue(try mgr.remove(wt))
+        XCTAssertTrue(mgr.restore(repo: base).isEmpty)
+    }
+
+    // MARK: - Naming
+
+    /// Two agents given the same task title get readable sibling branches, not UUID salad.
+    func testCollidingBranchNamesGetReadableSuffixes() throws {
+        let repo = try makeRepo()
+        let mgr = WorktreeManager(root: tmp.appendingPathComponent("worktrees"))
+        let base = try mgr.detectBaseRepo(from: repo)
+        let ref = try mgr.resolveRef("HEAD", in: base)
+
+        let a = try mgr.create(base: base, branch: "orchard/same", from: ref)
+        let b = try mgr.create(base: base, branch: "orchard/same", from: ref)
+        let c = try mgr.create(base: base, branch: "orchard/same", from: ref)
+
+        XCTAssertEqual(a.branch, "orchard/same")
+        XCTAssertEqual(b.branch, "orchard/same-2")
+        XCTAssertEqual(c.branch, "orchard/same-3")
+        // Directories are named for the branch leaf, and are likewise distinct.
+        XCTAssertEqual(Set([a, b, c].map(\.path.path)).count, 3)
+        XCTAssertEqual(a.path.lastPathComponent, "same")
+    }
+
+    // MARK: - Delete preflight
+
+    func testPreflightIsSafeForUntouchedWorktree() throws {
+        let repo = try makeRepo()
+        let mgr = WorktreeManager(root: tmp.appendingPathComponent("worktrees"))
+        let base = try mgr.detectBaseRepo(from: repo)
+        let ref = try mgr.resolveRef("HEAD", in: base)
+        let wt = try mgr.create(base: base, branch: "orchard/untouched", from: ref)
+
+        let preflight = mgr.deletionPreflight(wt)
+        XCTAssertTrue(preflight.isSafe)
+        XCTAssertTrue(preflight.warnings.isEmpty)
+        XCTAssertTrue(preflight.status.isPristine)
+    }
+
+    /// Deleting an agent's only output is the mistake this preflight exists to prevent, so
+    /// both uncommitted files and unpushed commits have to be named in the warnings.
+    func testPreflightWarnsAboutUncommittedAndUnpushedWork() throws {
+        let repo = try makeRepo()
+        let mgr = WorktreeManager(root: tmp.appendingPathComponent("worktrees"))
+        let base = try mgr.detectBaseRepo(from: repo)
+        let ref = try mgr.resolveRef("HEAD", in: base)
+        let wt = try mgr.create(base: base, branch: "orchard/busy", from: ref)
+
+        try "committed\n".write(to: wt.path.appendingPathComponent("done.txt"),
+                                atomically: true, encoding: .utf8)
+        XCTAssertEqual(try git(["add", "."], cwd: wt.path), 0)
+        XCTAssertEqual(try git(["commit", "-q", "-m", "agent work"], cwd: wt.path), 0)
+        try "wip\n".write(to: wt.path.appendingPathComponent("wip.txt"),
+                          atomically: true, encoding: .utf8)
+
+        let preflight = mgr.deletionPreflight(wt)
+        XCTAssertFalse(preflight.isSafe)
+        XCTAssertEqual(preflight.warnings.count, 2)
+        XCTAssertTrue(preflight.warnings.contains { $0.contains("uncommitted") })
+        XCTAssertTrue(preflight.warnings.contains { $0.contains("not pushed") })
+        XCTAssertEqual(preflight.status.commitsAhead, 1)
+        XCTAssertEqual(preflight.status.lastCommitSubject, "agent work")
+    }
+
+    /// Removing a checkout must not destroy the commits on its branch — that's a separate,
+    /// explicit decision.
+    func testRemoveKeepsBranchUnlessAskedToDeleteIt() throws {
+        let repo = try makeRepo()
+        let mgr = WorktreeManager(root: tmp.appendingPathComponent("worktrees"))
+        let base = try mgr.detectBaseRepo(from: repo)
+        let ref = try mgr.resolveRef("HEAD", in: base)
+
+        let keep = try mgr.create(base: base, branch: "orchard/keep-branch", from: ref)
+        XCTAssertTrue(try mgr.remove(keep))
+        XCTAssertTrue(mgr.localBranches(in: base).contains("orchard/keep-branch"))
+
+        let drop = try mgr.create(base: base, branch: "orchard/drop-branch", from: ref)
+        XCTAssertTrue(try mgr.remove(drop, deleteBranch: true))
+        XCTAssertFalse(mgr.localBranches(in: base).contains("orchard/drop-branch"))
+    }
+
+    func testLocalBranchesListsCurrentBranchFirst() throws {
+        let repo = try makeRepo()
+        let mgr = WorktreeManager(root: tmp.appendingPathComponent("worktrees"))
+        let base = try mgr.detectBaseRepo(from: repo)
+        XCTAssertEqual(try git(["branch", "zzz-later"], cwd: repo), 0)
+
+        let branches = mgr.localBranches(in: base)
+        XCTAssertEqual(branches.first, mgr.currentBranch(in: base))
+        XCTAssertTrue(branches.contains("zzz-later"))
+    }
 }
