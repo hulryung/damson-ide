@@ -70,15 +70,21 @@ Sources/
     Files/                #   file service + handlers (wave 2 fills this out)
   orchard/                # executable: the agent-facing CLI (client of the socket;
                           #   agent-context and guides work with no runtime)
-  Orchard/                # executable: the app (SwiftUI shell; hosts OrchardRuntime
-                          #   in-process; OrchardTrampoline retained)
+  OrchardApp/             # executable: the app (SwiftUI shell; hosts OrchardRuntime
+                          #   in-process; OrchardTrampoline retained). Named OrchardApp,
+                          #   not Orchard: on a case-insensitive filesystem `Orchard` and
+                          #   `orchard` are the same Sources/ path and the same .build
+                          #   output binary (the link steps clobber each other), so the
+                          #   app target/product is OrchardApp while OrchardTrampoline
+                          #   keeps the user-visible bundle identity "Orchard.app".
+                          #   T5's ownership is Sources/OrchardApp/**.
 Tests/
   OrchardCoreTests/  OrchardTerminalsTests/  OrchardOrchestrationTests/  OrchardRuntimeTests/
 ```
 
 Dependency rule: `OrchardCore ← {OrchardTerminals, OrchardOrchestration(?)} ←
-OrchardRuntime ← {orchard? (no — orchard depends only on OrchardProtocol), Orchard}`.
-Only `OrchardTerminals` and the `Orchard` app may import damson products.
+OrchardRuntime ← {orchard? (no — orchard depends only on OrchardProtocol), OrchardApp}`.
+Only `OrchardTerminals` and the `OrchardApp` app may import damson products.
 
 ## Work breakdown
 
@@ -226,7 +232,7 @@ Per `docs/research/orca-inventory.md` §2:
 Owns: `Sources/OrchardCore/Worktrees/**` (post-T0), `Sources/OrchardRuntime/Workspaces/**`,
 `Tests/OrchardCoreTests/**` (worktree parts), `Tests/OrchardRuntimeTests/Workspace*`.
 
-### T5 — App shell v1 (`Sources/Orchard`)
+### T5 — App shell v1 (`Sources/OrchardApp`)
 
 Per `docs/research/orca-inventory.md` §6, dark-native like v1 but the new information
 architecture:
@@ -246,7 +252,7 @@ architecture:
 - Drive everything through the runtime services (in-process), not private state; the app
   observes the domain-event AsyncStream.
 
-Owns: `Sources/Orchard/**`.
+Owns: `Sources/OrchardApp/**`.
 
 ### Wave 2+ backlog (separate run after merges)
 
