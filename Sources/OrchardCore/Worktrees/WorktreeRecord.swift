@@ -1,29 +1,35 @@
 import Foundation
 import Combine
 
-/// A worktree as the UI sees it: the git worktree, the agent currently attached to it (if
-/// any), and a cached git status refreshed on demand.
+/// A worktree as consumers see it: the git worktree plus a cached git status refreshed
+/// on demand.
 ///
-/// This is the app's primary noun. An `AgentSession` is transient — it starts, finishes, and
-/// can be dismissed or replaced — while the worktree and its branch persist until the user
-/// deletes them. Making the worktree the durable entity is what lets a finished agent's work
-/// survive a dismissal, an app restart, or a crash.
+/// This is the durable primary noun. An agent session is transient — it starts, finishes,
+/// and can be dismissed or replaced — while the worktree and its branch persist until the
+/// user deletes them. Making the worktree the durable entity is what lets a finished
+/// agent's work survive a dismissal, an app restart, or a crash.
+///
+/// v2 note: the record no longer holds the live `AgentSession` (that coupled the core to
+/// the terminal layer). The agent layer mirrors its state into `agentState`; `nil` means
+/// no live agent. T4 extends this with the persisted user-authored `WorktreeMeta`
+/// (displayName, workspaceStatus, pins, links).
 @MainActor
 public final class WorktreeRecord: ObservableObject, @MainActor Identifiable {
     public let worktree: Worktree
     public var id: UUID { worktree.id }
 
-    /// The agent currently running in this worktree. `nil` after the agent is dismissed or
-    /// the app restarts — the worktree is still fully usable, just idle.
-    @Published public private(set) var agent: AgentSession?
+    /// Live state of the agent currently running in this worktree, mirrored by the agent
+    /// layer. `nil` after the agent is dismissed or the app restarts — the worktree is
+    /// still fully usable, just idle.
+    @Published public var agentState: AgentRuntimeState?
 
-    /// Cached git status. Refreshed by `refresh()` rather than on every UI read, since each
+    /// Cached git status. Refreshed by `refresh()` rather than on every read, since each
     /// call is several git subprocesses.
     @Published public private(set) var status: GitWorktreeStatus = .unknown
     @Published public private(set) var isRefreshing = false
 
-    /// Set when an agent finishes a turn while this worktree isn't the one on screen, so the
-    /// sidebar can mark it the way an unread message is marked.
+    /// Set when an agent finishes a turn while this worktree isn't the one on screen, so
+    /// a sidebar can mark it the way an unread message is marked.
     @Published public var hasUnseenActivity = false
 
     /// Last prompt sent here, shown as the worktree's subtitle when there's no live agent.
@@ -34,23 +40,22 @@ public final class WorktreeRecord: ObservableObject, @MainActor Identifiable {
 
     private let manager: WorktreeManager
 
-    public init(worktree: Worktree, manager: WorktreeManager, agent: AgentSession? = nil) {
+    public init(worktree: Worktree, manager: WorktreeManager) {
         self.worktree = worktree
         self.manager = manager
-        self.agent = agent
     }
 
     public var branch: String { worktree.branch }
     public var title: String { worktree.title }
     public var path: URL { worktree.path }
 
-    /// What the sidebar row displays as this worktree's state, collapsing "has a live agent"
+    /// What a sidebar row displays as this worktree's state, collapsing "has a live agent"
     /// and "is just sitting there" into one vocabulary.
     public var displayState: WorktreeDisplayState {
-        guard let agent else {
+        guard let agentState else {
             return status.isPristine ? .idle : .hasChanges
         }
-        switch agent.state {
+        switch agentState {
         case .starting: return .starting
         case .working: return .working
         case .awaitingApproval: return .needsApproval
@@ -59,16 +64,6 @@ public final class WorktreeRecord: ObservableObject, @MainActor Identifiable {
         case .finished: return .done
         case .errored: return .failed
         }
-    }
-
-    public func attach(_ agent: AgentSession) {
-        self.agent = agent
-    }
-
-    /// Detach the agent without touching the worktree — the "dismiss this agent, keep the
-    /// work" path.
-    public func detachAgent() {
-        agent = nil
     }
 
     /// Re-read git status. Runs the git calls off the main actor so a large repo's status
