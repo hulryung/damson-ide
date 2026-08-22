@@ -38,16 +38,24 @@ public final class WorktreeRecord: ObservableObject, @MainActor Identifiable {
     /// Progress of the project's `orchard.yaml` setup script for this worktree.
     @Published public var setupState: SetupState = .none
 
+    /// User-authored fields (displayName, board status, pins, links). Git facts stay
+    /// on `worktree`; this is the orchard-data.json half, hydrated by the workspace
+    /// service after restore.
+    @Published public var meta: WorktreeMeta
+
     private let manager: WorktreeManager
 
-    public init(worktree: Worktree, manager: WorktreeManager) {
+    public init(worktree: Worktree, manager: WorktreeManager, meta: WorktreeMeta? = nil) {
         self.worktree = worktree
         self.manager = manager
+        self.meta = meta ?? .defaults(for: worktree)
     }
 
     public var branch: String { worktree.branch }
-    public var title: String { worktree.title }
+    public var title: String { meta.displayName.isEmpty ? worktree.title : meta.displayName }
     public var path: URL { worktree.path }
+    /// UUID instance id (git-config key). The RPC identity is `workspaceId(repoId:)`.
+    public var instanceId: String { worktree.id.uuidString }
 
     /// What a sidebar row displays as this worktree's state, collapsing "has a live agent"
     /// and "is just sitting there" into one vocabulary.
