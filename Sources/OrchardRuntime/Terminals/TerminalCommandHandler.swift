@@ -113,14 +113,5 @@ private func encodeJSON<T: Encodable>(_ value: T) throws -> JSONValue {
     try JSONDecoder().decode(JSONValue.self, from: JSONEncoder().encode(value))
 }
 
-private extension JSONValue {
-    var intValue: Int? {
-        if case let .number(n) = self { return Int(n) }
-        return nil
-    }
-
-    var boolValue: Bool? {
-        if case let .bool(b) = self { return b }
-        return nil
-    }
-}
+// JSONValue accessors: boolValue comes from OrchardProtocol, intValue from
+// Workspaces/JSONBridge (same module).
