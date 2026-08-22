@@ -1,0 +1,275 @@
+# Orchard v2 — rebuild plan
+
+Orchard (this repo) is being rebuilt into a native-macOS equivalent of
+[Orca](https://github.com/stablyai/orca): a multi-agent orchestrator IDE — orchestration
+(runs/tasks/dispatch/messaging), workspace & worktree management, terminals, a file
+manager, and embedded-browser integration — implemented in Swift on top of damson's
+terminal engine.
+
+Read before writing any code:
+
+- `docs/research/orca-inventory.md` — the feature/semantics spec being replicated.
+- `docs/research/damson-surface.md` — what the damson libraries provide; known gaps.
+- `docs/research/orchard-assets.md` — which v1 code is kept vs rewritten.
+
+Reference source on this machine (read-only): `~/dev/orca` (the product being matched),
+`~/dev/damson` (the terminal engine).
+
+## Product decisions
+
+- **Native Swift/AppKit+SwiftUI, macOS 13+, Swift 5.9.** Terminal rendering stays on
+  `DamsonTerminal` (bump pin to `from: "0.4.1"`).
+- **Runtime-first architecture** (the key Orca lesson): a UI-free runtime owns worktrees,
+  terminals, orchestration state, and an agent-facing control plane; the app is a client.
+  v2 runs the runtime in-process inside the app; a headless `orchard serve` can come later
+  because the boundary exists from day one.
+- **App name stays `Orchard`; the agent-facing CLI becomes `orchard`** (replaces v1
+  `orchard-cli`). Per-repo config stays `orchard.yaml` (keeps `symlinkPaths`/orca aliases).
+- **No scheduler.** v1's FIFO queue is deleted. Coordinators are LLM agents driving the
+  loop through the CLI (run/task/dispatch/check), exactly like Orca. This also follows
+  damson's documented "do not build" list.
+- **Local host only for now.** `ExecutionHostId` appears in the data model as `local`
+  from day one, but SSH/remote hosts, federation, mobile, artifact/skill sharing,
+  automations, and legacy-contract migration are explicitly out of scope for v2
+  foundation.
+- Storage (macOS): `~/Library/Application Support/Orchard/` →
+  `orchard-data.json` (durable state), `orchestration.db` (SQLite via system `SQLite3`),
+  `orchard-runtime.json` (runtime metadata; socket path, pid, authToken). Worktree *facts*
+  keep v1's git-config persistence (better than a store that can drift); user-authored
+  worktree meta (displayName, status, comment, links) lives in `orchard-data.json`.
+- Wire: NDJSON frames over a unix socket, envelope
+  `{id, ok, result | error:{code,message,data}, _meta:{runtimeId}}`, `{"_keepalive":true}`
+  frames during long-polls. Env injected into every managed PTY:
+  `ORCHARD_TERMINAL_HANDLE, ORCHARD_PANE_KEY, ORCHARD_WORKTREE_ID, ORCHARD_CLI_COMMAND,
+  ORCHARD_DATA_PATH` (plus the existing setup-script vars).
+- Agent self-documentation ships in the binary: `orchard agent-context --json` (full
+  command table) and `orchard guide get <topic>` (version-matched usage guides).
+
+## Module layout (targets in Package.swift)
+
+```
+Sources/
+  OrchardCore/            # UI-free foundation (no damson import)
+    Git/                  #   GitRunner, GitService                          [lifted]
+    Worktrees/            #   WorktreeManager, WorktreeNaming, records/meta  [lifted+extended]
+    Config/               #   OrchardProjectConfig, SetupRunner              [lifted]
+    Support/              #   PaletteRanking, small shared utilities        [lifted]
+  OrchardTerminals/       # terminal + agent layer (sole damson-importing library)
+                          #   TerminalSession protocol + DamsonTerminalSession adapter,
+                          #   AgentEngine/ClaudeCodeEngine/GenericShellEngine,
+                          #   HookServer/HookInstaller, ReadinessDetector/Snapshot,
+                          #   AgentSession (rewritten on the protocol), prompt injection
+  OrchardOrchestration/   # SQLite store + orchestration semantics + dispatch preamble
+  OrchardProtocol/        # Codable wire types + RPC envelope + command specs
+                          #   (shared by runtime server and CLI; no other deps)
+  OrchardRuntime/         # runtime assembly (imports all of the above)
+    Server/               #   unix-socket NDJSON server, runtime metadata, handler registry
+    Terminals/            #   terminal service + RPC handlers
+    Workspaces/           #   workspace service (worktrees + folder workspaces) + handlers
+    Orchestration/        #   orchestration RPC handlers (thin over OrchardOrchestration)
+    Files/                #   file service + handlers (wave 2 fills this out)
+  orchard/                # executable: the agent-facing CLI (client of the socket;
+                          #   agent-context and guides work with no runtime)
+  Orchard/                # executable: the app (SwiftUI shell; hosts OrchardRuntime
+                          #   in-process; OrchardTrampoline retained)
+Tests/
+  OrchardCoreTests/  OrchardTerminalsTests/  OrchardOrchestrationTests/  OrchardRuntimeTests/
+```
+
+Dependency rule: `OrchardCore ← {OrchardTerminals, OrchardOrchestration(?)} ←
+OrchardRuntime ← {orchard? (no — orchard depends only on OrchardProtocol), Orchard}`.
+Only `OrchardTerminals` and the `Orchard` app may import damson products.
+
+## Work breakdown
+
+Execution model: Orca orchestration Run; each task is one worker agent in its own git
+worktree forked from `main`; the coordinator reviews and merges locally in order.
+Tasks T1–T5 depend on T0. Merge order after review: T1 → T2 → T3 → T4 → T5.
+
+### T0 — Skeleton & asset migration (exclusive; nothing else runs until merged)
+
+Restructure the repo to the module layout above:
+
+1. New `Package.swift`: all targets/products declared (even where directories start
+   nearly empty); damson pinned `from: "0.4.1"`; executables `Orchard` and `orchard`.
+2. Move the KEEP assets from `docs/research/orchard-assets.md` into their new targets
+   (plain `git mv` + import fixes; no behavior changes).
+3. Extract `TerminalSession` protocol (~11 members: write, grid access, config get/update,
+   terminate, processExited/exitCode, bracketedPasteEnabled, hasRunningForegroundJob,
+   gridChanged, outputEvents, onExit) in `OrchardTerminals`; implement
+   `DamsonTerminalSession` adapter; rewrite `AgentSession` against the protocol.
+   `OrchardCore` must compile with zero damson imports.
+4. Split `OrchestratorController`: keep a headless `WorktreeService` (create/restore/
+   delete/setup) and `AgentSupervisor` (spawn agent session in a worktree, hook install,
+   readiness stream) in the appropriate targets; delete theme/UI-callback glue; expose an
+   `AsyncStream<OrchardEvent>` of domain events instead of closures.
+5. Delete: v1 `Sources/Orchard` app (all 17 files — salvage `PaletteRanking` →
+   `OrchardCore/Support`, `OrchardTrampoline` → new app target), `OrchardControl`,
+   `orchard-cli` (v1), `TaskQueue`, dead code listed in the assets doc.
+6. Define the thin seams wave-1 tasks implement behind:
+   - `OrchardProtocol`: `RPCRequest`/`RPCResponse` envelope Codables + a `CommandSpec`
+     type (name, flags, summary) + placeholder command enums.
+   - `OrchardRuntime/Server`: `CommandHandler` protocol
+     (`verbs: [String]`, `handle(_ request:) async -> RPCResponse`) + a registry that the
+     server routes through; a stub in-memory server so tests can exercise handlers without
+     a socket.
+7. New minimal `Orchard` app entry: single window, placeholder sidebar/detail, proving
+   the app target links DamsonTerminal and boots.
+8. Port the 5 surviving test files to the new module names; delete the damson-specific
+   `TerminalConfigTests` case. `swift build` and `swift test` green.
+9. Update `README.md` top section to describe v2 direction (link this plan); add
+   `docs/MIGRATION-V2.md` recording every move/delete.
+
+### T1 — Orchestration store & semantics (`OrchardOrchestration` + its tests)
+
+Implement the Orca orchestration model per `docs/research/orca-inventory.md` §1 and §8:
+
+- SQLite schema (system `SQLite3`, thin typed wrapper, WAL, all writes in transactions):
+  runs, messages (monotonic `sequence`), deliveries (unique partial index: one
+  `outstanding` per run), tasks (DAG `deps` JSON), dispatch_contexts, decision_gates,
+  worker_dispatches, worker_terminal_resources, worker_terminal_archives,
+  mutation_receipts, questions. Copy the enums verbatim.
+- Semantics: FIFO delivery batching (cap 50) with verbatim replay until ack;
+  consumer-generation fencing; `(taskId, dispatchId)`-keyed settlement with typed
+  rejections (`unknown_task | unknown_dispatch | task_dispatch_mismatch |
+  inactive_dispatch | stale_dispatch`); 3-failure circuit breaker; gates never
+  auto-resolve + pending gate force-re-blocks its task; DAG readiness
+  (`task-list --ready`); worker_done auto-completes task+dispatch; heartbeat staleness
+  (10 min) computes a warning flag only; retry-request idempotency via mutation_receipts;
+  group-address expansion at send time (one row per recipient, shared thread_id;
+  forbidden for worker_done/heartbeat).
+- Dispatch preamble builder (worker contract text with real IDs inlined, per §1.6,
+  including the after-worker_done behavior split and the never-local-prompts rule).
+- Long-poll support: an async wait primitive (`waitForMessage(types:timeout:)`) the RPC
+  layer can call, resolved by message arrival.
+- No damson import, no UI. Exhaustive unit tests (this is the correctness-critical
+  module: batching/replay/fencing/settlement/circuit-breaker/gate-reblock at minimum).
+
+Owns: `Sources/OrchardOrchestration/**`, `Tests/OrchardOrchestrationTests/**`.
+
+### T2 — Control plane: runtime server + `orchard` CLI (`OrchardProtocol`, `OrchardRuntime/Server`, `Sources/orchard`)
+
+- NDJSON unix-socket server: socket at `~/Library/Application Support/Orchard/run/` (or
+  `$TMPDIR` fallback), 0700/0600 perms, runtime metadata file
+  (`orchard-runtime.json` with runtimeId/pid/socket/authToken), auth-token check,
+  one-connection-per-request, `{"_keepalive":true}` frames every 15s during long-polls,
+  clean error envelope. Stale-socket sweep from v1's discovery code.
+- Handler registry wiring (`CommandHandler` seam from T0); `status` command.
+- The `orchard` CLI executable: arg parsing from declarative `CommandSpec`s (usable for
+  `agent-context`), `--json` everywhere, human formatting otherwise; `agent-context`
+  (serialize the full spec table, no runtime needed); `guide get <topic>` with an
+  embedded orchestration guide (adapted from orca's, using `orchard` verbs);
+  client transport with keepalive-aware timeouts.
+- Orchestration RPC handlers (`OrchardRuntime/Orchestration/`): thin mapping of the §1.4
+  verb set onto the T1 store API (agree the API surface with T1 through the seam types in
+  the skeleton; coordinate via `ask` if a signature must change).
+- Repo verbs backed by a simple repo registry in `orchard-data.json`:
+  `repo list|add|show`.
+
+Owns: `Sources/OrchardProtocol/**`, `Sources/OrchardRuntime/Server/**`,
+`Sources/OrchardRuntime/Orchestration/**`, `Sources/orchard/**`,
+`Tests/OrchardRuntimeTests/Server*`, `Tests/OrchardRuntimeTests/Orchestration*`.
+
+### T3 — Terminal service (`OrchardTerminals` completion + `OrchardRuntime/Terminals`)
+
+Per `docs/research/orca-inventory.md` §3:
+
+- Terminal registry with the two-identity model: remintable `handle`
+  (`term_<uuid>`) + durable `paneKey`; incarnation counters; per-worktree terminal lists;
+  `RuntimeTerminalSummary`-shaped listing (handle, worktreeId, title, connected,
+  lastOutputAt, preview tail).
+- `read` with both sources: accumulated stream (ring buffer of parsed text with cursor
+  paging) and `--screen` (rendered grid snapshot); result carries
+  `source: stream|screen`.
+- `send` via the full injection pipeline lifted to v2: ESC-sanitize → bracketed paste →
+  chunked writes → submit `\r` after 500 ms → verify the agent left idle within 5 s
+  (reuse ReadinessDetector state as the working-sequence); typed refusals
+  (`no-agent | permission`), per-PTY serialization.
+- `wait --for tui-idle|exit`: only `idle` satisfies tui-idle (`permission` does not);
+  fast-path already-idle; resolve on any transition to idle; never clear the last-status
+  record; reject immediately on PTY exit; default timeout.
+- Agent status stream per terminal fusing the existing 3-tier detection; expose
+  `AgentStatusEntry`-shaped snapshots (state, stateStartedAt, agentType, paneKey, …).
+- Engines: extend the registry beyond Claude — `codex`, `grok`, `cursor-agent`, generic
+  shell — launch argv + env + (where known) hook installation; keep Claude's
+  env-marker stripping.
+- RPC handlers for `terminal list|create|read|send|wait|split(stub ok)|close|rename`.
+
+Owns: `Sources/OrchardTerminals/**` (post-T0 contents), `Sources/OrchardRuntime/Terminals/**`,
+`Tests/OrchardTerminalsTests/**`, `Tests/OrchardRuntimeTests/Terminal*`.
+
+### T4 — Workspace service (`OrchardCore/Worktrees` extension + `OrchardRuntime/Workspaces`)
+
+Per `docs/research/orca-inventory.md` §2:
+
+- Worktree identity `"<repoId>::<path>"`; repo registry (id, path, displayName, baseRef)
+  persisted in `orchard-data.json`; keep git-config worktree facts from v1.
+- `WorktreeMeta` (displayName, comment, workspaceStatus, isPinned/isUnread/isArchived,
+  sortOrder, lastActivityAt, linkedIssue/PR as plain strings for now) in
+  `orchard-data.json`; workspace-status vocabulary with the four defaults + custom.
+- Folder workspaces as first-class peers projected into the same workspace shape
+  (empty branch/head).
+- Lineage records `{child, parent, origin: orchestration|cli|manual, capture
+  confidence}`; `--no-parent` ⊥ base-branch, per the checklist.
+- Name generation: keep v1 sanitization + collision suffixes; add a generated-name pool
+  with **permanent retirement** persisted per repo.
+- Deletion: keep v1 preflight; wire the `archive` script (v1 half-finish) with
+  `--run-hooks` semantics.
+- `worker-start`-shaped composition helper: create worktree (optionally agent-first) →
+  wait agent readiness → return `{worktreeId, agentTerminalHandle}` — built on T0's
+  `WorktreeService`/`AgentSupervisor` seams and the terminal service API (coordinate
+  signatures via `ask` if needed; the RPC-level `worker-start` verb itself is wired in a
+  short follow-up once T1–T4 merge).
+- RPC handlers for `worktree list|show|current|create|set|rm` and JSON store
+  load/save with atomic writes.
+
+Owns: `Sources/OrchardCore/Worktrees/**` (post-T0), `Sources/OrchardRuntime/Workspaces/**`,
+`Tests/OrchardCoreTests/**` (worktree parts), `Tests/OrchardRuntimeTests/Workspace*`.
+
+### T5 — App shell v1 (`Sources/Orchard`)
+
+Per `docs/research/orca-inventory.md` §6, dark-native like v1 but the new information
+architecture:
+
+- Left sidebar: repo/project groups → **workspace cards** (status slot from
+  workspaceStatus, unread dot, branch, +N/−M, inline live-agent rows with state glyphs).
+  Filters: repo, status; ordering manual|recent.
+- Center workbench: per-workspace **tab groups with splits**; tab kinds `terminal` (hosts
+  `DamsonTerminalView`), `diff` (port v1 DiffPaneView against OrchardCore GitService),
+  placeholder kinds for `editor`/`browser` (wave 2).
+- Agent dashboard window (kanban: attention | working | done | idle; click-to-focus).
+- Jump palette (⌘J) over workspaces/agents using `PaletteRanking`.
+- Composer (⌘N): name, prompt, engine (claude|codex|grok|cursor|shell), base branch,
+  fan-out count.
+- Settings (port v1's three groups; per-repo concurrency remains a display concern only —
+  no scheduler).
+- Drive everything through the runtime services (in-process), not private state; the app
+  observes the domain-event AsyncStream.
+
+Owns: `Sources/Orchard/**`.
+
+### Wave 2+ backlog (separate run after merges)
+
+File-manager service + right-sidebar explorer UI; WKWebView browser pane + automation
+verbs (snapshot with @e refs via injected JS, click/fill/screenshot/eval, per-workspace
+tabs); `worker-start` RPC verb end-to-end + worker archives; chat view-mode overlay;
+`orchard serve` headless; damson-side fixes (pane targeting for all commands,
+multi-subscriber raw-output stream, richer dump-grid); status-bar/ports; automations.
+
+## Worker ground rules
+
+1. Fork point is `main` of this repo; work only in your assigned worktree; commit
+   locally with clear messages; **do not push, do not merge, do not touch other tasks'
+   paths** (ownership lists above). Package.swift is owned by T0; later tasks may not
+   edit it except to add files (SPM auto-globs — so normally no edit at all).
+2. `swift build` and `swift test` must pass before you report done.
+3. No new external dependencies. SQLite = `import SQLite3` (system). damson imports only
+   in `OrchardTerminals` and the `Orchard` app.
+4. Match existing code style: doc comments explain *why*; concise; value types +
+   `Sendable` where practical; no force-unwraps in engine code.
+5. You are a supervised orchestration worker: follow your injected preamble —
+   `worker_done` exactly once with outcome, heartbeats while working, blocking questions
+   via `orca orchestration ask` (NEVER a local interactive prompt).
+6. Read the three research docs before coding. When this plan and a research doc
+   conflict, this plan wins; when both are silent, match Orca's behavior
+   (`~/dev/orca` is on disk — cite the file you followed in your commit message).
