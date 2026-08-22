@@ -285,9 +285,9 @@ final class AppStore: ObservableObject {
     func deleteWorktree(_ record: WorktreeRecord, in project: ProjectSession,
                         force: Bool, deleteBranch: Bool) throws -> Bool {
         project.agents.retireAgents(inWorktree: record.id)
-        let removed = try project.worktrees.deleteWorktree(
+        let deletion = try project.worktrees.deleteWorktree(
             record, force: force, deleteBranch: deleteBranch)
-        guard removed else { return false }
+        guard deletion.removed else { return false }
         meta.remove(record.id)
         layouts[.worktree(record.id)] = nil
         if case .worktree(let id) = selection, id == record.id {
