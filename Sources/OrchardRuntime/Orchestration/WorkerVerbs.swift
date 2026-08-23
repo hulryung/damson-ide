@@ -5,8 +5,8 @@ import OrchardTerminals
 
 // The post-start worker verbs: show / read / stop / abandon / release / retain / list.
 // Semantics ported from ~/dev/orca/src/main/runtime/rpc/methods/orchestration-worker-*
-// (docs/research/orca-inventory.md §1.8), minus federation and provider transcripts —
-// v2 archives are terminal tails, and observation runs against the in-process registry.
+// (docs/research/orca-inventory.md §1.8). Provider transcripts are pinned before
+// release when a hook-attested session resolves; observation is in-process.
 extension LiveOrchestrationStore {
     // MARK: - worker-show
 
@@ -98,11 +98,6 @@ extension LiveOrchestrationStore {
                     code: "terminal_not_found",
                     message: "Worker terminal for Dispatch \(dispatchID) no longer resolves and no archive was preserved.")
             }
-            if source == "transcript" {
-                throw RPCServiceError(
-                    code: "transcript_required",
-                    message: "Structured provider transcripts are not wired in v2; use --source terminal (or auto).")
-            }
             let page = try await runtime.readTerminal(summary.handle, cursor, limit)
             var result: [String: JSONValue] = [
                 "dispatchId": .string(dispatchID),
@@ -116,8 +111,8 @@ extension LiveOrchestrationStore {
                     "terminal": .string(page.status),
                 ]),
             ]
-            if source == "auto" {
-                result["fallbackReason"] = .string("transcript_unavailable")
+            if source != "terminal" {
+                result["fallbackReason"] = .string("provider_transcript_not_pinned")
             }
             if let next = page.nextCursor { result["nextCursor"] = .number(Double(next)) }
             if let oldest = page.oldestCursor { result["oldestCursor"] = .number(Double(oldest)) }
@@ -142,22 +137,20 @@ extension LiveOrchestrationStore {
                     code: "archive_unavailable",
                     message: "Dispatch \(dispatchID) preserved structured transcript output only; terminal output was released.")
             }
+            let content = Self.decodeReceipt(archive.content)
             return .object([
                 "dispatchId": .string(dispatchID),
                 "source": .string("transcript"),
                 "archived": .bool(true),
-                "content": Self.decodeReceipt(archive.content),
+                "content": content.field("content") ?? content,
+                "transcriptPath": content.field("path") ?? .null,
+                "truncated": content.field("truncated") ?? .bool(false),
                 "status": .object([
                     "worker": .string(workerState),
                     "terminal": .string("archived"),
                 ]),
             ])
         case .terminalTail:
-            guard source != "transcript" else {
-                throw RPCServiceError(
-                    code: "transcript_required",
-                    message: "Structured output is unavailable for Dispatch \(dispatchID): the archive holds terminal output only.")
-            }
             let content = Self.decodeReceipt(archive.content)
             let lines = content.field("lines")?.arrayValue?.compactMap(\.stringValue) ?? []
             let start = min(max(cursor ?? max(0, lines.count - limit), 0), lines.count)
@@ -179,6 +172,11 @@ extension LiveOrchestrationStore {
             ]
             if let warnings = content.field("warnings"), warnings != .array([]) {
                 result["warnings"] = warnings
+            }
+            if let fallbackReason = content.field("fallbackReason") {
+                result["fallbackReason"] = fallbackReason
+            } else if source != "terminal" {
+                result["fallbackReason"] = .string("provider_transcript_unavailable")
             }
             return .object(result)
         }
@@ -382,10 +380,25 @@ extension LiveOrchestrationStore {
                                   processAction: "none")
         }
 
-        // Archive FIRST (§1.8): freeze the tail while the buffer still exists.
+        // Archive FIRST (§1.8): prefer the exact hook-attested provider transcript.
+        // Any resolution failure is data, not an error: preserve the terminal tail
+        // and its typed reason so release can still safely close the owned terminal.
         if try store.workerTerminalArchive(dispatchID: dispatchID) == nil {
-            let content: JSONValue
-            do {
+            let transcript = await runtime.resolveProviderTranscript(
+                summary.handle, WorkerRuntimeContext.transcriptPinByteLimit)
+            switch transcript {
+            case .resolved(let transcriptContent, let path, let truncated):
+                let content: JSONValue = .object([
+                    "content": .string(transcriptContent),
+                    "path": .string(path),
+                    "truncated": .bool(truncated),
+                ])
+                _ = try store.commitWorkerTerminalArchiveForRelease(
+                    dispatchID: dispatchID, resourceID: resource.id,
+                    kind: .transcriptPin, content: Self.encodeReceipt(content))
+            case .unavailable(let fallbackReason):
+                let content: JSONValue
+                do {
                 let page = try await runtime.readTerminal(summary.handle, nil, 2000)
                 let empty = page.lines.allSatisfy {
                     $0.trimmingCharacters(in: .whitespaces).isEmpty
@@ -399,21 +412,24 @@ extension LiveOrchestrationStore {
                     "lines": .array(page.lines.map(JSONValue.string)),
                     "truncated": .bool(page.truncated || (page.oldestCursor ?? 0) > 0),
                     "terminalStatus": .string(page.status),
+                    "fallbackReason": .string(fallbackReason),
                     "warnings": .array(warnings),
                 ])
-            } catch {
-                throw RPCServiceError(
-                    code: "archive_failed",
-                    message: "Output could not be preserved for Dispatch \(dispatchID); the terminal was retained. \(Self.describe(error))")
+                } catch {
+                    throw RPCServiceError(
+                        code: "archive_failed",
+                        message: "Output could not be preserved for Dispatch \(dispatchID); the terminal was retained. \(Self.describe(error))")
+                }
+                _ = try store.commitWorkerTerminalArchiveForRelease(
+                    dispatchID: dispatchID, resourceID: resource.id,
+                    kind: .terminalTail, content: Self.encodeReceipt(content))
             }
-            _ = try store.commitWorkerTerminalArchiveForRelease(
-                dispatchID: dispatchID, resourceID: resource.id,
-                kind: .terminalTail, content: Self.encodeReceipt(content))
         } else {
+            let archive = try store.workerTerminalArchive(dispatchID: dispatchID)
             _ = try store.commitWorkerTerminalArchiveForRelease(
                 dispatchID: dispatchID, resourceID: resource.id,
-                kind: .terminalTail,
-                content: try store.workerTerminalArchive(dispatchID: dispatchID)?.content ?? "{}")
+                kind: archive?.kind ?? .terminalTail,
+                content: archive?.content ?? "{}")
         }
         guard let releasing = try store.workerTerminalResource(id: resource.id),
               releasing.ownershipState == .owned, releasing.releaseState == .releasing else {

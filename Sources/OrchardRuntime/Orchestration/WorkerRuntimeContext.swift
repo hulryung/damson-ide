@@ -10,6 +10,12 @@ import OrchardTerminals
 /// (docs/research/orca-inventory.md §1.7-1.8); the `live` factory bridges them to T4's
 /// `WorkspaceService` and T3's `TerminalService` on the main actor.
 public struct WorkerRuntimeContext: Sendable {
+    public enum ProviderTranscriptResolution: Sendable, Equatable {
+        case resolved(content: String, path: String, truncated: Bool)
+        case unavailable(reason: String)
+    }
+
+    public static let transcriptPinByteLimit = 2_000_000
     public var cliCommand: String
 
     /// `worktree_create`: run the worker-start-shaped composition (T4's helper) without
@@ -34,6 +40,10 @@ public struct WorkerRuntimeContext: Sendable {
     public var readTerminal: @Sendable (
         _ handle: String, _ cursor: Int?, _ limit: Int
     ) async throws -> TerminalReadResult
+    /// Resolve the hook-attested provider session into a bounded durable copy.
+    public var resolveProviderTranscript: @Sendable (
+        _ handle: String, _ maximumBytes: Int
+    ) async -> ProviderTranscriptResolution
     /// Close the pane's PTY and unregister it.
     public var closeTerminal: @Sendable (_ handle: String) async throws -> Void
 
@@ -46,6 +56,7 @@ public struct WorkerRuntimeContext: Sendable {
         waitForAgentIdle: @escaping @Sendable (String, TimeInterval) async throws -> TerminalWaitResult,
         injectPrompt: @escaping @Sendable (String, String) async throws -> TerminalSendResult,
         readTerminal: @escaping @Sendable (String, Int?, Int) async throws -> TerminalReadResult,
+        resolveProviderTranscript: @escaping @Sendable (String, Int) async -> ProviderTranscriptResolution = { _, _ in .unavailable(reason: "provider_session_unavailable") },
         closeTerminal: @escaping @Sendable (String) async throws -> Void
     ) {
         self.cliCommand = cliCommand
@@ -56,6 +67,7 @@ public struct WorkerRuntimeContext: Sendable {
         self.waitForAgentIdle = waitForAgentIdle
         self.injectPrompt = injectPrompt
         self.readTerminal = readTerminal
+        self.resolveProviderTranscript = resolveProviderTranscript
         self.closeTerminal = closeTerminal
     }
 
@@ -105,9 +117,58 @@ public struct WorkerRuntimeContext: Sendable {
             readTerminal: { handle, cursor, limit in
                 try await terminals.read(handle: handle, cursor: cursor, limit: limit)
             },
+            resolveProviderTranscript: { handle, maximumBytes in
+                await MainActor.run {
+                    Self.resolveClaudeTranscript(terminals, handle: handle,
+                                                 maximumBytes: maximumBytes)
+                }
+            },
             closeTerminal: { handle in
                 try await terminals.close(handle: handle)
             })
+    }
+
+    @MainActor
+    static func resolveClaudeTranscript(
+        _ terminals: TerminalService, handle: String, maximumBytes: Int,
+        homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> ProviderTranscriptResolution {
+        let resolvedHandle: String
+        do {
+            _ = try terminals.summary(handle: handle)
+            resolvedHandle = handle
+        } catch TerminalServiceError.handleStale(_, let replacement) {
+            guard let replacement else { return .unavailable(reason: "terminal_identity_unavailable") }
+            resolvedHandle = replacement
+        } catch {
+            return .unavailable(reason: "terminal_identity_unavailable")
+        }
+        guard let sessionID = try? terminals.agentStatus(handle: resolvedHandle).providerSessionID,
+              !sessionID.isEmpty else {
+            return .unavailable(reason: "provider_session_unavailable")
+        }
+        guard sessionID.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil else {
+            return .unavailable(reason: "provider_session_invalid")
+        }
+        guard let cwd = try? terminals.workingDirectory(handle: resolvedHandle), !cwd.isEmpty else {
+            return .unavailable(reason: "working_directory_unavailable")
+        }
+        let encodedCWD = cwd.replacingOccurrences(of: "/", with: "-")
+        let url = homeDirectory.appendingPathComponent(".claude/projects", isDirectory: true)
+            .appendingPathComponent(encodedCWD, isDirectory: true)
+            .appendingPathComponent(sessionID).appendingPathExtension("jsonl")
+        guard let data = try? Data(contentsOf: url), !data.isEmpty else {
+            return .unavailable(reason: "provider_transcript_not_found")
+        }
+        var bounded = Data(data.count > maximumBytes ? data.suffix(maximumBytes) : data[...])
+        if data.count > maximumBytes, let newline = bounded.firstIndex(of: 0x0A),
+           newline < bounded.index(before: bounded.endIndex) {
+            bounded.removeSubrange(bounded.startIndex...newline)
+        }
+        guard let content = String(data: bounded, encoding: .utf8) else {
+            return .unavailable(reason: "provider_transcript_invalid_utf8")
+        }
+        return .resolved(content: content, path: url.path, truncated: data.count > maximumBytes)
     }
 
     /// Handle → (summary, status), following one remint hop like the assembly's

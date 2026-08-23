@@ -5,11 +5,12 @@ final class HookStatusPayloadTests: XCTestCase {
 
     func testParsesClaudeSnakeCaseAssistantAndPrompt() {
         let json = Data(#"""
-        {"hook_event_name":"Stop","prompt":"ship it","last_assistant_message":"Shipped."}
+        {"hook_event_name":"Stop","prompt":"ship it","last_assistant_message":"Shipped.","session_id":"claude-session-1"}
         """#.utf8)
         let fields = HookStatusFields.parse(json: json)
         XCTAssertEqual(fields.prompt, "ship it")
         XCTAssertEqual(fields.lastAssistantMessage, "Shipped.")
+        XCTAssertEqual(fields.providerSessionID, "claude-session-1")
     }
 
     func testParsesCamelCaseOrcaShape() {
@@ -33,6 +34,7 @@ final class HookStatusPayloadTests: XCTestCase {
         XCTAssertEqual(fields.prompt, "keep me")
         XCTAssertEqual(fields.lastAssistantMessage, "old")
         XCTAssertEqual(fields.toolName, "Bash")
+        XCTAssertNil(fields.providerSessionID)
     }
 
     func testNormalizesNewlinesAndCapsAssistantLength() {

@@ -81,7 +81,7 @@ let package = Package(
         // guides must keep working with no runtime running.
         .executableTarget(
             name: "orchard",
-            dependencies: ["OrchardProtocol", "OrchardRuntime", "OrchardTerminals"],
+            dependencies: ["OrchardProtocol", "OrchardRuntime", "OrchardTerminals", "OrchardOrchestration"],
             path: "Sources/orchard"
         ),
         // The app: SwiftUI shell hosting OrchardRuntime in-process.

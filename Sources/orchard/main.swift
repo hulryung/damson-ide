@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import OrchardProtocol
+import OrchardOrchestration
 
 let toolVersion = "2.0.0-dev"
 struct ParsedCommand { let spec: CommandSpec; let params: [String: JSONValue]; let json: Bool }
@@ -55,15 +56,6 @@ func callRuntime(method: String, params: JSONValue) throws -> RPCResponse {
         return try JSONDecoder().decode(RPCResponse.self, from: buffer)
     }
 }
-
-let orchestrationGuide = """
-# Orchard orchestration
-
-Create or bind a run, create tasks, dispatch workers, then use `orchard check --wait --types worker_done,escalation,question --timeout-ms 900000 --json`.
-Workers report `worker_done` exactly once with both task and dispatch IDs, use `orchard ask` for blocking questions, and send five-minute heartbeats while active.
-Acknowledge a delivery only after every message is processed. Gates never auto-resolve and stale heartbeats only warn.
-Use `orchard agent-context --json` for the authoritative command table.
-"""
 
 func printUsage() { print("usage: orchard <command> [options]\n"); OrchardCommands.all.forEach { print("  \($0.name.padding(toLength: 18, withPad: " ", startingAt: 0)) \($0.summary)") } }
 
@@ -188,8 +180,13 @@ do {
         let data = try JSONEncoder.pretty.encode(AgentContextDocument(commands: OrchardCommands.all)); FileHandle.standardOutput.write(data + Data("\n".utf8))
     case "version": print(parsed.json ? "{\"version\":\"\(toolVersion)\"}" : "orchard \(toolVersion)")
     case "guide":
-        guard case let .array(values)? = parsed.params["_args"], values.count == 2, values[0].stringValue == "get", values[1].stringValue == "orchestration" else { throw CLIError.usage("usage: orchard guide get orchestration [--json]") }
-        if parsed.json { let data = try JSONEncoder.pretty.encode(["topic": "orchestration", "content": orchestrationGuide]); FileHandle.standardOutput.write(data + Data("\n".utf8)) } else { print(orchestrationGuide) }
+        guard case let .array(values)? = parsed.params["_args"], let verb = values.first?.stringValue else { throw CLIError.usage("usage: orchard guide list | orchard guide get orchestration [--json]") }
+        if verb == "list", values.count == 1 {
+            if parsed.json { let data = try JSONEncoder.pretty.encode(["topics": OrchestrationContract.topics]); FileHandle.standardOutput.write(data + Data("\n".utf8)) }
+            else { OrchestrationContract.topics.forEach { print($0) } }
+        } else if verb == "get", values.count == 2, values[1].stringValue == "orchestration" {
+            if parsed.json { let data = try JSONEncoder.pretty.encode(["topic": "orchestration", "content": OrchestrationContract.coordinatorGuide]); FileHandle.standardOutput.write(data + Data("\n".utf8)) } else { print(OrchestrationContract.coordinatorGuide) }
+        } else { throw CLIError.usage("usage: orchard guide list | orchard guide get orchestration [--json]") }
     default:
         var method = parsed.spec.name, params = parsed.params; params.removeValue(forKey: "json")
         if method == "repo" || method == "browser" || method == "automations" || method == "worktree", case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue {
