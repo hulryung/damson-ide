@@ -28,6 +28,8 @@ public final class OrchardRuntimeHost {
     /// T10: per-workspace embedded browser. WebKit-free here — the app attaches
     /// a `BrowserWebHost` over its WKWebViews; without one the verbs fail typed.
     public nonisolated let browserService: BrowserService
+    public nonisolated let automationService: AutomationService
+    public nonisolated let automationScheduler: AutomationScheduler
 
     public nonisolated let registry: CommandRegistry
     /// In-process client of the same registry (the app's path; no socket involved).
@@ -93,6 +95,53 @@ public final class OrchardRuntimeHost {
             await MainActor.run { (try? workspaceService.show(selector: selector))?.path }
         })
 
+        let workerRuntime = WorkerRuntimeContext.live(cliCommand: cliCommand,
+                                                      workspaces: workspaceService,
+                                                      terminals: terminalService)
+        let automationService = AutomationService(store: dataStore) { automation in
+            switch automation.target {
+            case .repo(let selector):
+                let runValue = try await orchestration.runCreate([
+                    "objective": .string("Automation: \(automation.name)")])
+                guard let runID = runValue.field("runId")?.stringValue else {
+                    throw AutomationScheduleError.invalid("could not create automation run")
+                }
+                let taskValue = try await orchestration.taskCreate([
+                    "run": .string(runID), "spec": .string(automation.prompt),
+                    "task-title": .string(automation.name)])
+                guard let taskID = taskValue.field("taskId")?.stringValue else {
+                    throw AutomationScheduleError.invalid("could not create automation task")
+                }
+                let value = try await orchestration.workerStart([
+                    "task": .string(taskID), "repo": .string(selector),
+                    "worktree": .string("new-top-level"), "agent": .string(automation.provider),
+                    "name": .string("automation-\(automation.id.suffix(8))-\(Int(Date().timeIntervalSince1970))"),
+                    "setup": .string("run")], runtime: workerRuntime)
+                return AutomationFireReceipt(worktreeId: value.field("effects")?.arrayValue?
+                    .first(where: { $0.field("kind")?.stringValue == "worktree" })?.field("id")?.stringValue,
+                    terminalId: value.field("effects")?.arrayValue?
+                    .first(where: { $0.field("kind")?.stringValue == "terminal" })?.field("id")?.stringValue)
+            case .workspace(let selector):
+                let workspace = try await workspaceService.resolveWorkspace(selector, cwd: nil)
+                let terminals = await terminalService.list(worktreeId: workspace.id)
+                guard let terminal = terminals.first(where: {
+                    $0.agentState != nil && $0.engine == automation.provider
+                }) else {
+                    throw AutomationScheduleError.invalid("workspace has no \(automation.provider) agent terminal")
+                }
+                let sent = try await terminalService.send(handle: terminal.handle,
+                    text: automation.prompt, enter: true, requireAgent: true)
+                guard sent.accepted else {
+                    throw AutomationScheduleError.invalid(
+                        "agent prompt refused: \(sent.refusedReason?.rawValue ?? "unknown")")
+                }
+                return AutomationFireReceipt(worktreeId: workspace.id, terminalId: terminal.handle)
+            }
+        }
+        self.automationService = automationService
+        let automationScheduler = AutomationScheduler(service: automationService)
+        self.automationScheduler = automationScheduler
+
         var registry = CommandRegistry()
         registry.register(StatusHandler(runtimeId: runtimeId, mode: mode))
         registry.register(OrchestrationCommandHandler(store: orchestration))
@@ -100,9 +149,7 @@ public final class OrchardRuntimeHost {
         // actor plus the live terminal/workspace seams.
         registry.register(WorkerCommandHandler(
             store: orchestration,
-            runtime: .live(cliCommand: cliCommand,
-                           workspaces: workspaceService,
-                           terminals: terminalService)))
+            runtime: workerRuntime))
         registry.register(TerminalCommandHandler(service: terminalService))
         registry.register(WorkspaceCommandHandler(service: workspaceService))
         registry.register(RepoRegistryHandler(service: workspaceService))
@@ -110,8 +157,10 @@ public final class OrchardRuntimeHost {
                                              workspaces: workspaceService,
                                              opens: fileOpenCenter))
         registry.register(BrowserCommandHandler(service: browserService))
+        registry.register(AutomationCommandHandler(service: automationService))
         self.registry = registry
         self.inMemory = InMemoryRuntimeServer(registry: registry, runtimeId: runtimeId)
+        automationScheduler.start()
     }
 
     /// Where the production runtime keeps its state; exposed so the app can build a
@@ -158,6 +207,7 @@ public final class OrchardRuntimeHost {
     }
 
     public func shutdown() {
+        automationScheduler.stop()
         socketServer?.stop(fileManager: fileManager)
         socketServer = nil
     }

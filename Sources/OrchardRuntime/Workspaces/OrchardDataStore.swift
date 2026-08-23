@@ -17,6 +17,8 @@ public struct OrchardData: Codable, Equatable, Sendable {
     public var worktreeLineageById: [String: WorktreeLineage]
     public var retiredWorktreeNamesByRepo: [String: RetiredNameRegistry]
     public var workspaceStatusVocabulary: [WorkspaceStatusDefinition]
+    public var automations: [Automation]
+    public var automationRuns: [AutomationRun]
 
     public init(schemaVersion: Int = 1,
                 repos: [RepoRecord] = [],
@@ -24,7 +26,8 @@ public struct OrchardData: Codable, Equatable, Sendable {
                 worktreeMeta: [String: WorktreeMeta] = [:],
                 worktreeLineageById: [String: WorktreeLineage] = [:],
                 retiredWorktreeNamesByRepo: [String: RetiredNameRegistry] = [:],
-                workspaceStatusVocabulary: [WorkspaceStatusDefinition] = WorkspaceStatusDefinition.defaults) {
+                workspaceStatusVocabulary: [WorkspaceStatusDefinition] = WorkspaceStatusDefinition.defaults,
+                automations: [Automation] = [], automationRuns: [AutomationRun] = []) {
         self.schemaVersion = schemaVersion
         self.repos = repos
         self.folderWorkspaces = folderWorkspaces
@@ -32,6 +35,26 @@ public struct OrchardData: Codable, Equatable, Sendable {
         self.worktreeLineageById = worktreeLineageById
         self.retiredWorktreeNamesByRepo = retiredWorktreeNamesByRepo
         self.workspaceStatusVocabulary = workspaceStatusVocabulary
+        self.automations = automations
+        self.automationRuns = automationRuns
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, repos, folderWorkspaces, worktreeMeta, worktreeLineageById
+        case retiredWorktreeNamesByRepo, workspaceStatusVocabulary, automations, automationRuns
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try c.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        repos = try c.decodeIfPresent([RepoRecord].self, forKey: .repos) ?? []
+        folderWorkspaces = try c.decodeIfPresent([FolderWorkspaceRecord].self, forKey: .folderWorkspaces) ?? []
+        worktreeMeta = try c.decodeIfPresent([String: WorktreeMeta].self, forKey: .worktreeMeta) ?? [:]
+        worktreeLineageById = try c.decodeIfPresent([String: WorktreeLineage].self, forKey: .worktreeLineageById) ?? [:]
+        retiredWorktreeNamesByRepo = try c.decodeIfPresent([String: RetiredNameRegistry].self, forKey: .retiredWorktreeNamesByRepo) ?? [:]
+        workspaceStatusVocabulary = try c.decodeIfPresent([WorkspaceStatusDefinition].self, forKey: .workspaceStatusVocabulary) ?? WorkspaceStatusDefinition.defaults
+        automations = try c.decodeIfPresent([Automation].self, forKey: .automations) ?? []
+        automationRuns = try c.decodeIfPresent([AutomationRun].self, forKey: .automationRuns) ?? []
     }
 
     public static let empty = OrchardData()
