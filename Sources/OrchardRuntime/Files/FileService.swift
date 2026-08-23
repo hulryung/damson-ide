@@ -114,6 +114,27 @@ public struct FileService: Sendable {
                            byteLength: data.count)
     }
 
+    /// Atomic UTF-8 write confined to `root`. Overwrites an existing file;
+    /// creates a new file only when the parent directory already exists (the
+    /// editor never mkdir's). Directories and path escapes are rejected.
+    @discardableResult
+    public func write(root: URL, relativePath: String, contents: String) throws -> FileStatInfo {
+        let url = try resolve(root: root, relativePath: relativePath)
+        if FileManager.default.fileExists(atPath: url.path) {
+            let values = try resourceValues(at: url)
+            if values.isDirectory ?? false { throw FileServiceError.notAFile }
+        } else {
+            var isDir: ObjCBool = false
+            let parent = url.deletingLastPathComponent()
+            guard FileManager.default.fileExists(atPath: parent.path, isDirectory: &isDir),
+                  isDir.boolValue else {
+                throw FileServiceError.notFound(relativePath)
+            }
+        }
+        try Data(contents.utf8).write(to: url, options: .atomic)
+        return try stat(root: root, relativePath: relativePath)
+    }
+
     public func stat(root: URL, relativePath: String = "") throws -> FileStatInfo {
         let url = try resolve(root: root, relativePath: relativePath)
         guard FileManager.default.fileExists(atPath: url.path) else {

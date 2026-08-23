@@ -63,9 +63,15 @@ struct FileExplorerSidebar: View {
         store.focusMainWindow?()
         if let match = matchingRecord(path: request.worktreePath) {
             store.select(match.record, in: match.project)
+        } else if let project = matchingProject(path: request.worktreePath) {
+            store.selectProjectRoot(project)
         }
         store.pendingOpenPath = request.relativePath
-        store.selectKind(request.mode == .diff ? .diff : .editor)
+        if request.mode == .diff {
+            store.selectKind(.diff)
+        } else {
+            store.openEditor(request.relativePath)
+        }
         revealPath = request.relativePath
     }
 
@@ -79,6 +85,11 @@ struct FileExplorerSidebar: View {
             }
         }
         return nil
+    }
+
+    private func matchingProject(path: String) -> ProjectSession? {
+        let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+        return store.projects.first { $0.repo.standardizedFileURL.path == standardized }
     }
 }
 
@@ -185,10 +196,11 @@ private struct FileExplorerPane: View {
                 .contentShape(Rectangle())
                 .onTapGesture { activate(hit.relativePath) }
                 .contextMenu {
-                    Button("Reveal in Finder") { reveal(hit.relativePath) }
+                    Button("Open Editor") { activate(hit.relativePath) }
                     if changed[hit.relativePath] != nil {
-                        Button("Open Diff") { activate(hit.relativePath) }
+                        Button("Open Diff") { store.openDiff(hit.relativePath) }
                     }
+                    Button("Reveal in Finder") { reveal(hit.relativePath) }
                 }
             .listRowInsets(EdgeInsets(top: 1, leading: 6, bottom: 1, trailing: 6))
         }
@@ -197,8 +209,7 @@ private struct FileExplorerPane: View {
 
     private func activate(_ relativePath: String) {
         model.highlighted = relativePath
-        store.pendingOpenPath = relativePath
-        store.selectKind(changed[relativePath] != nil ? .diff : .editor)
+        store.openEditor(relativePath)
     }
 
     private func reveal(_ relativePath: String) {
@@ -211,6 +222,7 @@ private struct FileTreeRow: View {
     let node: FileNode
     let depth: Int
     @ObservedObject var model: FileExplorerModel
+    @EnvironmentObject var store: AppStore
     let changed: [String: GitFileChange.Kind]
     let onActivate: (String) -> Void
     let onReveal: (String) -> Void
@@ -250,10 +262,13 @@ private struct FileTreeRow: View {
                 }
             }
             .contextMenu {
-                Button("Reveal in Finder") { onReveal(node.relativePath) }
-                if !node.isDirectory, changed[node.relativePath] != nil {
-                    Button("Open Diff") { onActivate(node.relativePath) }
+                if !node.isDirectory {
+                    Button("Open Editor") { onActivate(node.relativePath) }
+                    if changed[node.relativePath] != nil {
+                        Button("Open Diff") { store.openDiff(node.relativePath) }
+                    }
                 }
+                Button("Reveal in Finder") { onReveal(node.relativePath) }
             }
             if node.isDirectory, model.expanded.contains(node.relativePath) {
                 ForEach(model.children[node.relativePath] ?? []) { child in

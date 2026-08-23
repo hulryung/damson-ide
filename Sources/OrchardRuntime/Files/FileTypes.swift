@@ -147,6 +147,9 @@ public struct FileWatchChange: Equatable, Sendable {
         case created
         case deleted
         case renamed
+        /// Same path, new contents or inode (atomic overwrite). The explorer
+        /// ignores this; the editor uses it for revert-on-external-change.
+        case modified
     }
 
     public var kind: Kind
@@ -158,6 +161,18 @@ public struct FileWatchChange: Equatable, Sendable {
         self.kind = kind
         self.relativePath = relativePath
         self.previousRelativePath = previousRelativePath
+    }
+}
+
+/// Identity used to detect in-place content changes. `snapshot` still exposes
+/// inode-only maps so existing create/delete/rename tests stay unchanged.
+public struct FileWatchIdentity: Equatable, Sendable {
+    public var inode: UInt64
+    public var mtime: Double
+
+    public init(inode: UInt64, mtime: Double) {
+        self.inode = inode
+        self.mtime = mtime
     }
 }
 

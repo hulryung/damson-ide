@@ -231,11 +231,7 @@ struct TabGroupPane: View {
             case .diff:
                 DiffHost(key: key)
             case .editor:
-                PlaceholderPane(
-                    symbol: "doc.text",
-                    title: store.pendingOpenPath.map { ($0 as NSString).lastPathComponent } ?? "Editor",
-                    detail: store.pendingOpenPath.map { "\($0) — the file editor lands in a later wave." }
-                        ?? "The file editor lands in a later wave.")
+                EditorPane(tab: tab, key: key)
             case .browser:
                 BrowserPane(key: key)
             }
@@ -268,6 +264,12 @@ struct TabChip: View {
                         .font(.system(size: 10))
                     Text(tab.title)
                         .font(Tokens.fontRow)
+                    if tab.isDirty {
+                        Circle()
+                            .fill(Color.accentColor)
+                            .frame(width: 6, height: 6)
+                            .help("Unsaved changes")
+                    }
                     if let badge {
                         Text(badge)
                             .font(Tokens.fontPill)

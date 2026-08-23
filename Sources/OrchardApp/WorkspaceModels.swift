@@ -56,14 +56,24 @@ struct WorkbenchTab: Identifiable, Hashable {
     var agentID: UUID?
     /// Agent tabs only. Chat is an overlay on the live PTY, never a second session.
     var viewMode: TabViewMode
+    /// Worktree-relative path for an editor tab. Nil is the empty "Editor" placeholder.
+    var filePath: String?
+    /// Unsaved buffer. The tab strip draws a dirty dot when this is true.
+    var isDirty: Bool
 
     var isAgentTab: Bool { agentID != nil }
 
     init(id: UUID = UUID(), kind: TabKind, title: String? = nil, agentID: UUID? = nil,
-         viewMode: TabViewMode = .terminal) {
+         viewMode: TabViewMode = .terminal, filePath: String? = nil, isDirty: Bool = false) {
         self.id = id
         self.kind = kind
-        self.title = title ?? kind.label
+        self.filePath = filePath
+        self.isDirty = isDirty
+        if let filePath {
+            self.title = title ?? (filePath as NSString).lastPathComponent
+        } else {
+            self.title = title ?? kind.label
+        }
         self.agentID = agentID
         self.viewMode = agentID == nil ? .terminal : viewMode
     }
@@ -158,6 +168,47 @@ indirect enum SplitNode: Identifiable, Hashable {
             return nil
         case .split(_, _, let first, let second):
             return first.selectedTab(in: groupID) ?? second.selectedTab(in: groupID)
+        }
+    }
+
+    func tab(id: UUID) -> WorkbenchTab? {
+        switch self {
+        case .group(let g):
+            return g.tabs.first { $0.id == id }
+        case .split(_, _, let first, let second):
+            return first.tab(id: id) ?? second.tab(id: id)
+        }
+    }
+
+    func findEditor(path: String) -> (groupID: UUID, tabID: UUID)? {
+        switch self {
+        case .group(let g):
+            if let tab = g.tabs.first(where: { $0.kind == .editor && $0.filePath == path }) {
+                return (g.id, tab.id)
+            }
+            return nil
+        case .split(_, _, let first, let second):
+            return first.findEditor(path: path) ?? second.findEditor(path: path)
+        }
+    }
+
+    mutating func mutateTab(_ tabID: UUID, _ body: (inout WorkbenchTab) -> Void) -> Bool {
+        switch self {
+        case .group(var group):
+            guard let index = group.tabs.firstIndex(where: { $0.id == tabID }) else { return false }
+            body(&group.tabs[index])
+            self = .group(group)
+            return true
+        case .split(let id, let axis, var first, var second):
+            if first.mutateTab(tabID, body) {
+                self = .split(id: id, axis: axis, first: first, second: second)
+                return true
+            }
+            if second.mutateTab(tabID, body) {
+                self = .split(id: id, axis: axis, first: first, second: second)
+                return true
+            }
+            return false
         }
     }
 }
