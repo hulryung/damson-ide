@@ -117,7 +117,9 @@ extension OrchestrationStore {
         return try DispatchContext(row: row)
     }
 
-    func activeDispatchForAssignee(handle: String, paneKey: String?) throws -> DispatchContext? {
+    /// Public so the RPC adapter can resolve a worker's live dispatch from its
+    /// terminal identity (`ask` with no explicit ids, worker-mode `check`).
+    public func activeDispatchForAssignee(handle: String, paneKey: String?) throws -> DispatchContext? {
         if let row = try db.queryOne(
             """
             SELECT * FROM dispatch_contexts
