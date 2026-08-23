@@ -83,7 +83,9 @@ Tests/
 ```
 
 Dependency rule: `OrchardCore ← {OrchardTerminals, OrchardOrchestration(?)} ←
-OrchardRuntime ← {orchard? (no — orchard depends only on OrchardProtocol), OrchardApp}`.
+OrchardRuntime ← {orchard, OrchardApp}`. (T12 revised the original thin-client rule: the
+`orchard` executable links OrchardRuntime + OrchardTerminals so `orchard serve` can host
+the runtime headless; the light paths — status, agent-context, guide — never construct it.)
 Only `OrchardTerminals` and the `OrchardApp` app may import damson products.
 
 ## Work breakdown
