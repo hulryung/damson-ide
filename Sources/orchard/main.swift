@@ -104,9 +104,76 @@ func formatHuman(method: String, result: JSONValue?) -> String {
             lines.append("(truncated)")
         }
         return lines.joined(separator: "\n")
+    case "worktree-ps":
+        return formatWorktreePs(result)
+    case "workspace-ports":
+        return formatWorkspacePorts(result)
     default:
         return result.map(String.init(describing:)) ?? "ok"
     }
+}
+
+func formatWorktreePs(_ result: JSONValue?) -> String {
+    let object = result?.objectValue
+    let rows = object?["worktrees"]?.arrayValue ?? []
+    if rows.isEmpty { return "No worktrees found." }
+    var blocks: [String] = []
+    for row in rows {
+        let item = row.objectValue ?? [:]
+        let name = item["displayName"]?.stringValue ?? "?"
+        let branch = item["branch"]?.stringValue ?? ""
+        let path = item["path"]?.stringValue ?? ""
+        let processes = item["processes"]?.arrayValue ?? []
+        let ports = item["ports"]?.arrayValue ?? []
+        let portList = ports.compactMap { port -> String? in
+            guard let number = port.objectValue?["port"]?.numberValue.map({ Int($0) }) else { return nil }
+            if let process = port.objectValue?["processName"]?.stringValue, !process.isEmpty {
+                return "\(number) (\(process))"
+            }
+            return String(number)
+        }
+        var lines = ["\(name)  \(branch)  live:\(processes.count)  ports:\(ports.count)"]
+        if !path.isEmpty { lines.append(path) }
+        for process in processes {
+            let proc = process.objectValue ?? [:]
+            let kind = proc["kind"]?.stringValue ?? "shell"
+            let engine = proc["engine"]?.stringValue ?? ""
+            let state = proc["agentState"]?.stringValue ?? ""
+            let handle = proc["handle"]?.stringValue ?? ""
+            var line = "  \(kind)  \(engine)"
+            if !state.isEmpty { line += "  \(state)" }
+            if !handle.isEmpty { line += "  \(handle)" }
+            lines.append(line)
+        }
+        if !portList.isEmpty {
+            lines.append("  ports  " + portList.joined(separator: "  "))
+        }
+        blocks.append(lines.joined(separator: "\n"))
+    }
+    var body = blocks.joined(separator: "\n\n")
+    if object?["truncated"]?.boolValue == true {
+        let shown = rows.count
+        let total = object?["totalCount"]?.numberValue.map { Int($0) } ?? shown
+        body += "\n\ntruncated: showing \(shown) of \(total)"
+    }
+    return body
+}
+
+func formatWorkspacePorts(_ result: JSONValue?) -> String {
+    let ports = result?.objectValue?["ports"]?.arrayValue ?? []
+    if ports.isEmpty { return "No workspace ports." }
+    return ports.map { item -> String in
+        let port = item.objectValue ?? [:]
+        let number = port["port"]?.numberValue.map { Int($0) } ?? 0
+        let host = port["connectHost"]?.stringValue ?? "localhost"
+        let name = port["displayName"]?.stringValue ?? port["worktreeId"]?.stringValue ?? "?"
+        let process = port["processName"]?.stringValue ?? ""
+        let pid = port["pid"]?.numberValue.map { Int($0) }
+        var line = "\(host):\(number)  \(name)"
+        if !process.isEmpty { line += "  \(process)" }
+        if let pid { line += "  pid:\(pid)" }
+        return line
+    }.joined(separator: "\n")
 }
 
 do {
@@ -125,12 +192,24 @@ do {
         if parsed.json { let data = try JSONEncoder.pretty.encode(["topic": "orchestration", "content": orchestrationGuide]); FileHandle.standardOutput.write(data + Data("\n".utf8)) } else { print(orchestrationGuide) }
     default:
         var method = parsed.spec.name, params = parsed.params; params.removeValue(forKey: "json")
-        if method == "repo" || method == "browser" || method == "automations", case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue {
+        if method == "repo" || method == "browser" || method == "automations" || method == "worktree", case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue {
             method = "\(method)-\(subcommand)"
             let rest = Array(values.dropFirst())
             if method.hasPrefix("automations-") && !rest.isEmpty && params["id"] == nil {
                 params["id"] = rest[0]
+            } else if method.hasPrefix("worktree-") {
+                if params["cwd"] == nil {
+                    params["cwd"] = .string(FileManager.default.currentDirectoryPath)
+                }
+                if !rest.isEmpty, params["worktree"] == nil,
+                   ["worktree-show", "worktree-set", "worktree-rm"].contains(method) {
+                    params["worktree"] = rest[0]
+                } else if !rest.isEmpty {
+                    params["_args"] = .array(rest)
+                }
             } else if !rest.isEmpty { params["_args"] = .array(rest) }
+        } else if method == "worktree" {
+            throw CLIError.usage("usage: orchard worktree list|show|current|create|set|rm|ps [options]")
         }
         if method == "file" {
             guard case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue else {
