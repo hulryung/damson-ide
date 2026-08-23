@@ -54,6 +54,16 @@ public enum OrchestrationContract {
     reads, and launch preferences must degrade to typed unsupported/fallback receipts
     when the runtime does not advertise their capabilities.
 
+    ## Terminals
+
+    The CLI exposes the runtime terminal lifecycle directly: `terminal list`,
+    `create`, `read`, `send`, `wait`, `close`, and `rename`. Address an existing
+    terminal with `--terminal <handle>`; use cursor reads for incremental output and
+    `--screen` for its rendered grid. A complete smoke path is scriptable without the
+    app: create a terminal, send text with `--enter`, read or wait for it, then verify
+    it still appears in `terminal list`. `terminal split` is reserved but currently
+    returns the typed `not_implemented` error.
+
     \(workerDuties)
     """
 }
