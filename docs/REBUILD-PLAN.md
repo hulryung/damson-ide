@@ -470,7 +470,9 @@ public API from the app container; damson-side changes only if additive and nece
 
 ### Wave 8+ backlog
 
-Also:
+Adopted/restored panes bypass T30's cell-snap/top-align fit (a keeper-adopted home
+shell still shows a half-clipped first row after relaunch, 2026-08-24) — apply the
+fit path on adoption too. Also:
 
 Project the repo primary checkout (and folder workspaces) into the runtime workspace
 registry as `repoId::path` the way Orca does — today `orchard file search --worktree
