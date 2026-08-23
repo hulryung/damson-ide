@@ -19,6 +19,12 @@ public final class TerminalService {
     /// with no bound would hang a coordinator forever on a wedged agent).
     public static let defaultWaitTimeout: TimeInterval = 60
 
+    /// T11 additive hook: fired at most once per pane incarnation when its PTY ends —
+    /// `deliberate: true` for a close through this service (user close, coordinator
+    /// worker-stop/release), `deliberate: false` when the child exited on its own.
+    /// The runtime assembly points this at worker-process-exit auto-escalation.
+    public var onTerminalExit: ((TerminalExitEvent) -> Void)?
+
     public init(registry: TerminalRegistry = TerminalRegistry(),
                 factory: @escaping TerminalSessionFactory,
                 pipeline: SendPipelineConfig = SendPipelineConfig(),
@@ -107,6 +113,7 @@ public final class TerminalService {
         for continuation in record.statusContinuations.values { continuation.finish() }
         record.statusContinuations.removeAll()
         registry.unregister(record)
+        notifyExit(record, deliberate: true)
     }
 
     @discardableResult
@@ -397,15 +404,34 @@ public final class TerminalService {
             record.exited = true
             record.exitCode = code
             settleWaiters(record, exitCode: code)
+            // The processExited guard keeps a straggler state change from a replaced
+            // (respawned-away) session from reporting the live incarnation as dead.
+            if record.session.processExited {
+                notifyExit(record, deliberate: false)
+            }
         case .errored:
             if record.session.processExited {
                 record.exited = true
                 record.exitCode = record.session.exitCode
                 settleWaiters(record, exitCode: record.exitCode)
+                notifyExit(record, deliberate: false)
             }
         default:
             break
         }
+    }
+
+    /// One exit event per pane incarnation. A spontaneous exit that is later followed
+    /// by a user close reports only the spontaneous exit; a close of a live PTY
+    /// reports only the deliberate close.
+    private func notifyExit(_ record: TerminalRecord, deliberate: Bool) {
+        guard !record.exitNotified else { return }
+        record.exitNotified = true
+        onTerminalExit?(TerminalExitEvent(
+            handle: record.handle,
+            paneKey: record.paneKey,
+            exitCode: record.exitCode ?? record.session.exitCode,
+            deliberate: deliberate))
     }
 
     /// `.typeWhenIdle` engines get the task prompt exactly once, on the first idle,

@@ -54,6 +54,9 @@ public final class TerminalRecord {
     /// Once-only guard for the initial `.typeWhenIdle` prompt delivery.
     var initialPromptStarted = false
 
+    /// Once-only guard for the T11 `onTerminalExit` event (per pane incarnation).
+    var exitNotified = false
+
     private var cancellables = Set<AnyCancellable>()
 
     init(handle: String, spec: TerminalCreateSpec, engine: AgentEngine,
@@ -111,6 +114,7 @@ public final class TerminalRecord {
         self.agentSession = agentSession
         self.exited = false
         self.exitCode = nil
+        self.exitNotified = false          // the new incarnation can exit again
         self.initialPromptStarted = true   // the task prompt belongs to incarnation 1
         attach(session: session)
     }

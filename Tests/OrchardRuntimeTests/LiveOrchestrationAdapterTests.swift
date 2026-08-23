@@ -30,8 +30,9 @@ final class LiveOrchestrationAdapterTests: XCTestCase {
         await host.inMemory.perform(RPCRequest(method: method, params: .object(params)))
     }
 
-    /// run-create → task-create → dispatch, returning (runId, taskId, dispatchId).
-    private func makeDispatched(worker: String = "term_w") async throws -> (run: String, task: String, dispatch: String) {
+    /// run-create → task-create → dispatch, returning (runId, taskId, dispatchId,
+    /// dispatchCapability — the T11 lifecycle secret the worker must present).
+    private func makeDispatched(worker: String = "term_w") async throws -> (run: String, task: String, dispatch: String, capability: String) {
         let run = await perform("run-create", [
             "objective": .string("t"), "from": .string("term_c")])
         let runID = try XCTUnwrap(run.result?.field("runId")?.stringValue)
@@ -41,7 +42,8 @@ final class LiveOrchestrationAdapterTests: XCTestCase {
         let dispatch = await perform("dispatch", [
             "task": .string(taskID), "to": .string(worker)])
         let dispatchID = try XCTUnwrap(dispatch.result?.field("dispatchId")?.stringValue)
-        return (runID, taskID, dispatchID)
+        let capability = try XCTUnwrap(dispatch.result?.field("dispatchCapability")?.stringValue)
+        return (runID, taskID, dispatchID, capability)
     }
 
     // MARK: - ask / reply
@@ -50,9 +52,11 @@ final class LiveOrchestrationAdapterTests: XCTestCase {
         let ids = try await makeDispatched()
 
         let server = host.inMemory
+        let capability = ids.capability
         let asking = Task.detached { () -> RPCResponse in
             await server.perform(RPCRequest(method: "ask", params: .object([
                 "from": .string("term_w"),
+                "dispatch-capability": .string(capability),
                 "question": .string("Which database?"),
                 "options": .string("sqlite,postgres"),
                 "timeout-ms": .number(10000),
