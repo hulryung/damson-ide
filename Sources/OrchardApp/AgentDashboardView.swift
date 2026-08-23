@@ -2,9 +2,10 @@ import SwiftUI
 import OrchardCore
 import OrchardTerminals
 
-/// Agent dashboard: kanban buckets attention | working | done | idle.
-/// Click-to-focus routes through the store so the main workbench selects that
-/// workspace and binds the agent's terminal tab.
+/// Agent dashboard: kanban buckets attention | working | done | idle, fed by
+/// the live `AgentStatusSnapshot` stream. Click-to-focus routes through the
+/// store so the main workbench selects that workspace and binds the agent's
+/// terminal tab. Observation-only — never writes orchestration state.
 struct AgentDashboardView: View {
     @EnvironmentObject var store: AppStore
 
@@ -13,7 +14,7 @@ struct AgentDashboardView: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
-            ForEach(AgentDashboardBucket.allCases) { bucket in
+            ForEach(DashboardBucket.allCases) { bucket in
                 dashboardColumn(bucket)
             }
         }
@@ -22,11 +23,11 @@ struct AgentDashboardView: View {
         .frame(minWidth: 880, minHeight: 420)
     }
 
-    private func cards(in bucket: AgentDashboardBucket) -> [DashboardCard] {
+    private func cards(in bucket: DashboardBucket) -> [DashboardCard] {
         var items: [DashboardCard] = []
         for project in store.projects {
             for agent in project.agents.agents {
-                if agent.state.dashboardBucket == bucket {
+                if store.dashboardBucket(for: agent) == bucket {
                     items.append(DashboardCard(project: project, agent: agent))
                 }
             }
@@ -34,7 +35,7 @@ struct AgentDashboardView: View {
         return items
     }
 
-    private func dashboardColumn(_ bucket: AgentDashboardBucket) -> some View {
+    private func dashboardColumn(_ bucket: DashboardBucket) -> some View {
         let all = cards(in: bucket)
         let visible = Array(all.prefix(capPerBucket))
         let overflow = max(0, all.count - visible.count)
@@ -89,8 +90,15 @@ struct DashboardCardView: View {
     @EnvironmentObject var store: AppStore
     let card: DashboardCard
 
-    private var highlighted: Bool {
-        store.unackedDoneAgentIDs.contains(card.agent.id)
+    private var dot: DashboardDotState {
+        store.displayDotState(for: card.agent)
+    }
+
+    /// Done cards stay highlighted until the user focuses them (unacked set).
+    private var highlighted: Bool { dot == .done }
+
+    private var workspaceStatus: WorkspaceStatusAppearance? {
+        card.agent.worktree.map { store.statusAppearance(for: $0.id) }
     }
 
     var body: some View {
@@ -99,28 +107,28 @@ struct DashboardCardView: View {
         } label: {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    Text(card.agent.state.glyph)
+                    Text(DashboardProjection.glyph(for: dot))
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(card.agent.state.color)
-                    Text(card.agent.engine.displayName)
+                        .foregroundStyle(dot.color)
+                    Text(store.agentTypeName(for: card.agent))
                         .font(Tokens.fontRow)
                         .lineLimit(1)
                     Spacer(minLength: 4)
-                    ElapsedLabel(since: card.agent.startedAt)
+                    ElapsedLabel(since: store.stateStartedAt(for: card.agent))
                         .font(.system(size: 9))
                         .foregroundStyle(Tokens.textTertiary)
                 }
-                Text(card.agent.task?.title ?? card.project.name)
+                Text(store.workspaceName(for: card.agent, in: card.project))
                     .font(Tokens.fontMeta)
                     .foregroundStyle(Tokens.textSecondary)
                     .lineLimit(1)
-                if let prompt = card.agent.task?.prompt, !prompt.isEmpty {
-                    Text(prompt)
+                if let line = store.detailLine(for: card.agent) {
+                    Text(line)
                         .font(Tokens.fontMeta)
                         .foregroundStyle(Tokens.textTertiary)
                         .lineLimit(2)
                 }
-                if let status = card.agent.worktree.flatMap({ store.meta.status(for: $0.id) }) {
+                if let status = workspaceStatus {
                     Text(status.label)
                         .font(Tokens.fontPill)
                         .foregroundStyle(status.color)

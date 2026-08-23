@@ -1,6 +1,7 @@
 import SwiftUI
 import DamsonTerminal
 import OrchardCore
+import OrchardTerminals
 
 extension DamsonTheme {
     var swiftBackground: Color { Color(nsColor: background) }
@@ -86,20 +87,13 @@ extension AgentRuntimeState {
         }
     }
 
-    /// Kanban bucket for the agent dashboard (inventory §6).
-    var dashboardBucket: AgentDashboardBucket {
-        switch self {
-        case .awaitingApproval, .awaitingInput: return .attention
-        case .starting, .working: return .working
-        case .finished, .errored: return .done
-        case .idle: return .idle
-        }
+    /// Fallback kanban bucket when the status stream has not published yet.
+    var dashboardBucket: DashboardBucket {
+        DashboardProjection.bucket(runtime: self, unseen: false)
     }
 }
 
-enum AgentDashboardBucket: String, CaseIterable, Identifiable {
-    case attention, working, done, idle
-    var id: String { rawValue }
+extension DashboardBucket {
     var title: String {
         switch self {
         case .attention: return "Attention"
@@ -110,17 +104,147 @@ enum AgentDashboardBucket: String, CaseIterable, Identifiable {
     }
 }
 
+extension DashboardDotState {
+    var color: Color {
+        switch self {
+        case .working: return .blue
+        case .blocked: return .orange
+        case .waiting: return .yellow
+        case .done: return .gray
+        case .idle: return .green
+        }
+    }
+}
+
+/// Resolved board-column visuals for the four defaults plus custom vocabulary
+/// (`WorkspaceStatusDefinition.color` / `.icon` from settings / orchard-data.json).
+struct WorkspaceStatusAppearance: Identifiable, Hashable {
+    let id: String
+    let label: String
+    let color: Color
+    let symbol: String
+
+    init(definition: WorkspaceStatusDefinition) {
+        id = definition.id
+        label = definition.label
+        color = Self.color(token: definition.color, id: definition.id)
+        symbol = Self.symbol(icon: definition.icon, id: definition.id)
+    }
+
+    init(status: WorkspaceStatus) {
+        id = status.rawValue
+        label = status.label
+        color = status.color
+        symbol = status.symbol
+    }
+
+    static func resolve(id: String, vocabulary: [WorkspaceStatusDefinition]) -> WorkspaceStatusAppearance {
+        if let definition = vocabulary.first(where: { $0.id == id }) {
+            return WorkspaceStatusAppearance(definition: definition)
+        }
+        if let status = WorkspaceStatus(rawValue: id) {
+            return WorkspaceStatusAppearance(status: status)
+        }
+        return WorkspaceStatusAppearance(
+            definition: WorkspaceStatusDefinition(id: id, label: id, color: "neutral", icon: "circle"))
+    }
+
+    /// Named tokens Orca ships, plus a few extras used by custom columns.
+    static let colorTokens = [
+        "neutral", "blue", "sky", "violet", "amber", "emerald", "rose", "zinc",
+    ]
+
+    static func color(token: String?, id: String) -> Color {
+        let raw = (token?.isEmpty == false ? token : defaultColorToken(for: id)) ?? "neutral"
+        switch raw {
+        case "neutral": return Tokens.textTertiary
+        case "blue", "conductor-progress": return Color(hex: 0x5B9FD4)
+        case "sky": return Color(hex: 0x7DD3FC)
+        case "violet", "conductor-review": return Color(hex: 0xB48EAD)
+        case "amber": return Color(hex: 0xE2C08D)
+        case "emerald", "conductor-done": return Tokens.Git.added
+        case "rose": return Color(hex: 0xE4676B)
+        case "zinc": return Tokens.textSecondary
+        default:
+            if let hex = parseHex(raw) { return Color(hex: hex) }
+            return Tokens.textTertiary
+        }
+    }
+
+    static func symbol(icon: String?, id: String) -> String {
+        let raw = (icon?.isEmpty == false ? icon : defaultIcon(for: id)) ?? "circle"
+        switch raw {
+        case "circle": return "circle"
+        case "circle-dot", "circle-progress", "conductor-progress": return "circle.lefthalf.filled"
+        case "circle-dashed": return "circle.dashed"
+        case "circle-ellipsis": return "ellipsis.circle"
+        case "git-pull-request", "conductor-review": return "eye"
+        case "timer": return "timer"
+        case "flag": return "flag"
+        case "circle-alert": return "exclamationmark.circle"
+        case "circle-pause": return "pause.circle"
+        case "circle-play": return "play.circle"
+        case "circle-check", "conductor-done": return "checkmark.circle.fill"
+        case "ban": return "nosign"
+        default:
+            return WorkspaceStatus(rawValue: id)?.symbol ?? "circle"
+        }
+    }
+
+    private static func defaultColorToken(for id: String) -> String {
+        switch id {
+        case "todo": return "neutral"
+        case "in-progress": return "blue"
+        case "in-review": return "violet"
+        case "completed": return "emerald"
+        default: return "neutral"
+        }
+    }
+
+    private static func defaultIcon(for id: String) -> String {
+        switch id {
+        case "todo": return "circle"
+        case "in-progress": return "circle-dot"
+        case "in-review": return "git-pull-request"
+        case "completed": return "circle-check"
+        default: return "circle"
+        }
+    }
+
+    private static func parseHex(_ raw: String) -> UInt32? {
+        var hex = raw
+        if hex.hasPrefix("#") { hex.removeFirst() }
+        guard hex.count == 6, let value = UInt32(hex, radix: 16) else { return nil }
+        return value
+    }
+}
+
 /// Status slot on a workspace card: the user-set `workspaceStatus`, not live agent state.
 struct WorkspaceStatusSlot: View {
-    let status: WorkspaceStatus
+    let appearance: WorkspaceStatusAppearance
     var size: CGFloat = 9
 
+    init(appearance: WorkspaceStatusAppearance, size: CGFloat = 9) {
+        self.appearance = appearance
+        self.size = size
+    }
+
+    init(status: WorkspaceStatus, size: CGFloat = 9) {
+        self.appearance = WorkspaceStatusAppearance(status: status)
+        self.size = size
+    }
+
+    init(definition: WorkspaceStatusDefinition, size: CGFloat = 9) {
+        self.appearance = WorkspaceStatusAppearance(definition: definition)
+        self.size = size
+    }
+
     var body: some View {
-        Image(systemName: status.symbol)
+        Image(systemName: appearance.symbol)
             .font(.system(size: size, weight: .semibold))
-            .foregroundStyle(status.color)
+            .foregroundStyle(appearance.color)
             .frame(width: 14)
-            .help(status.label)
+            .help(appearance.label)
     }
 }
 
@@ -179,9 +303,6 @@ struct ElapsedLabel: View {
     }
 
     static func format(_ interval: TimeInterval) -> String {
-        let seconds = max(0, Int(interval))
-        if seconds < 60 { return "\(seconds)s" }
-        if seconds < 3600 { return "\(seconds / 60)m" }
-        return "\(seconds / 3600)h \((seconds % 3600) / 60)m"
+        DashboardProjection.formatElapsed(interval)
     }
 }

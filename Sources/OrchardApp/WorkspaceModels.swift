@@ -200,14 +200,22 @@ final class WorkspaceMetaStore: ObservableObject {
         objectWillChange.send()
     }
 
+    /// Board-column id as stored. Unknown or missing ids fall back to `todo`
+    /// so a custom vocabulary entry that was later removed still has a slot.
+    func statusID(for id: UUID) -> String {
+        meta(for: id)?.workspaceStatus ?? WorkspaceStatus.todo.rawValue
+    }
+
     func status(for id: UUID) -> WorkspaceStatus {
-        guard let raw = meta(for: id)?.workspaceStatus,
-              let status = WorkspaceStatus(rawValue: raw) else { return .todo }
-        return status
+        WorkspaceStatus(rawValue: statusID(for: id)) ?? .todo
     }
 
     func setStatus(_ status: WorkspaceStatus, for id: UUID) {
-        mutate(id) { $0.workspaceStatus = status.rawValue }
+        setStatusID(status.rawValue, for: id)
+    }
+
+    func setStatusID(_ statusID: String, for id: UUID) {
+        mutate(id) { $0.workspaceStatus = statusID }
     }
 
     func sortOrder(for id: UUID) -> Int { meta(for: id)?.sortOrder ?? 0 }

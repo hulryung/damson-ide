@@ -35,7 +35,8 @@ final class AppStore: ObservableObject {
     @Published var selectedProjectID: UUID?
     @Published var selection: WorkbenchKey?
     @Published var filterProjectID: UUID?
-    @Published var filterStatus: WorkspaceStatus?
+    /// Board-column id from the workspace-status vocabulary (defaults + custom).
+    @Published var filterStatusID: String?
     @Published var ordering: CardOrdering = .manual
 
     @Published var composerProjectID: UUID?
@@ -44,6 +45,8 @@ final class AppStore: ObservableObject {
 
     /// Done-bucket cards stay highlighted until the user focuses them.
     @Published var unackedDoneAgentIDs: Set<UUID> = []
+    /// Live `AgentStatusSnapshot` per agent, observation-only from the status stream.
+    @Published private(set) var agentStatusByID: [UUID: AgentStatusSnapshot] = [:]
 
     /// Currently focused tab group, so split/new-tab commands have a target.
     @Published var focusedGroupID: UUID?
@@ -63,6 +66,7 @@ final class AppStore: ObservableObject {
     /// Pre-T8 sidebar list. Imported once into the registry, then deleted.
     private let legacyWorkspacesKey = "orchard.workspaces"
     private var repoObserveTask: Task<Void, Never>?
+    private var statusListenTasks: [UUID: Task<Void, Never>] = [:]
     private var notificationsAuthorized = false
 
     struct PendingDeletion: Identifiable {
@@ -127,8 +131,8 @@ final class AppStore: ObservableObject {
 
     func visibleRecords(in project: ProjectSession) -> [WorktreeRecord] {
         var cards = project.records
-        if let filterStatus {
-            cards = cards.filter { meta.status(for: $0.id) == filterStatus }
+        if let filterStatusID {
+            cards = cards.filter { meta.statusID(for: $0.id) == filterStatusID }
         }
         switch ordering {
         case .manual:
@@ -178,6 +182,116 @@ final class AppStore: ObservableObject {
             bindAgentTab(agent, key: .projectRoot(project.id))
         }
         focusMainWindow?()
+    }
+
+    // MARK: - Live status (observation-only)
+
+    /// Four defaults plus any custom columns stored in orchard-data.json.
+    var statusVocabulary: [WorkspaceStatusDefinition] {
+        workspaceService.statusVocabulary()
+    }
+
+    func statusAppearance(for recordID: UUID) -> WorkspaceStatusAppearance {
+        WorkspaceStatusAppearance.resolve(id: meta.statusID(for: recordID),
+                                          vocabulary: statusVocabulary)
+    }
+
+    func setWorkspaceStatus(_ statusID: String, for recordID: UUID) {
+        meta.setStatusID(statusID, for: recordID)
+    }
+
+    func addWorkspaceStatus(label: String, color: String, icon: String = "flag") throws {
+        let trimmed = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        let slug = Self.slugStatusID(trimmed)
+        try workspaceService.addStatusDefinition(
+            WorkspaceStatusDefinition(id: slug, label: trimmed, color: color, icon: icon))
+        objectWillChange.send()
+    }
+
+    func dashboardBucket(for agent: AgentSession) -> DashboardBucket {
+        let unseen = unackedDoneAgentIDs.contains(agent.id)
+        if let snapshot = agentStatusByID[agent.id] {
+            return DashboardProjection.bucket(snapshot: snapshot, unseen: unseen)
+        }
+        return DashboardProjection.bucket(runtime: agent.state, unseen: unseen)
+    }
+
+    func displayDotState(for agent: AgentSession) -> DashboardDotState {
+        let unseen = unackedDoneAgentIDs.contains(agent.id)
+        let dot = agentStatusByID[agent.id].map(DashboardProjection.dotState(from:))
+            ?? DashboardProjection.dotState(runtime: agent.state)
+        return DashboardProjection.displayState(dotState: dot, unseen: unseen)
+    }
+
+    func stateStartedAt(for agent: AgentSession) -> Date {
+        if let snapshot = agentStatusByID[agent.id] {
+            return Date(timeIntervalSince1970: snapshot.stateStartedAt / 1000)
+        }
+        return agent.startedAt
+    }
+
+    func detailLine(for agent: AgentSession) -> String? {
+        if let snapshot = agentStatusByID[agent.id] {
+            return DashboardProjection.detailLine(
+                prompt: snapshot.prompt,
+                lastAssistant: snapshot.lastAssistantMessage
+                    ?? snapshot.lastCompletedAssistantMessage)
+        }
+        return agent.task.flatMap { $0.prompt.isEmpty ? nil : $0.prompt }
+    }
+
+    func workspaceName(for agent: AgentSession, in project: ProjectSession) -> String {
+        if let worktreeID = agent.worktree?.id, let record = project.record(id: worktreeID) {
+            return record.title
+        }
+        return project.name
+    }
+
+    func agentTypeName(for agent: AgentSession) -> String {
+        if let type = agentStatusByID[agent.id]?.agentType, !type.isEmpty {
+            return type
+        }
+        return agent.engine.displayName
+    }
+
+    private func attachStatusStream(for agent: AgentSession) {
+        guard let service = runtime?.terminalService else { return }
+        let handle: String
+        if let paneKey = agent.paneKey, let live = service.liveHandle(forPaneKey: paneKey) {
+            handle = live
+        } else if let spawned = agent.terminalHandle {
+            handle = spawned
+        } else {
+            return
+        }
+        statusListenTasks[agent.id]?.cancel()
+        let agentID = agent.id
+        statusListenTasks[agentID] = Task { [weak self] in
+            do {
+                let stream = try service.agentStatusUpdates(handle: handle)
+                for await snapshot in stream {
+                    guard !Task.isCancelled else { break }
+                    self?.agentStatusByID[agentID] = snapshot
+                    self?.objectWillChange.send()
+                }
+            } catch {
+                // Observation-only: a missing handle is not a dashboard error.
+            }
+        }
+    }
+
+    private func detachStatusStream(_ agentID: UUID) {
+        statusListenTasks[agentID]?.cancel()
+        statusListenTasks[agentID] = nil
+        agentStatusByID[agentID] = nil
+        unackedDoneAgentIDs.remove(agentID)
+    }
+
+    private static func slugStatusID(_ label: String) -> String {
+        let slug = label.lowercased()
+            .replacingOccurrences(of: "[^a-z0-9]+", with: "-", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return slug.isEmpty ? "status" : slug
     }
 
     // MARK: - Projects
@@ -309,6 +423,9 @@ final class AppStore: ObservableObject {
                 _ = meta.ensure(worktree.id)
             }
             projects.append(project)
+            for agent in project.agents.agents {
+                attachStatusStream(for: agent)
+            }
             return project
         } catch {
             guard !silent else { return nil }
@@ -319,6 +436,9 @@ final class AppStore: ObservableObject {
 
     private func detachProject(_ project: ProjectSession) {
         guard projects.contains(where: { $0.id == project.id }) else { return }
+        for agent in project.agents.agents {
+            detachStatusStream(agent.id)
+        }
         project.shutdown()
         dropWorkbench(for: project)
         projects.removeAll { $0.id == project.id }
@@ -354,6 +474,9 @@ final class AppStore: ObservableObject {
     func shutdownAll() {
         repoObserveTask?.cancel()
         repoObserveTask = nil
+        for task in statusListenTasks.values { task.cancel() }
+        statusListenTasks.removeAll()
+        agentStatusByID.removeAll()
         for project in projects { project.shutdown() }
         for session in shells.values { session.terminate() }
         shells.removeAll()
@@ -701,17 +824,27 @@ final class AppStore: ObservableObject {
         switch event {
         case .agentSpawned(let agentID, let worktreeID, _):
             meta.touch(worktreeID ?? project.id)
-            if let worktreeID, let agent = project.agents.agents.first(where: { $0.id == agentID }) {
-                bindAgentTab(agent, key: .worktree(worktreeID))
+            if let agent = project.agents.agents.first(where: { $0.id == agentID }) {
+                attachStatusStream(for: agent)
+                if let worktreeID {
+                    bindAgentTab(agent, key: .worktree(worktreeID))
+                }
             }
         case .agentStateChanged(_, let worktreeID, let state):
             if let worktreeID { meta.touch(worktreeID) }
             if case .finished = state { /* highlighted via needsAttention */ break }
             if case .errored = state { break }
             _ = state
+        case .agentRetired(let agentID, _):
+            detachStatusStream(agentID)
         case .agentNeedsAttention(let agentID, let worktreeID, let state):
-            if state.dashboardBucket == .done {
+            // A completed turn records status-entry `done`. Keep the card in the
+            // done bucket (and highlighted) until focus() clears the unacked set.
+            switch state {
+            case .idle, .finished, .errored:
                 unackedDoneAgentIDs.insert(agentID)
+            default:
+                break
             }
             let onScreen: Bool = {
                 guard case let .worktree(id) = selection, id == worktreeID else { return false }

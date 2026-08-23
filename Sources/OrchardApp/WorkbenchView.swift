@@ -51,14 +51,14 @@ struct WorkbenchView: View {
             case .worktree(let id):
                 if let record = store.selectedRecord, record.id == id,
                    let project = store.project(owning: record) {
-                    WorkspaceStatusSlot(status: store.meta.status(for: record.id), size: 10)
+                    WorkspaceStatusSlot(appearance: store.statusAppearance(for: record.id), size: 10)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(record.title)
                             .font(.system(size: 13, weight: .semibold))
                         HStack(spacing: 6) {
                             Text(record.branch)
                             Text("·")
-                            Text(store.meta.status(for: record.id).label)
+                            Text(store.statusAppearance(for: record.id).label)
                         }
                         .font(Tokens.fontMeta)
                         .foregroundStyle(Tokens.textSecondary)

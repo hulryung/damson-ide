@@ -17,7 +17,7 @@ struct SettingsView: View {
             TerminalSettingsTab(settings: settings)
                 .tabItem { Label("Terminal", systemImage: "terminal") }
         }
-        .frame(width: 520, height: 400)
+        .frame(width: 520, height: 520)
     }
 }
 
@@ -104,6 +104,8 @@ struct WorktreeSettingsTab: View {
                 Toggle("Offer to delete the branch too", isOn: $settings.deleteBranchWithWorktree)
                 SettingsFootnote("A branch is the only way back once a worktree is gone, so this only presets the checkbox.")
             }
+
+            WorkspaceStatusVocabularyEditor()
         }
         .formStyle(.grouped)
     }
@@ -117,6 +119,66 @@ struct WorktreeSettingsTab: View {
         panel.message = "Choose where Orchard should create worktrees."
         guard panel.runModal() == .OK, let url = panel.url else { return }
         settings.worktreeRoot = (url.path as NSString).abbreviatingWithTildeInPath
+    }
+}
+
+/// Custom board columns beyond the four defaults. Persisted in the runtime
+/// workspace-status vocabulary (`orchard-data.json`), same store the sidebar
+/// and dashboard slots read.
+struct WorkspaceStatusVocabularyEditor: View {
+    @EnvironmentObject var store: AppStore
+    @State private var newLabel = ""
+    @State private var newColor = "amber"
+    @State private var errorMessage: String?
+
+    var body: some View {
+        Section("Board statuses") {
+            ForEach(store.statusVocabulary) { definition in
+                HStack(spacing: 8) {
+                    WorkspaceStatusSlot(definition: definition)
+                    Text(definition.label)
+                    Spacer()
+                    if WorkspaceStatusDefinition.defaultIDs.contains(definition.id) {
+                        Text("Default")
+                            .font(Tokens.fontMeta)
+                            .foregroundStyle(Tokens.textTertiary)
+                    } else {
+                        Text(definition.color ?? "")
+                            .font(Tokens.fontMeta)
+                            .foregroundStyle(Tokens.textTertiary)
+                    }
+                }
+            }
+            HStack {
+                TextField("New column", text: $newLabel)
+                    .textFieldStyle(.roundedBorder)
+                Picker("Color", selection: $newColor) {
+                    ForEach(WorkspaceStatusAppearance.colorTokens, id: \.self) { token in
+                        Text(token.capitalized).tag(token)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 110)
+                Button("Add") { add() }
+                    .disabled(newLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(Tokens.fontMeta)
+                    .foregroundStyle(.red)
+            }
+            SettingsFootnote("Custom columns appear on workspace cards and the dashboard. Defaults cannot be removed.")
+        }
+    }
+
+    private func add() {
+        do {
+            try store.addWorkspaceStatus(label: newLabel, color: newColor)
+            newLabel = ""
+            errorMessage = nil
+        } catch {
+            errorMessage = String(describing: error)
+        }
     }
 }
 
