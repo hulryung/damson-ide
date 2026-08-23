@@ -59,6 +59,8 @@ private struct EditorDocumentView: View {
                 text: Binding(
                     get: { controller.draft },
                     set: { controller.edit($0) }),
+                language: SyntaxLanguage.infer(fromPath: controller.relativePath),
+                highlightingEnabled: !SyntaxHighlightEngine.exceedsBudget(controller.draft),
                 onCursorChange: { line, column in
                     controller.line = line
                     controller.column = column
@@ -84,6 +86,10 @@ private struct EditorDocumentView: View {
                 .truncationMode(.head)
                 .textSelection(.enabled)
             Spacer(minLength: 8)
+            if highlightBudgetExceeded {
+                Text(SyntaxHighlightEngine.budgetNotice(
+                    for: SyntaxLanguage.infer(fromPath: controller.relativePath)))
+            }
             if controller.isDirty {
                 Text("Unsaved")
                     .foregroundStyle(Tokens.textSecondary)
@@ -98,6 +104,11 @@ private struct EditorDocumentView: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .background(Tokens.surface)
+    }
+
+    private var highlightBudgetExceeded: Bool {
+        guard case .text = controller.surface else { return false }
+        return SyntaxHighlightEngine.exceedsBudget(controller.draft)
     }
 
     private func conflictBanner(_ conflict: EditorDocumentController.Conflict) -> some View {
