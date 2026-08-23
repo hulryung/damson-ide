@@ -37,14 +37,19 @@ final class AppStore: ObservableObject {
     @Published var filterProjectID: UUID?
     /// Board-column id from the workspace-status vocabulary (defaults + custom).
     @Published var filterStatusID: String?
+    /// Archived cards stay hidden until this filter is on.
+    @Published var showArchived = false
     @Published var ordering: CardOrdering = .manual
 
     @Published var composerProjectID: UUID?
     @Published var pendingDeletion: PendingDeletion?
     @Published var isJumpPaletteOpen = false
 
-    /// Done-bucket cards stay highlighted until the user focuses them.
-    @Published var unackedDoneAgentIDs: Set<UUID> = []
+    /// Single unread source for cards and the dashboard. Views must not keep
+    /// their own sets — fold events through `UnreadReducer`.
+    @Published private(set) var unread = UnreadState()
+    /// File the palette / `file open` asked the workbench to show.
+    @Published var pendingOpenPath: String?
     /// Live `AgentStatusSnapshot` per agent, observation-only from the status stream.
     @Published private(set) var agentStatusByID: [UUID: AgentStatusSnapshot] = [:]
     /// Last completed T20 port sweep (attributed listeners only).
@@ -103,6 +108,10 @@ final class AppStore: ObservableObject {
         settings.onTerminalConfigChange = { [weak self] in
             self?.applyTerminalConfigToAll()
         }
+        settings.onSubsystemSettingsChange = { [weak self] in
+            self?.applyLiveSubsystemSettings()
+        }
+        applyLiveSubsystemSettings()
         self.meta.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
@@ -134,6 +143,9 @@ final class AppStore: ObservableObject {
 
     func visibleRecords(in project: ProjectSession) -> [WorktreeRecord] {
         var cards = project.records
+        if !showArchived {
+            cards = cards.filter { !meta.isArchived(for: $0.id) }
+        }
         if let filterStatusID {
             cards = cards.filter { meta.statusID(for: $0.id) == filterStatusID }
         }
@@ -159,7 +171,7 @@ final class AppStore: ObservableObject {
     func select(_ record: WorktreeRecord, in project: ProjectSession) {
         selectedProjectID = project.id
         selection = .worktree(record.id)
-        record.hasUnseenActivity = false
+        applyUnread(.focusedWorkspace(record.id))
         meta.touch(record.id)
         ensureLayout(for: .worktree(record.id))
         Task { await record.refresh() }
@@ -176,7 +188,7 @@ final class AppStore: ObservableObject {
         guard let project = project(containingAgent: agentID),
               let agent = project.agents.agents.first(where: { $0.id == agentID })
         else { return }
-        unackedDoneAgentIDs.remove(agentID)
+        applyUnread(.focusedAgent(agentID))
         if let worktreeID = agent.worktree?.id, let record = project.record(id: worktreeID) {
             select(record, in: project)
             bindAgentTab(agent, key: .worktree(worktreeID))
@@ -211,8 +223,19 @@ final class AppStore: ObservableObject {
         objectWillChange.send()
     }
 
+    func isUnread(workspace id: UUID) -> Bool { unread.isUnread(workspace: id) }
+
+    func isUnread(agent id: UUID) -> Bool { unread.isUnread(agent: id) }
+
+    func setArchived(_ archived: Bool, for record: WorktreeRecord, in project: ProjectSession) {
+        meta.setArchived(archived, for: record.id)
+        if archived, !showArchived, case .worktree(let id) = selection, id == record.id {
+            selection = defaultSelection(for: project)
+        }
+    }
+
     func dashboardBucket(for agent: AgentSession) -> DashboardBucket {
-        let unseen = unackedDoneAgentIDs.contains(agent.id)
+        let unseen = unread.isUnread(agent: agent.id)
         if let snapshot = agentStatusByID[agent.id] {
             return DashboardProjection.bucket(snapshot: snapshot, unseen: unseen)
         }
@@ -220,7 +243,7 @@ final class AppStore: ObservableObject {
     }
 
     func displayDotState(for agent: AgentSession) -> DashboardDotState {
-        let unseen = unackedDoneAgentIDs.contains(agent.id)
+        let unseen = unread.isUnread(agent: agent.id)
         let dot = agentStatusByID[agent.id].map(DashboardProjection.dotState(from:))
             ?? DashboardProjection.dotState(runtime: agent.state)
         return DashboardProjection.displayState(dotState: dot, unseen: unseen)
@@ -287,7 +310,65 @@ final class AppStore: ObservableObject {
         statusListenTasks[agentID]?.cancel()
         statusListenTasks[agentID] = nil
         agentStatusByID[agentID] = nil
-        unackedDoneAgentIDs.remove(agentID)
+        applyUnread(.agentRetired(agentID))
+    }
+
+    private func applyUnread(_ event: UnreadEvent) {
+        unread = UnreadReducer.reduce(unread, event)
+    }
+
+    /// Ports interval and the automations master switch are live: the services
+    /// already expose setters / start-stop, so the app writes them on every change.
+    func applyLiveSubsystemSettings() {
+        guard let runtime else { return }
+        runtime.portService.setInterval(PortService.clamp(settings.portsSweepInterval))
+        if settings.automationsEnabled {
+            runtime.automationScheduler.start()
+        } else {
+            runtime.automationScheduler.stop()
+        }
+    }
+
+    func openPaletteFile(_ relativePath: String, in record: WorktreeRecord, project: ProjectSession) {
+        select(record, in: project)
+        let changed = record.status.stat.files.contains { $0.path == relativePath }
+        pendingOpenPath = relativePath
+        selectKind(changed ? .diff : .editor)
+        runtime?.fileOpenCenter.post(FileOpenRequest(
+            worktreeId: workspaceIdentity(for: record, in: project) ?? "",
+            worktreePath: record.path.path,
+            relativePath: relativePath,
+            mode: changed ? .diff : .edit))
+    }
+
+    func runPaletteCommand(_ command: PaletteCommand) {
+        switch command {
+        case .newWorktree:
+            requestNewWorktree()
+        case .toggleChat:
+            toggleFocusedViewMode()
+        case .openDashboard:
+            showDashboard?()
+        case .settings:
+            showSettings?()
+        }
+    }
+
+    func openBrowserTab(workspaceKey: String) {
+        Task {
+            await applyDefaultBrowserProfile(workspaceKey: workspaceKey)
+            _ = try? await browser?.service.createTab(workspace: workspaceKey)
+        }
+    }
+
+    func applyDefaultBrowserProfile(workspaceKey: String) async {
+        guard let service = runtime?.browserService else { return }
+        let wanted = settings.defaultBrowserProfileID.trimmingCharacters(in: .whitespaces)
+        guard !wanted.isEmpty, wanted != BrowserProfile.defaultProfile.id else { return }
+        let bound = await service.boundProfile(workspace: workspaceKey)
+        if bound.profile.id == BrowserProfile.defaultProfile.id {
+            _ = try? await service.bindProfile(workspace: workspaceKey, profile: wanted)
+        }
     }
 
     private static func slugStatusID(_ label: String) -> String {
@@ -890,14 +971,7 @@ final class AppStore: ObservableObject {
         case .agentRetired(let agentID, _):
             detachStatusStream(agentID)
         case .agentNeedsAttention(let agentID, let worktreeID, let state):
-            // A completed turn records status-entry `done`. Keep the card in the
-            // done bucket (and highlighted) until focus() clears the unacked set.
-            switch state {
-            case .idle, .finished, .errored:
-                unackedDoneAgentIDs.insert(agentID)
-            default:
-                break
-            }
+            applyUnread(.agentActivity(agentID: agentID, workspaceID: worktreeID))
             let onScreen: Bool = {
                 guard case let .worktree(id) = selection, id == worktreeID else { return false }
                 return NSApp.isActive
@@ -911,6 +985,7 @@ final class AppStore: ObservableObject {
             }
             _ = meta.ensure(worktree.id)
         case .worktreeRemoved(let worktreeID, _):
+            applyUnread(.workspaceRemoved(worktreeID))
             meta.remove(worktreeID)
             layouts[.worktree(worktreeID)] = nil
         default:

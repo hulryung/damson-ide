@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import DamsonTerminal
 import OrchardCore
+import OrchardRuntime
 
 /// Preferences (⌘,), in the three groups v1 actually decided in.
 struct SettingsView: View {
@@ -16,8 +17,10 @@ struct SettingsView: View {
                 .tabItem { Label("Worktrees", systemImage: "arrow.triangle.branch") }
             TerminalSettingsTab(settings: settings)
                 .tabItem { Label("Terminal", systemImage: "terminal") }
+            ServicesSettingsTab(settings: settings)
+                .tabItem { Label("Services", systemImage: "slider.horizontal.3") }
         }
-        .frame(width: 520, height: 520)
+        .frame(width: 520, height: 560)
     }
 }
 
@@ -178,6 +181,65 @@ struct WorkspaceStatusVocabularyEditor: View {
             errorMessage = nil
         } catch {
             errorMessage = String(describing: error)
+        }
+    }
+}
+
+struct ServicesSettingsTab: View {
+    @ObservedObject var settings: OrchardSettings
+    @EnvironmentObject var store: AppStore
+    @State private var profiles: [BrowserProfile] = [BrowserProfile.defaultProfile]
+
+    var body: some View {
+        Form {
+            Section("Ports") {
+                Stepper(value: portsInterval, in: PortService.minimumInterval...PortService.maximumInterval, step: 1) {
+                    HStack {
+                        Text("Sweep interval")
+                        Spacer()
+                        Text("\(Int(settings.portsSweepInterval.rounded()))s")
+                            .monospacedDigit()
+                            .foregroundStyle(Tokens.textSecondary)
+                    }
+                }
+                SettingsFootnote(
+                    "How often Orchard attributes listening TCP ports to open workspaces. Applied to the live sweep.")
+            }
+
+            Section("Browser") {
+                Picker("Default profile", selection: $settings.defaultBrowserProfileID) {
+                    ForEach(profiles) { profile in
+                        Text(profile.label).tag(profile.id)
+                    }
+                    if !profiles.contains(where: { $0.id == settings.defaultBrowserProfileID }) {
+                        Text(settings.defaultBrowserProfileID).tag(settings.defaultBrowserProfileID)
+                    }
+                }
+                SettingsFootnote(
+                    "Used for new browser tabs in a workspace that has no profile binding yet.")
+            }
+
+            Section("Automations") {
+                Toggle("Enable scheduled automations", isOn: $settings.automationsEnabled)
+                SettingsFootnote(
+                    "Master switch for the in-process scheduler. Individual automations stay in orchard-data.json.")
+            }
+        }
+        .formStyle(.grouped)
+        .task { await loadProfiles() }
+    }
+
+    private var portsInterval: Binding<Double> {
+        Binding(
+            get: { settings.portsSweepInterval },
+            set: { settings.portsSweepInterval = PortService.clamp($0) })
+    }
+
+    private func loadProfiles() async {
+        guard let service = store.runtime?.browserService else { return }
+        profiles = await service.listProfiles()
+        if !profiles.contains(where: { $0.id == settings.defaultBrowserProfileID }) {
+            settings.defaultBrowserProfileID = BrowserProfile.defaultProfile.id
         }
     }
 }

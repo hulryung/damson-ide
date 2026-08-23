@@ -183,7 +183,7 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(goItem)
         let goMenu = NSMenu(title: "Go")
         goItem.submenu = goMenu
-        let jump = NSMenuItem(title: "Jump to Workspace…", action: #selector(openJumpPalette(_:)), keyEquivalent: "j")
+        let jump = NSMenuItem(title: "Jump…", action: #selector(openJumpPalette(_:)), keyEquivalent: "j")
         jump.target = self
         goMenu.addItem(jump)
         let dash = NSMenuItem(title: "Agent Dashboard", action: #selector(showDashboard(_:)), keyEquivalent: "d")

@@ -19,6 +19,11 @@ struct SidebarView: View {
             toolbar
         }
         .background(Tokens.sidebar)
+        // NavigationSplitView's window-level status-bar inset does not reach
+        // the sidebar, so the New button was clipped. Reserve the same height.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            Color.clear.frame(height: Tokens.statusBarInset)
+        }
     }
 
     private var navHeader: some View {
@@ -32,7 +37,7 @@ struct SidebarView: View {
             }
             .buttonStyle(.borderless)
             .controlSize(.small)
-            .help("Jump to a workspace or agent (⌘J)")
+            .help("Jump to a workspace, file, or command (⌘J)")
 
             Button { store.addProjectViaPanel() } label: {
                 Image(systemName: "folder.badge.plus")
@@ -73,6 +78,18 @@ struct SidebarView: View {
                     } ?? "Status")
             }
             .menuStyle(.borderlessButton)
+
+            Button {
+                store.showArchived.toggle()
+            } label: {
+                Image(systemName: store.showArchived ? "archivebox.fill" : "archivebox")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(store.showArchived ? Color.accentColor : Tokens.textSecondary)
+            }
+            .buttonStyle(.borderless)
+            .help(store.showArchived
+                  ? "Showing archived workspaces. Click to hide them."
+                  : "Archived workspaces are hidden. Click to show them.")
 
             Spacer(minLength: 2)
 
@@ -283,6 +300,8 @@ struct WorkspaceCard: View {
 
     private var status: WorkspaceStatusAppearance { store.statusAppearance(for: record.id) }
     private var agents: [AgentSession] { project.liveAgents(in: record.id) }
+    private var unseen: Bool { store.isUnread(workspace: record.id) }
+    private var archived: Bool { store.meta.isArchived(for: record.id) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -310,7 +329,7 @@ struct WorkspaceCard: View {
         HStack(spacing: 6) {
             ZStack(alignment: .topLeading) {
                 WorkspaceStatusSlot(appearance: status)
-                if record.hasUnseenActivity {
+                if unseen {
                     Circle()
                         .fill(.orange)
                         .frame(width: 5, height: 5)
@@ -321,8 +340,13 @@ struct WorkspaceCard: View {
 
             Text(record.title)
                 .font(Tokens.fontRow)
-                .fontWeight(record.hasUnseenActivity ? .semibold : .regular)
+                .fontWeight(unseen ? .semibold : .regular)
                 .lineLimit(1)
+            if archived {
+                Text("Archived")
+                    .font(Tokens.fontPill)
+                    .foregroundStyle(Tokens.textTertiary)
+            }
 
             Spacer(minLength: 2)
 
@@ -385,6 +409,11 @@ struct WorkspaceCard: View {
             }
         }
         Divider()
+        if archived {
+            Button("Unarchive") { store.setArchived(false, for: record, in: project) }
+        } else {
+            Button("Archive") { store.setArchived(true, for: record, in: project) }
+        }
         Button("Show Diff") {
             store.select(record, in: project)
             store.selectKind(.diff)

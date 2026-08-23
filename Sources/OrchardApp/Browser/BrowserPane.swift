@@ -39,6 +39,7 @@ extension AppStore {
 }
 
 struct WorkspaceBrowserView: View {
+    @EnvironmentObject var store: AppStore
     let manager: BrowserManager
     @ObservedObject var controller: WorkspaceBrowserController
 
@@ -68,7 +69,7 @@ struct WorkspaceBrowserView: View {
                                close: { manager.closeTab(workspaceKey: controller.key, pageId: tab.id) })
             }
             Spacer(minLength: 4)
-            Button { manager.newTab(workspaceKey: controller.key) } label: {
+            Button { store.openBrowserTab(workspaceKey: controller.key) } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 10))
             }
@@ -88,7 +89,7 @@ struct WorkspaceBrowserView: View {
             Text("No pages open")
                 .font(.title3)
                 .foregroundStyle(Tokens.textSecondary)
-            Button("New Tab") { manager.newTab(workspaceKey: controller.key) }
+            Button("New Tab") { store.openBrowserTab(workspaceKey: controller.key) }
                 .controlSize(.small)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

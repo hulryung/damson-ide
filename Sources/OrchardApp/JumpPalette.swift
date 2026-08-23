@@ -1,44 +1,66 @@
 import SwiftUI
 import AppKit
 import OrchardCore
+import OrchardRuntime
 import OrchardTerminals
 
-/// ⌘J — jump to a workspace or a live agent across every open project.
+/// ⌘J — workspaces, agents, quickOpen files for the selected workspace, and commands.
+/// Every row is ranked by `PaletteRanking` through `PaletteSources`.
 struct JumpPalette: View {
     @EnvironmentObject var store: AppStore
     @Environment(\.dismiss) private var dismiss
 
     @State private var query = ""
     @State private var selection = 0
+    @State private var quickOpenPaths: [String] = []
     @FocusState private var queryFocused: Bool
 
-    private var results: [PaletteItem] {
-        PaletteRanking.rank(query: query, items: items) { item in
-            switch item {
-            case .workspace(_, _, let record, let repo):
-                return [(record.title, 300), (record.branch, 200), (repo, 100)]
-            case .agent(_, let agent, _, let repo):
-                return [
-                    (agent.task?.title ?? agent.engine.displayName, 300),
-                    (agent.engine.displayName, 220),
-                    (agent.branchName ?? "", 180),
-                    (repo, 100),
-                ]
-            }
-        }
+    private var trimmedQuery: String {
+        query.trimmingCharacters(in: .whitespaces)
     }
 
-    private var items: [PaletteItem] {
-        var out: [PaletteItem] = []
+    private var catalog: [PaletteCandidate] {
+        var workspaces: [PaletteWorkspaceSeed] = []
+        var agents: [PaletteAgentSeed] = []
         for project in store.projects {
             for record in project.records {
-                out.append(.makeWorkspace(project: project, record: record, repo: project.name))
+                workspaces.append(PaletteWorkspaceSeed(
+                    id: record.id, title: record.title,
+                    branch: record.branch, repo: project.name))
             }
             for agent in project.agents.agents {
-                out.append(.makeAgent(agent: agent, project: project, repo: project.name))
+                agents.append(PaletteAgentSeed(
+                    id: agent.id,
+                    title: agent.task?.title ?? agent.engine.displayName,
+                    engine: agent.engine.displayName,
+                    branch: agent.branchName ?? "",
+                    repo: project.name,
+                    state: agent.state.label))
             }
         }
-        return out
+        return PaletteSources.catalog(
+            workspaces: workspaces,
+            agents: agents,
+            files: quickOpenPaths,
+            workspaceTitle: selectedWorkspaceTitle,
+            includeFiles: !trimmedQuery.isEmpty)
+    }
+
+    private var results: [PaletteCandidate] {
+        PaletteSources.rank(query: query, candidates: catalog)
+    }
+
+    private var selectedWorkspaceTitle: String {
+        if let record = store.selectedRecord { return record.title }
+        return store.selectedProject?.name ?? ""
+    }
+
+    private var selectedRoot: URL? {
+        if let record = store.selectedRecord { return record.path }
+        if case .projectRoot(let id) = store.selection {
+            return store.projects.first { $0.id == id }?.repo
+        }
+        return store.selectedProject?.repo
     }
 
     var body: some View {
@@ -46,7 +68,7 @@ struct JumpPalette: View {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(Tokens.textTertiary)
-                TextField("Jump to a workspace or agent…", text: $query)
+                TextField("Jump to a workspace, file, or command…", text: $query)
                     .textFieldStyle(.plain)
                     .font(.system(size: 15))
                     .focused($queryFocused)
@@ -60,7 +82,10 @@ struct JumpPalette: View {
         }
         .frame(width: 560, height: 380)
         .background(Tokens.background)
-        .onAppear { queryFocused = true }
+        .onAppear {
+            queryFocused = true
+            loadQuickOpen()
+        }
     }
 
     private var resultList: some View {
@@ -77,9 +102,7 @@ struct JumpPalette: View {
                             }
                     }
                     if results.isEmpty {
-                        Text(items.isEmpty
-                             ? "No workspaces yet — create one with ⌘N."
-                             : "Nothing matches “\(query)”.")
+                        Text(emptyMessage)
                             .font(Tokens.fontMeta)
                             .foregroundStyle(Tokens.textTertiary)
                             .padding(.vertical, 20)
@@ -99,6 +122,13 @@ struct JumpPalette: View {
         )
     }
 
+    private var emptyMessage: String {
+        if store.projects.isEmpty {
+            return "No workspaces yet — create one with ⌘N."
+        }
+        return "Nothing matches “\(query)”."
+    }
+
     private func move(_ delta: Int) {
         guard !results.isEmpty else { return }
         selection = min(max(selection + delta, 0), results.count - 1)
@@ -106,76 +136,70 @@ struct JumpPalette: View {
 
     private func activateSelection() {
         guard results.indices.contains(selection) else { return }
-        switch results[selection] {
-        case .workspace(_, let project, let record, _):
-            store.select(record, in: project)
-        case .agent(_, let agent, _, _):
-            store.focus(agentID: agent.id)
+        let item = results[selection]
+        if let id = PaletteSources.parseWorkspaceID(item.id) {
+            activateWorkspace(id)
+        } else if let id = PaletteSources.parseAgentID(item.id) {
+            store.focus(agentID: id)
+        } else if let path = PaletteSources.parseFilePath(item.id) {
+            activateFile(path)
+        } else if let command = PaletteSources.parseCommand(item.id) {
+            store.runPaletteCommand(command)
         }
         dismiss()
     }
-}
 
-enum PaletteItem: Identifiable {
-    case workspace(id: String, project: ProjectSession, record: WorktreeRecord, repo: String)
-    case agent(id: String, agent: AgentSession, project: ProjectSession, repo: String)
-
-    var id: String {
-        switch self {
-        case .workspace(let id, _, _, _): return id
-        case .agent(let id, _, _, _): return id
+    private func activateWorkspace(_ id: UUID) {
+        for project in store.projects {
+            if let record = project.record(id: id) {
+                store.select(record, in: project)
+                return
+            }
         }
     }
 
-    @MainActor
-    static func makeWorkspace(project: ProjectSession, record: WorktreeRecord, repo: String) -> PaletteItem {
-        .workspace(id: "ws-\(record.id.uuidString)", project: project, record: record, repo: repo)
+    private func activateFile(_ path: String) {
+        if let record = store.selectedRecord,
+           let project = store.project(owning: record) {
+            store.openPaletteFile(path, in: record, project: project)
+            return
+        }
+        store.pendingOpenPath = path
+        store.selectKind(.editor)
     }
 
-    @MainActor
-    static func makeAgent(agent: AgentSession, project: ProjectSession, repo: String) -> PaletteItem {
-        .agent(id: "ag-\(agent.id.uuidString)", agent: agent, project: project, repo: repo)
+    private func loadQuickOpen() {
+        guard let root = selectedRoot else {
+            quickOpenPaths = []
+            return
+        }
+        let files = store.runtime?.fileService ?? FileService()
+        Task.detached {
+            let paths = (try? files.list(root: root, limit: 500).files) ?? []
+            await MainActor.run { quickOpenPaths = paths }
+        }
     }
 }
 
 struct PaletteRow: View {
-    let item: PaletteItem
+    @EnvironmentObject var store: AppStore
+    let item: PaletteCandidate
     let isSelected: Bool
 
     var body: some View {
         HStack(spacing: 8) {
-            switch item {
-            case .workspace(_, _, let record, let repo):
-                Image(systemName: "arrow.triangle.branch")
+            leading
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.title)
+                    .font(Tokens.fontRow)
+                    .lineLimit(1)
+                Text(item.subtitle)
+                    .font(Tokens.fontMeta)
                     .foregroundStyle(Tokens.textTertiary)
-                    .frame(width: 14)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(record.title)
-                        .font(Tokens.fontRow)
-                        .lineLimit(1)
-                    Text("\(repo) · \(record.branch)")
-                        .font(Tokens.fontMeta)
-                        .foregroundStyle(Tokens.textTertiary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 6)
-                DiffStatBadge(stat: record.status.stat)
-            case .agent(_, let agent, _, let repo):
-                Text(agent.state.glyph)
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(agent.state.color)
-                    .frame(width: 14)
-                VStack(alignment: .leading, spacing: 1) {
-                    Text(agent.task?.title ?? agent.engine.displayName)
-                        .font(Tokens.fontRow)
-                        .lineLimit(1)
-                    Text("\(repo) · \(agent.engine.displayName) · \(agent.state.label)")
-                        .font(Tokens.fontMeta)
-                        .foregroundStyle(Tokens.textTertiary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 6)
+                    .lineLimit(1)
             }
+            Spacer(minLength: 6)
+            trailing
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 6)
@@ -183,6 +207,49 @@ struct PaletteRow: View {
             RoundedRectangle(cornerRadius: Tokens.radius)
                 .fill(isSelected ? Tokens.rowSelected : .clear)
         )
+    }
+
+    @ViewBuilder
+    private var leading: some View {
+        if item.kind == .agent, let id = PaletteSources.parseAgentID(item.id),
+           let agent = agent(id) {
+            Text(agent.state.glyph)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(agent.state.color)
+                .frame(width: 14)
+        } else {
+            Image(systemName: item.symbol)
+                .foregroundStyle(Tokens.textTertiary)
+                .frame(width: 14)
+        }
+    }
+
+    @ViewBuilder
+    private var trailing: some View {
+        if item.kind == .workspace, let id = PaletteSources.parseWorkspaceID(item.id),
+           let record = record(id) {
+            DiffStatBadge(stat: record.status.stat)
+        } else if item.kind == .command {
+            Text("⌘")
+                .font(Tokens.fontMeta)
+                .foregroundStyle(Tokens.textTertiary)
+        }
+    }
+
+    private func record(_ id: UUID) -> WorktreeRecord? {
+        for project in store.projects {
+            if let record = project.record(id: id) { return record }
+        }
+        return nil
+    }
+
+    private func agent(_ id: UUID) -> AgentSession? {
+        for project in store.projects {
+            if let agent = project.agents.agents.first(where: { $0.id == id }) {
+                return agent
+            }
+        }
+        return nil
     }
 }
 
