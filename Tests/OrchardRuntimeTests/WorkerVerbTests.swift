@@ -195,10 +195,25 @@ final class WorkerVerbTests: XCTestCase {
         return try XCTUnwrap(terminal.field("id")?.stringValue)
     }
 
+    /// The capability secret worker-start injected into this terminal's preamble —
+    /// exactly what a real worker reads back out of its TASK block (T11: lifecycle
+    /// sends without it are rejected).
+    private func injectedCapability(handle: String) async throws -> String {
+        let text = try await session(handle).writtenText
+        let marker = "--dispatch-capability "
+        let markerRange = try XCTUnwrap(text.range(of: marker),
+                                        "no --dispatch-capability in the injected preamble")
+        let secret = text[markerRange.upperBound...]
+            .prefix { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
+        XCTAssertTrue(secret.hasPrefix("dcap_"), "unexpected capability shape: \(secret)")
+        return String(secret)
+    }
+
     private func reportDone(taskID: String, dispatchID: String, handle: String,
                             outcome: String = "succeeded") async throws {
         _ = try await live.send([
             "from": .string(handle),
+            "dispatch-capability": .string(try await injectedCapability(handle: handle)),
             "type": .string("worker_done"),
             "subject": .string("done"),
             "body": .string("Did the thing. Found nothing odd. Nothing left."),

@@ -110,6 +110,24 @@ public struct TerminalWaitResult: Codable, Equatable, Sendable {
     public let exitCode: Int32?
 }
 
+/// One pane's PTY ending, reported through `TerminalService.onTerminalExit` (T11).
+/// `deliberate` distinguishes a close that went through the service (user close,
+/// coordinator worker-stop/release) from the child process dying on its own — the
+/// orchestration layer escalates only the latter.
+public struct TerminalExitEvent: Sendable {
+    public let handle: String
+    public let paneKey: String
+    public let exitCode: Int32?
+    public let deliberate: Bool
+
+    public init(handle: String, paneKey: String, exitCode: Int32?, deliberate: Bool) {
+        self.handle = handle
+        self.paneKey = paneKey
+        self.exitCode = exitCode
+        self.deliberate = deliberate
+    }
+}
+
 /// Typed terminal-service failures; `code` is the machine-readable RPC error code.
 public enum TerminalServiceError: Error, Equatable, Sendable {
     /// The handle was never issued (or its terminal was closed).

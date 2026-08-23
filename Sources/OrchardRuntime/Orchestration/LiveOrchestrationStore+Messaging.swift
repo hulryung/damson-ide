@@ -24,20 +24,28 @@ extension LiveOrchestrationStore {
         return try await idempotent(p, method: "send") {
             let runID = try self.resolveRunID(p, caller: caller, to: to)
             _ = try self.requireRun(runID)
-            let receipt = try self.store.sendMessage(
-                OutboundMessage(
-                    from: caller.handle ?? "cli",
-                    senderPaneKey: caller.paneKey,
-                    to: to,
-                    runID: runID,
-                    subject: subject,
-                    body: p.str("body") ?? "",
-                    type: type,
-                    priority: priority,
-                    threadID: p.str("thread-id"),
-                    payload: payloadText),
-                terminals: directory.map(\.entry),
-                agentStatus: { handle in directory.first { $0.entry.handle == handle }?.agentStatus })
+            let outbound = OutboundMessage(
+                from: caller.handle ?? "cli",
+                senderPaneKey: caller.paneKey,
+                to: to,
+                runID: runID,
+                subject: subject,
+                body: p.str("body") ?? "",
+                type: type,
+                priority: priority,
+                threadID: p.str("thread-id"),
+                payload: payloadText)
+            let receipt: SendReceipt
+            if let violation = try self.lifecycleSendViolation(
+                outbound, capability: p.str("dispatch-capability"), caller: caller) {
+                receipt = try self.store.recordRejectedLifecycleSend(
+                    outbound, code: violation.code, reason: violation.reason)
+            } else {
+                receipt = try self.store.sendMessage(
+                    outbound,
+                    terminals: directory.map(\.entry),
+                    agentStatus: { handle in directory.first { $0.entry.handle == handle }?.agentStatus })
+            }
             var result: [String: JSONValue] = [
                 "messageIds": .array(receipt.messages.map { .string($0.id) }),
                 "count": .number(Double(receipt.messages.count)),
@@ -84,6 +92,34 @@ extension LiveOrchestrationStore {
         encoder.outputFormatting = [.sortedKeys]
         guard let data = try? encoder.encode(JSONValue.object(payload)) else { return nil }
         return String(decoding: data, as: UTF8.self)
+    }
+
+    /// T11 capability enforcement for lifecycle sends: a `worker_done`/`heartbeat`
+    /// naming a live dispatch must present the dispatch capability from the assignee
+    /// pane. Non-lifecycle sends, group-addressed lifecycle sends (already forbidden
+    /// by T1's send guard), and messages T1 handles itself (missing/unknown ids,
+    /// settled dispatches) are untouched.
+    private func lifecycleSendViolation(
+        _ outbound: OutboundMessage, capability: String?, caller: CallerIdentity
+    ) throws -> (code: String, reason: String)? {
+        guard outbound.type == .workerDone || outbound.type == .heartbeat else { return nil }
+        if let to = outbound.to, GroupAddress.isGroupAddress(to) { return nil }
+        guard case .rejected(let code, let reason) = try store.checkLifecycleSendAuthority(
+            dispatchID: Self.payloadDispatchID(outbound.payload),
+            capability: capability,
+            senderPaneKey: caller.paneKey) else {
+            return nil
+        }
+        return (code, reason)
+    }
+
+    /// The `dispatchId` a lifecycle payload names, if any.
+    static func payloadDispatchID(_ payloadText: String?) -> String? {
+        guard let payloadText, let data = payloadText.data(using: .utf8),
+              let payload = try? JSONDecoder().decode(JSONValue.self, from: data) else {
+            return nil
+        }
+        return payload.field("dispatchId")?.stringValue
     }
 
     static func json(_ lifecycle: LifecycleReconciliation?) -> JSONValue? {
@@ -357,6 +393,9 @@ extension LiveOrchestrationStore {
                         code: "consumer_fenced",
                         message: "Terminal \(handle) does not own the Dispatch behind question \(resume).")
                 }
+                try self.requireLifecycleAskAuthority(
+                    dispatchID: question.dispatchID,
+                    capability: p.str("dispatch-capability"), caller: caller)
                 questionMessageID = question.messageID
                 dispatchID = question.dispatchID
             } else {
@@ -370,6 +409,11 @@ extension LiveOrchestrationStore {
                         code: "dispatch_inactive",
                         message: "Terminal \(handle) has no active Dispatch to ask from.")
                 }
+                // T11: asking is a lifecycle act on the dispatch — the capability must
+                // prove out (from the assignee pane) BEFORE any question row exists.
+                try self.requireLifecycleAskAuthority(
+                    dispatchID: dispatch.id,
+                    capability: p.str("dispatch-capability"), caller: caller)
                 let created = try self.store.createQuestion(
                     runID: dispatch.runID, dispatchID: dispatch.id,
                     askerHandle: handle, question: text,
@@ -381,6 +425,18 @@ extension LiveOrchestrationStore {
                 questionMessageID: questionMessageID, dispatchID: dispatchID,
                 timeout: Self.timeoutSeconds(p, default: Self.defaultAskSeconds,
                                              max: Self.maxAskSeconds))
+        }
+    }
+
+    /// T11 enforcement for `ask`: violations are typed RPC errors (no message row is
+    /// involved). A settled dispatch is `notApplicable` — the resume path then reports
+    /// the question's answered/closed status as before.
+    private func requireLifecycleAskAuthority(
+        dispatchID: String, capability: String?, caller: CallerIdentity
+    ) throws {
+        if case .rejected(let code, let reason) = try store.checkLifecycleSendAuthority(
+            dispatchID: dispatchID, capability: capability, senderPaneKey: caller.paneKey) {
+            throw RPCServiceError(code: code, message: reason)
         }
     }
 

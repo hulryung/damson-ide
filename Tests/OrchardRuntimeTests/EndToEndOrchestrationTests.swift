@@ -73,6 +73,8 @@ final class EndToEndOrchestrationTests: XCTestCase {
         ])
         XCTAssertTrue(dispatched.ok, String(describing: dispatched.error))
         let dispatchID = try XCTUnwrap(dispatched.result?.field("dispatchId")?.stringValue)
+        // T11: lifecycle sends must present the minted capability secret.
+        let capability = try XCTUnwrap(dispatched.result?.field("dispatchCapability")?.stringValue)
         let preamble = try XCTUnwrap(dispatched.result?.field("preamble")?.stringValue)
         XCTAssertTrue(preamble.contains("--task-id \(taskID)"))
         XCTAssertTrue(preamble.contains("--dispatch-id \(dispatchID)"))
@@ -95,6 +97,7 @@ final class EndToEndOrchestrationTests: XCTestCase {
 
         let report = try client.call("send", [
             "from": .string("term_worker"),
+            "dispatch-capability": .string(capability),
             "type": .string("worker_done"),
             "subject": .string("done"),
             "body": .string("Wired the adapter. Found nothing blocking. Nothing left."),

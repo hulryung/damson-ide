@@ -79,6 +79,13 @@ public final class OrchardRuntimeHost {
             waitCenter: waitCenter,
             context: context)
 
+        // T11: every PTY end flows into worker-process-exit reconciliation — a live
+        // supervised dispatch fails, and non-deliberate exits escalate to the Run.
+        let orchestration = self.orchestration
+        terminalService.onTerminalExit = { event in
+            Task { await orchestration.handleWorkerTerminalExit(event) }
+        }
+
         // Browser workspaces are keyed by worktree path; CLI selectors resolve
         // through the workspace registry when possible, else pass through raw.
         let workspaceService = self.workspaceService
