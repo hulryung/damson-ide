@@ -254,11 +254,52 @@ architecture:
 
 Owns: `Sources/OrchardApp/**`.
 
-### Wave 2+ backlog (separate run after merges)
+### Wave 2 (T7–T10, parallel; merge order T7 → T8 → T9 → T10)
 
-Unify the app sidebar's project list with the runtime repo registry: `orchard repo add`
-lands in orchard-data.json but the sidebar still reads its own UserDefaults list, so a
-CLI-added repo never appears in the UI (verified live 2026-08-23).
+**T7 — Worker lifecycle verbs (runtime).** Implement the supervised-worker RPC surface
+end to end: `worker-start` (compose T4's WorkerStart helper + T3 terminal readiness +
+preamble injection, staged receipt with effects/failedStage), `worker-show`,
+`worker-read` (archive or bounded live terminal output), `worker-stop`, `worker-abandon`,
+`worker-release` (archive to worker_terminal_archives BEFORE closing; refuse unproven/
+reused/user terminals), `worker-retain`, `worker-list`. Owns
+`Sources/OrchardRuntime/Orchestration/Worker*` (new), `Sources/OrchardRuntime/Workspaces/
+WorkerStart.swift`, additive public API on OrchardOrchestration worker tables, additive
+OrchardTerminals reads, CLI worker-verb wiring, `Tests/OrchardRuntimeTests/Worker*`.
+
+**T8 — Repo/project unification (app).** Make the runtime repo registry
+(orchard-data.json) the single source of truth for the sidebar: Open Project… and
+`orchard repo add` both land there and surface as sidebar projects live; one-time
+migration of the UserDefaults `orchard.workspaces` list; project remove updates the
+registry. Owns `Sources/OrchardApp/**` (core files) plus additive read/observe API on
+`Sources/OrchardRuntime/Workspaces`.
+
+**T9 — File manager.** Runtime file service (`readDir`, `preview` with byte budget +
+binary/image detection, `stat`, `search`, name-filtered listing) under
+`Sources/OrchardRuntime/Files/**`, CLI `file open|diff|open-changed` verbs, and a
+right-sidebar explorer in the app under `Sources/OrchardApp/FileExplorer/**` (lazy tree
+rooted at the selected worktree, dotfile toggle, name filter, reveal, open → diff tab
+for changed files) with a minimal hook into the workbench chrome.
+
+**T10 — Browser pane.** Per-workspace embedded browser: `BrowserWorkspace`/`BrowserPage`
+model, WKWebView pane as a new workbench tab kind under `Sources/OrchardApp/Browser/**`,
+runtime browser service under `Sources/OrchardRuntime/Browser/**`, and automation verbs
+`browser goto|back|forward|reload|snapshot|click|fill|type|screenshot|eval|console|tab`
+— snapshot walks the DOM via injected JS into a text outline with `@e1…` refs
+(re-snapshot after navigation; stale refs are errors, not guesses). Page content is
+untrusted data. CLI verbs additive.
+
+Shared-territory rule for the wave: the `orchard` CLI spec table and OrchardApp chrome
+accept additive edits from several tasks; keep them in per-feature files where possible
+and expect the coordinator to resolve small merge conflicts.
+
+### Wave 3+ backlog
+
+App sidebar duality was resolved by T8 (was: `orchard repo add` never surfaced in the
+UI, verified live 2026-08-23). Remaining: chat view-mode overlay on agent PTYs,
+`orchard serve` headless mode, capability-hash enforcement on `send`, full-text file
+search, browser session profiles/cookie import, automations (scheduled prompts),
+status-bar/ports, damson-side fixes (pane targeting, multi-subscriber raw output,
+deferred spawn), SSH/remote hosts.
 
 
 File-manager service + right-sidebar explorer UI; WKWebView browser pane + automation
