@@ -503,6 +503,15 @@ code). No damson-ide source changes.
 
 ### Wave 9+ backlog
 
+From the first dogfood cycle (docs/reports/dogfood-1.md, all verified live):
+worker-start `--agent claude` fails with unknown engine (accepted id is
+`claude-code`; alias it and enumerate engines in agent-context, and make the
+failed launch clean up its partial worktree/dispatch), the injected preamble
+references bare `orchard` that is not on the worker's PATH (inject
+ORCHARD_CLI_COMMAND as an absolute path and use it in the preamble), worker-read
+`--source transcript` silently falls back to terminal (honor the request or fail
+typed), TUI terminal archives are noisy (strip spinner/chrome on capture),
+subcommand `--help` is rejected, and bare `orchard guide` should list topics.
 Also:
 
 Project the repo primary checkout (and folder workspaces) into the runtime workspace
