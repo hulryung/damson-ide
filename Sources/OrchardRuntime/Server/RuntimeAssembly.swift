@@ -24,6 +24,9 @@ public final class OrchardRuntimeHost {
     public nonisolated let fileOpenCenter: FileOpenCenter
     public nonisolated let orchestration: LiveOrchestrationStore
     public nonisolated let waitCenter: MessageWaitCenter
+    /// T10: per-workspace embedded browser. WebKit-free here — the app attaches
+    /// a `BrowserWebHost` over its WKWebViews; without one the verbs fail typed.
+    public nonisolated let browserService: BrowserService
 
     public nonisolated let registry: CommandRegistry
     /// In-process client of the same registry (the app's path; no socket involved).
@@ -73,6 +76,13 @@ public final class OrchardRuntimeHost {
             waitCenter: waitCenter,
             context: context)
 
+        // Browser workspaces are keyed by worktree path; CLI selectors resolve
+        // through the workspace registry when possible, else pass through raw.
+        let workspaceService = self.workspaceService
+        self.browserService = BrowserService(resolver: { selector in
+            await MainActor.run { (try? workspaceService.show(selector: selector))?.path }
+        })
+
         var registry = CommandRegistry()
         registry.register(StatusHandler(runtimeId: runtimeId))
         registry.register(OrchestrationCommandHandler(store: orchestration))
@@ -82,6 +92,7 @@ public final class OrchardRuntimeHost {
         registry.register(FileCommandHandler(files: fileService,
                                              workspaces: workspaceService,
                                              opens: fileOpenCenter))
+        registry.register(BrowserCommandHandler(service: browserService))
         self.registry = registry
         self.inMemory = InMemoryRuntimeServer(registry: registry, runtimeId: runtimeId)
     }

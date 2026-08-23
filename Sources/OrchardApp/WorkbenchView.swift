@@ -228,10 +228,7 @@ struct TabGroupPane: View {
                     title: "Editor",
                     detail: "The file editor lands in wave 2.")
             case .browser:
-                PlaceholderPane(
-                    symbol: "globe",
-                    title: "Browser",
-                    detail: "The embedded browser pane lands in wave 2.")
+                BrowserPane(key: key)
             }
         } else {
             Color.clear

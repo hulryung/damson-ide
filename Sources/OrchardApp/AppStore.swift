@@ -28,6 +28,8 @@ final class AppStore: ObservableObject {
     let runtime: OrchardRuntimeHost?
     /// Same instance the CLI `repo-add` handler mutates when the host is live.
     let workspaceService: WorkspaceService
+    /// T10: WKWebView host for the runtime's browser service (nil with no runtime).
+    let browser: BrowserManager?
 
     @Published var projects: [ProjectSession] = []
     @Published var selectedProjectID: UUID?
@@ -76,6 +78,7 @@ final class AppStore: ObservableObject {
             context: TerminalHostContext(cliCommand: "orchard", dataPath: dataDirectory.path))
         let runtime = try? OrchardRuntimeHost(terminalFactory: factory)
         self.runtime = runtime
+        self.browser = runtime.map { BrowserManager(service: $0.browserService) }
         let dataStore = runtime?.dataStore
             ?? OrchardDataStore(url: dataDirectory.appendingPathComponent("orchard-data.json"))
         self.workspaceService = runtime?.workspaceService ?? WorkspaceService(store: dataStore)
