@@ -1,59 +1,55 @@
 import Foundation
+import OrchardCore
 import OrchardProtocol
 
-public struct RepositoryRecord: Codable, Equatable, Sendable {
-    public let id: String; public let path: String; public let displayName: String; public let baseRef: String?
-    public init(id: String = "repo_" + UUID().uuidString, path: String, displayName: String, baseRef: String? = nil) {
-        self.id = id; self.path = path; self.displayName = displayName; self.baseRef = baseRef
-    }
-}
+/// `repo list|add|show`, backed by T4's `OrchardDataStore` repo registry (wave-2 seam
+/// close: the earlier T2 handler kept a private `{repositories: []}` sidecar that
+/// fought T4's `orchard-data.json` schema for the same file). Records are T4's
+/// `RepoRecord`, so repo ids here are the ids worktree identities embed.
+public struct RepoRegistryHandler: CommandHandler {
+    public let verbs = ["repo-list", "repo-add", "repo-show"]
+    private let service: WorkspaceService
 
-public actor RepoRegistryHandler: CommandHandler {
-    public nonisolated let verbs = ["repo-list", "repo-add", "repo-show"]
-    private let fileURL: URL
-    private var repositories: [RepositoryRecord]
-
-    private struct Store: Codable { var repositories: [RepositoryRecord] = [] }
-
-    public init(fileURL: URL = RuntimePaths.applicationSupport().appendingPathComponent("orchard-data.json")) {
-        self.fileURL = fileURL
-        repositories = (try? JSONDecoder().decode(Store.self, from: Data(contentsOf: fileURL)))?.repositories ?? []
+    public init(service: WorkspaceService) {
+        self.service = service
     }
 
     public func handle(_ request: RPCRequest) async -> RPCResponse {
         let params = request.params?.objectValue ?? [:]
-        switch request.method {
-        case "repo-list": return .success(id: request.id, result: encode(repositories))
-        case "repo-add":
-            guard let rawPath = params["path"]?.stringValue else { return missing(request, "path") }
-            let path = URL(fileURLWithPath: rawPath).standardizedFileURL.path
-            if let existing = repositories.first(where: { $0.path == path }) { return .success(id: request.id, result: encode(existing)) }
-            let record = RepositoryRecord(path: path, displayName: params["display-name"]?.stringValue ?? URL(fileURLWithPath: path).lastPathComponent,
-                                          baseRef: params["base-ref"]?.stringValue)
-            repositories.append(record)
-            do { try persist(); return .success(id: request.id, result: encode(record)) }
-            catch { return .failure(id: request.id, error: RPCError(code: "store_write_failed", message: error.localizedDescription)) }
-        case "repo-show":
-            let selector = params["repo"]?.stringValue ?? params["id"]?.stringValue ?? params["path"]?.stringValue
-            guard let selector else { return missing(request, "repo") }
-            guard let record = repositories.first(where: { $0.id == selector.replacingOccurrences(of: "id:", with: "") || $0.path == selector.replacingOccurrences(of: "path:", with: "") }) else {
-                return .failure(id: request.id, error: RPCError(code: "repo_not_found", message: "repository not found"))
-            }
-            return .success(id: request.id, result: encode(record))
-        default: return .failure(id: request.id, error: RPCError(code: "unknown_command", message: request.method))
-        }
-    }
+        do {
+            switch request.method {
+            case "repo-list":
+                let repos = await service.listRepos()
+                return .success(id: request.id, result: try .object([
+                    "repos": JSONBridge.value(repos),
+                    "count": .number(Double(repos.count)),
+                ]))
 
-    private func persist() throws {
-        try FileManager.default.createDirectory(at: fileURL.deletingLastPathComponent(), withIntermediateDirectories: true,
-                                                attributes: [.posixPermissions: 0o700])
-        try JSONEncoder.orchard.encode(Store(repositories: repositories)).write(to: fileURL, options: .atomic)
-        chmod(fileURL.path, 0o600)
-    }
-    private func encode<T: Encodable>(_ value: T) -> JSONValue {
-        let data = try! JSONEncoder().encode(value); return try! JSONDecoder().decode(JSONValue.self, from: data)
-    }
-    private func missing(_ request: RPCRequest, _ name: String) -> RPCResponse {
-        .failure(id: request.id, error: RPCError(code: "invalid_arguments", message: "missing --\(name)"))
+            case "repo-add":
+                guard let rawPath = params.str("path"), !rawPath.isEmpty else {
+                    throw WorkspaceError("invalid_argument", "repo-add requires --path")
+                }
+                let record = try await service.addRepo(
+                    path: URL(fileURLWithPath: rawPath),
+                    displayName: params.str("display-name") ?? params.str("displayName"),
+                    baseRef: params.str("base-ref") ?? params.str("baseRef"))
+                return .success(id: request.id, result: try JSONBridge.value(record))
+
+            case "repo-show":
+                guard let selector = params.str("repo") ?? params.str("id") ?? params.str("path") else {
+                    throw WorkspaceError("invalid_argument", "repo-show requires --repo <selector>")
+                }
+                let record = try await service.resolveRepo(selector)
+                return .success(id: request.id, result: try JSONBridge.value(record))
+
+            default:
+                throw WorkspaceError("unknown_command", request.method)
+            }
+        } catch let error as WorkspaceError {
+            return .failure(id: request.id, error: RPCError(code: error.code, message: error.message))
+        } catch {
+            return .failure(id: request.id, error: RPCError(
+                code: "internal_error", message: String(describing: error)))
+        }
     }
 }

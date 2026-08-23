@@ -23,7 +23,4 @@ final class ServerRuntimeTests: XCTestCase {
     }
 }
 
-private final class ScopedFileManager: FileManager, @unchecked Sendable {
-    let root: URL; init(root: URL) { self.root = root; super.init() }
-    override func urls(for directory: SearchPathDirectory, in domainMask: SearchPathDomainMask) -> [URL] { [root] }
-}
+// ScopedFileManager lives in EndToEndOrchestrationTests.swift (shared by both suites).
