@@ -65,6 +65,35 @@ final class TerminalHandlerTests: XCTestCase {
 
     // MARK: - Verb coverage
 
+    func testTerminalCommandSpecDocumentsCompleteCLISurface() throws {
+        let spec = try XCTUnwrap(OrchardCommands.all.first { $0.name == "terminal" })
+        XCTAssertEqual(spec.positionalArgs,
+                       ["list|create|read|send|wait|split|close|rename"])
+        let flags = Set(spec.flags.map(\.name))
+        XCTAssertTrue(Set([
+            "worktree", "terminal", "title", "engine", "prompt", "cwd", "cursor",
+            "screen", "limit", "text", "enter", "interrupt", "for", "timeout-ms", "json",
+        ]).isSubset(of: flags))
+    }
+
+    func testCLISmokePathCreateSendAndSurviveIsBackedByLiveRuntime() async throws {
+        let terminal = try await createTerminal(engine: "shell", worktree: "repo::smoke")
+        let sent = await call("terminal-send", [
+            "terminal": .string(terminal.handle), "text": .string("echo smoke"),
+            "enter": .bool(true),
+        ])
+        XCTAssertEqual(sent.result?.objectValue?["accepted"], .bool(true))
+
+        await MainActor.run { sessions[terminal.handle]?.emitOutput("smoke\n") }
+        let read = await call("terminal-read", ["terminal": .string(terminal.handle)])
+        XCTAssertEqual(read.result?.objectValue?["lines"], .array([.string("smoke")]))
+
+        let listed = await call("terminal-list", ["worktree": .string("repo::smoke")])
+        let rows = try XCTUnwrap(listed.result?.objectValue?["terminals"]?.arrayValue)
+        XCTAssertEqual(rows.first?.objectValue?["handle"]?.stringValue, terminal.handle)
+        XCTAssertEqual(rows.first?.objectValue?["connected"], .bool(true))
+    }
+
     func testCreateAndListRoundTrip() async throws {
         let terminal = try await createTerminal(engine: "shell", worktree: "repo::wt")
         let response = await call("terminal-list", ["worktree": .string("repo::wt")])

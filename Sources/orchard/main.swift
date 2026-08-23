@@ -100,9 +100,37 @@ func formatHuman(method: String, result: JSONValue?) -> String {
         return formatWorktreePs(result)
     case "workspace-ports":
         return formatWorkspacePorts(result)
+    case "terminal-list":
+        return formatTerminalList(result)
+    case "terminal-read":
+        return (object?["lines"]?.arrayValue ?? []).compactMap(\.stringValue).joined(separator: "\n")
     default:
         return result.map(String.init(describing:)) ?? "ok"
     }
+}
+
+func formatTerminalList(_ result: JSONValue?) -> String {
+    let rows = result?.objectValue?["terminals"]?.arrayValue ?? []
+    if rows.isEmpty { return "No terminals found." }
+    let headings = ["TITLE", "HANDLE", "WORKTREE", "STATE"]
+    let values = rows.map { value -> [String] in
+        let row = value.objectValue ?? [:]
+        let connected = row["connected"]?.boolValue == true
+        return [
+            row["title"]?.stringValue ?? row["engine"]?.stringValue ?? "",
+            row["handle"]?.stringValue ?? "",
+            row["worktreeId"]?.stringValue ?? "-",
+            row["agentState"]?.stringValue ?? (connected ? "running" : "exited"),
+        ]
+    }
+    let widths = headings.indices.map { index in
+        ([headings[index]] + values.map { $0[index] }).map(\.count).max() ?? 0
+    }
+    return ([headings] + values).map { row in
+        row.indices.map { index in
+            index == row.count - 1 ? row[index] : row[index].padding(toLength: widths[index], withPad: " ", startingAt: 0)
+        }.joined(separator: "  ")
+    }.joined(separator: "\n")
 }
 
 func formatWorktreePs(_ result: JSONValue?) -> String {
@@ -189,7 +217,7 @@ do {
         } else { throw CLIError.usage("usage: orchard guide list | orchard guide get orchestration [--json]") }
     default:
         var method = parsed.spec.name, params = parsed.params; params.removeValue(forKey: "json")
-        if method == "repo" || method == "browser" || method == "automations" || method == "worktree", case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue {
+        if method == "repo" || method == "browser" || method == "automations" || method == "worktree" || method == "terminal", case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue {
             method = "\(method)-\(subcommand)"
             let rest = Array(values.dropFirst())
             if method.hasPrefix("automations-") && !rest.isEmpty && params["id"] == nil {
@@ -204,9 +232,25 @@ do {
                 } else if !rest.isEmpty {
                     params["_args"] = .array(rest)
                 }
+            } else if method.hasPrefix("terminal-") {
+                guard rest.isEmpty else { throw CLIError.usage("usage: orchard terminal list|create|read|send|wait|split|close|rename [options]") }
+                let verb = String(method.dropFirst("terminal-".count))
+                let known = ["list", "create", "read", "send", "wait", "split", "close", "rename"]
+                guard known.contains(verb) else { throw CLIError.usage("usage: orchard terminal list|create|read|send|wait|split|close|rename [options]") }
+                if ["read", "send", "wait", "split", "close", "rename"].contains(verb), params["terminal"] == nil {
+                    throw CLIError.usage("terminal \(verb) requires --terminal <handle>")
+                }
+                if verb == "wait", params["for"] == nil { throw CLIError.usage("terminal wait requires --for tui-idle|exit") }
+                if verb == "rename", params["title"] == nil { throw CLIError.usage("terminal rename requires --title <text>") }
+                if let timeout = params.removeValue(forKey: "timeout-ms") { params["timeoutMs"] = timeout }
+                if (verb == "list" || verb == "create"), params["cwd"] == nil {
+                    params["cwd"] = .string(FileManager.default.currentDirectoryPath)
+                }
             } else if !rest.isEmpty { params["_args"] = .array(rest) }
         } else if method == "worktree" {
             throw CLIError.usage("usage: orchard worktree list|show|current|create|set|rm|ps [options]")
+        } else if method == "terminal" {
+            throw CLIError.usage("usage: orchard terminal list|create|read|send|wait|split|close|rename [options]")
         }
         if method == "file" {
             guard case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue else {

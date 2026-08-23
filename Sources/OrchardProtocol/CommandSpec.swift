@@ -144,6 +144,22 @@ public enum OrchardCommands {
                 flag("exclude", "Content-search exclude glob", "glob"),
                 flag("limit", "Maximum content-search matches", "n"),
             ], positionals: ["open|diff|open-changed|search", "path|query"]),
+            command("terminal", "List, create, inspect, and control runtime terminals", [
+                flag("worktree", "Worktree selector for list or create", "selector"),
+                flag("terminal", "Terminal handle", "handle"),
+                flag("title", "Terminal title", "text"),
+                flag("engine", "Terminal engine (default shell)", "engine"),
+                flag("prompt", "Initial agent prompt", "text"),
+                flag("cwd", "Initial working directory", "path"),
+                flag("cursor", "Stream cursor for incremental reads", "n"),
+                flag("screen", "Read the rendered terminal screen"),
+                flag("limit", "Maximum lines to read", "n"),
+                flag("text", "Text to send", "text"),
+                flag("enter", "Send Enter after text"),
+                flag("interrupt", "Send an interrupt"),
+                flag("for", "Wait condition", "tui-idle|exit"),
+                flag("timeout-ms", "Wait timeout in milliseconds", "ms"),
+            ], positionals: ["list|create|read|send|wait|split|close|rename"]),
             // T10 embedded browser. Refs (@eN) come from the latest `snapshot` of a
             // page and are invalidated by any navigation (top-level or subframe) —
             // re-snapshot, don't guess. T21 session profiles: `tab profile
