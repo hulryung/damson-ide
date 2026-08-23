@@ -14,7 +14,7 @@ struct StatusBarView: View {
             PortsStatusChip(ports: store.portSnapshot.ports, isPresented: $showingPorts)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 4)
+        .frame(height: Tokens.statusBarHeight)
         .background(Tokens.sidebar)
         .overlay(alignment: .top) { Divider() }
     }

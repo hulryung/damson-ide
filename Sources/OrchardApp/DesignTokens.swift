@@ -29,6 +29,10 @@ enum Tokens {
     static let radius: CGFloat = 6
     static let radiusCard: CGFloat = 8
     static let sidebarMinWidth: CGFloat = 220
+    /// Fixed status-bar height: the bottom safe-area inset does not propagate
+    /// into the split view's AppKit-backed columns, so panes that pin content
+    /// to their bottom edge pad by this instead of the safe area.
+    static let statusBarHeight: CGFloat = 26
     static let sidebarIdealWidth: CGFloat = 280
     static let sidebarMaxWidth: CGFloat = 500
 

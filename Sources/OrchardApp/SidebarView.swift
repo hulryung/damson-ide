@@ -18,6 +18,9 @@ struct SidebarView: View {
             Divider()
             toolbar
         }
+        // Keep the pinned New/toggle row above the window status bar (the
+        // safe-area inset stops at the AppKit column boundary).
+        .padding(.bottom, Tokens.statusBarHeight)
         .background(Tokens.sidebar)
     }
 
