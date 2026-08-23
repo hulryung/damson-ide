@@ -109,6 +109,12 @@ public enum OrchardCommands {
             command("worker-retain", "Retain worker resources", [flag("dispatch", "Dispatch identifier", "id", required: true), retry]),
             command("worker-list", "List supervised workers", [flag("terminal-state", "Terminal state filter", "state")]),
             command("repo", "Manage registered repositories", [flag("path", "Repository path", "path"), flag("repo", "Repository selector", "selector"), flag("display-name", "Display name", "text")], positionals: ["list|add|show"]),
+            command("file", "Open, diff, or reveal git-changed workspace files", [
+                flag("path", "File path relative to the worktree (or absolute inside it)", "path"),
+                flag("worktree", "Worktree selector", "selector"),
+                flag("staged", "Accepted for parity; diffs are always vs the fork point"),
+                flag("mode", "open-changed mode: edit, diff, or both (default diff)", "edit|diff|both"),
+            ], positionals: ["open|diff|open-changed", "path"]),
             command("reset", "Reset orchestration state", [flag("all", "Reset all"), flag("tasks", "Reset tasks"), flag("messages", "Reset messages")]),
         ]
     }()
