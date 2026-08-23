@@ -31,6 +31,7 @@ public final class ScriptedTerminalSession: TerminalSession {
 
     private let gridChangedSubject = PassthroughSubject<Void, Never>()
     private let outputSubject = PassthroughSubject<TerminalOutputEvent, Never>()
+    private let outputBytesSubject = PassthroughSubject<Data, Never>()
 
     public init(config: DamsonConfig = DamsonConfig()) {
         self.config = config
@@ -56,6 +57,10 @@ public final class ScriptedTerminalSession: TerminalSession {
         outputSubject.eraseToAnyPublisher()
     }
 
+    public var outputBytes: AnyPublisher<Data, Never> {
+        outputBytesSubject.eraseToAnyPublisher()
+    }
+
     public func gridSnapshot() -> TerminalGridSnapshot {
         TerminalGridSnapshot(
             lines: screenLines, cursorRow: 0, cursorCol: 0,
@@ -66,8 +71,10 @@ public final class ScriptedTerminalSession: TerminalSession {
     // MARK: - Scripting
 
     /// Emit printed text (splitting embedded newlines into control events, the way the
-    /// VT parser would) and signal a grid change.
+    /// VT parser would) and signal a grid change. The same text also arrives on
+    /// `outputBytes` as one raw chunk, matching the real engine's pre-parse feed.
     public func emitOutput(_ text: String) {
+        outputBytesSubject.send(Data(text.utf8))
         var chunk = ""
         func flush() {
             if !chunk.isEmpty {
@@ -94,6 +101,12 @@ public final class ScriptedTerminalSession: TerminalSession {
     /// Emit a parsed OSC sequence (e.g. `["9999", "idle"]` for the Tier-2 status escape).
     public func emitOSC(_ params: [String]) {
         outputSubject.send(.osc(params))
+    }
+
+    /// Emit a raw byte chunk with no parsed-event counterpart — what a repaint-only
+    /// burst (pure CSI, e.g. a spinner frame) looks like to subscribers.
+    public func emitRawBytes(_ data: Data) {
+        outputBytesSubject.send(data)
     }
 
     /// Redraw the scripted screen and fire the grid-change signal.

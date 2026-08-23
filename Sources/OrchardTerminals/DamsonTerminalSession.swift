@@ -20,9 +20,14 @@ public final class DamsonTerminalSession: TerminalSession {
         session.onExit = { [weak self] code in self?.onExit?(code) }
     }
 
-    /// Spawn a fresh PTY session from a config (argv/cwd/env decide what runs in it).
-    public convenience init(config: DamsonConfig) {
-        self.init(session: DamsonSession(config: config))
+    /// Spawn a fresh PTY session from a config (argv/cwd/env decide what runs in it),
+    /// at the given grid size. Sizing at spawn (not 80×24-then-resize) means the
+    /// child's very first TIOCGWINSZ already reads the real geometry — no layout at
+    /// the wrong size, no reflow on the first SIGWINCH.
+    public convenience init(config: DamsonConfig, initialCols: Int, initialRows: Int) {
+        self.init(session: DamsonSession(config: config,
+                                         initialCols: initialCols,
+                                         initialRows: initialRows))
     }
 
     public func write(_ data: Data) { session.write(data) }
@@ -39,6 +44,10 @@ public final class DamsonTerminalSession: TerminalSession {
 
     public var gridChanged: AnyPublisher<Void, Never> {
         session.gridChanged.eraseToAnyPublisher()
+    }
+
+    public var outputBytes: AnyPublisher<Data, Never> {
+        session.outputBytes.eraseToAnyPublisher()
     }
 
     public var outputEvents: AnyPublisher<TerminalOutputEvent, Never> {

@@ -42,6 +42,12 @@ public protocol TerminalSession: AnyObject {
     /// Tier-2 agent-status escape, and text for future consumers). Multi-subscriber.
     var outputEvents: AnyPublisher<TerminalOutputEvent, Never> { get }
 
+    /// Raw pre-parse PTY bytes, multi-subscriber. Fires once per output chunk — including
+    /// repaint-only chunks (pure CSI) that produce no `outputEvents` — so it is the
+    /// truthful "the child wrote something" signal. Subscribing here never contends with
+    /// damson's single-assignment `onOutput` closure, which stays unclaimed.
+    var outputBytes: AnyPublisher<Data, Never> { get }
+
     /// Called once when the child process exits. Single-assignment.
     var onExit: ((Int32) -> Void)? { get set }
 }
