@@ -183,6 +183,69 @@ final class KeeperAdoptionTests: XCTestCase {
         }
     }
 
+    /// Restoration geometry is the adopted session's live grid, not a spawn
+    /// default: a session scripted at the pane's cols/rows must respawn there.
+    func testAdoptedPaneRespawnUsesRestoredGridGeometry() throws {
+        var specs: [TerminalCreateSpec] = []
+        let service = TerminalService(factory: { spec, _ in
+            specs.append(spec)
+            return ScriptedTerminalSession()
+        })
+        let adopted = ScriptedTerminalSession()
+        adopted.gridCols = 132
+        adopted.gridRows = 40
+        let pane = makePane(paneKey: "tab_g:leaf_g", incarnation: 1)
+        _ = try service.adoptKeeperRestored(pane: pane, session: adopted)
+        _ = try service.respawn(paneKey: "tab_g:leaf_g")
+        let spec = try XCTUnwrap(specs.last)
+        XCTAssertEqual(spec.initialCols, 132)
+        XCTAssertEqual(spec.initialRows, 40)
+        XCTAssertEqual(spec.cwd, "/tmp/wt")
+    }
+
+    /// Fresh create/adopt seed the tracker and the activity clock; keeper
+    /// adoption was skipping both, so a restored pane looked idle-never-spoke
+    /// until the next live chunk.
+    func testAdoptedPaneSeedsStatusAndActivityClock() throws {
+        let service = TerminalService(factory: { _, _ in ScriptedTerminalSession() })
+        let terminal = ScriptedTerminalSession()
+        let task = AgentTask(title: "t", prompt: "prior ask", engineID: "shell",
+                             baseRepoPath: "")
+        let agent = AgentSession(engine: GenericShellEngine(), terminal: terminal,
+                                 worktree: nil, task: task)
+        let pane = makePane(paneKey: "tab_s:leaf_s", incarnation: 4)
+        let summary = try service.adoptKeeperRestored(pane: pane, session: terminal,
+                                                      agentSession: agent)
+        XCTAssertNotNil(summary.lastOutputAt,
+                        "adoption must seed the activity clock; replay is async")
+        XCTAssertEqual(try service.agentStatus(handle: summary.handle).prompt, "prior ask")
+        XCTAssertEqual(try service.agentStatus(handle: summary.handle).state, .working,
+                       "AgentSession starts in .starting → status .working, same as adopt()")
+
+        // Live bytes after adoption still move the clock.
+        let before = try XCTUnwrap(service.list().first?.lastOutputAt)
+        terminal.emitRawBytes(Data("\u{1B}[0m".utf8))
+        let after = try XCTUnwrap(service.list().first?.lastOutputAt)
+        XCTAssertGreaterThanOrEqual(after, before)
+    }
+
+    /// Home-shell re-attach: a keeper-restored shell with no supervisor worktree
+    /// is the session `adoptedShellDamsonSession` must find. Scripted fakes have
+    /// no Damson surface, so the lookup is nil — but the record is still the
+    /// one a real PTY would re-attach.
+    func testAdoptedShellLookupSkipsSupervisorBoundAgents() throws {
+        let service = TerminalService(factory: { _, _ in ScriptedTerminalSession() })
+        let pane = makePane(paneKey: "tab_h:leaf_h")
+        let summary = try service.adoptKeeperRestored(pane: pane,
+                                                      session: ScriptedTerminalSession())
+        XCTAssertEqual(summary.worktreeId, "repo::/tmp/wt")
+        XCTAssertEqual(summary.engine, "shell")
+        XCTAssertNil(service.damsonSession(handle: summary.handle),
+                     "scripted sessions have no Damson surface")
+        XCTAssertNil(service.adoptedShellDamsonSession(worktreeId: "repo::/tmp/wt"),
+                     "same: lookup only returns a live DamsonSession")
+    }
+
     /// The app hands a supervisor-built agent session in (restored hook token,
     /// worktree binding): its identity is stamped, its observers are chained rather
     /// than replaced, and the status stack tracks the restored pane.

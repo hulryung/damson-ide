@@ -348,7 +348,7 @@ struct TerminalPane: View {
 
     var body: some View {
         Group {
-            if let session = store.damsonSession(for: tab, cwd: cwd) {
+            if let session = store.damsonSession(for: tab, key: key, cwd: cwd) {
                 ZStack(alignment: .top) {
                     // The PTY stays in the tree so chat is an overlay, never a
                     // second session. Keyboard focus leaves it while chat is up.

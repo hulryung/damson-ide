@@ -1,4 +1,5 @@
 import Foundation
+import DamsonTerminal
 import OrchardCore
 
 /// The terminal domain service behind the `terminal *` RPC verbs: creation, listing,
@@ -73,6 +74,25 @@ public final class TerminalService {
     /// typed stale/not-found split preserved).
     public func summary(handle: String) throws -> TerminalSummary {
         try registry.resolve(handle).summary()
+    }
+
+    /// The live Damson surface behind a handle, when the record is a real PTY.
+    /// App panes render this; scripted/test sessions return nil.
+    public func damsonSession(handle: String) -> DamsonSession? {
+        ((try? registry.resolve(handle))?.session as? DamsonTerminalSession)?.session
+    }
+
+    /// Keeper-restored (or service-created) local shell for this worktree that
+    /// isn't a supervisor-bound agent. Home-shell tabs re-attach here after
+    /// relaunch; agent panes bind through `agentID` instead.
+    public func adoptedShellDamsonSession(worktreeId: String) -> DamsonSession? {
+        for record in registry.list(worktreeId: worktreeId) where record.connected {
+            guard record.engine.id == "shell",
+                  !record.engine.usesLongRunningTUI,
+                  record.agentSession.worktree == nil else { continue }
+            return (record.session as? DamsonTerminalSession)?.session
+        }
+        return nil
     }
 
     /// Adopt an externally spawned agent session (an `AgentSupervisor` PTY) under the
@@ -254,7 +274,17 @@ public final class TerminalService {
         } else {
             wireStateChanges(record)
         }
+        // Same seeds a fresh `adopt(agentSession:spec:)` / `create` get: the
+        // restored task prompt (empty for a keeper-restored Claude pane — it
+        // must not be re-typed), the fused state so `wait --for tui-idle`
+        // fast-paths, and the activity clock. Replay bytes land asynchronously
+        // *after* `TerminalRecord.attach`, so without this seed a restored pane
+        // looks like it has never produced output until the next live chunk.
+        if let prompt = agent.task?.prompt, !prompt.isEmpty {
+            record.tracker.lastPrompt = prompt
+        }
         record.tracker.note(agent.state)
+        record.noteActivity()
         return record.summary()
     }
 
