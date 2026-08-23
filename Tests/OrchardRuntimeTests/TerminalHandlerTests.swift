@@ -9,6 +9,7 @@ import OrchardTerminals
 final class TerminalHandlerTests: XCTestCase {
     private var sessions: [String: ScriptedTerminalSession] = [:]
     private var server: InMemoryRuntimeServer!
+    private var service: TerminalService!
 
     @MainActor
     override func setUp() {
@@ -29,6 +30,7 @@ final class TerminalHandlerTests: XCTestCase {
             },
             pipeline: pipeline,
             detectorConfig: detector)
+        self.service = service
         var registry = CommandRegistry()
         registry.register(TerminalCommandHandler(service: service))
         server = InMemoryRuntimeServer(registry: registry, runtimeId: "rt_terminals")
@@ -36,6 +38,18 @@ final class TerminalHandlerTests: XCTestCase {
 
     private func call(_ method: String, _ params: [String: JSONValue] = [:]) async -> RPCResponse {
         await server.perform(RPCRequest(method: method, params: .object(params)))
+    }
+
+    private func waitUntil(_ what: String, timeout: TimeInterval = 2,
+                           file: StaticString = #filePath, line: UInt = #line,
+                           condition: @escaping @MainActor () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while Date() < deadline {
+            if await MainActor.run(body: condition) { return }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        XCTFail("timed out waiting for \(what)", file: file, line: line)
+        throw CancellationError()
     }
 
     private func createTerminal(engine: String = "shell",
@@ -124,7 +138,9 @@ final class TerminalHandlerTests: XCTestCase {
             "for": .string("exit"),
             "timeoutMs": .number(2000),
         ])
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await waitUntil("exit waiter parked") { [service] in
+            (try? service!.waiterCount(handle: terminal.handle)) == 1
+        }
         await MainActor.run { sessions[terminal.handle]?.exit(code: 7) }
         let response = await pending
         XCTAssertTrue(response.ok)

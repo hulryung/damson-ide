@@ -293,19 +293,27 @@ public final class FileOpenCenter: @unchecked Sendable {
 
     public init() {}
 
+    /// Number of live subscribers (test/diagnostic surface).
+    public var subscriberCount: Int {
+        lock.lock(); defer { lock.unlock() }
+        return continuations.count
+    }
+
     public func events() -> AsyncStream<FileOpenRequest> {
-        AsyncStream { continuation in
-            let id = UUID()
-            lock.lock()
-            continuations[id] = continuation
-            lock.unlock()
-            continuation.onTermination = { [weak self] _ in
-                guard let self else { return }
-                self.lock.lock()
-                self.continuations[id] = nil
-                self.lock.unlock()
-            }
+        // Register immediately so a subscriber that has called `events()`
+        // cannot miss a `post` that races the first `for await`.
+        let id = UUID()
+        let (stream, continuation) = AsyncStream.makeStream(of: FileOpenRequest.self)
+        lock.lock()
+        continuations[id] = continuation
+        lock.unlock()
+        continuation.onTermination = { [weak self] _ in
+            guard let self else { return }
+            self.lock.lock()
+            self.continuations[id] = nil
+            self.lock.unlock()
         }
+        return stream
     }
 
     public func post(_ request: FileOpenRequest) {

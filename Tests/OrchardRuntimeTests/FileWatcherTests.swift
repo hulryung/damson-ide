@@ -71,41 +71,62 @@ final class FileWatcherTests: XCTestCase {
         try watcher.start(root: tmp)
         defer { watcher.stop() }
 
-        let collector = Task<[FileWatchChange], Never> {
-            var collected: [FileWatchChange] = []
-            for await batch in stream {
-                if batch.rootDeleted { break }
-                collected.append(contentsOf: batch.changes)
-                let kinds = Set(collected.map(\.kind))
-                if kinds.contains(.created) && kinds.contains(.deleted) && kinds.contains(.renamed) {
-                    break
-                }
-                if collected.count > 20 { break }
-            }
-            return collected
+        // Handshake: a probe write must be reconciled before we trust FSEvents.
+        _ = try await mutateAndWait(watcher, timeout: 8, matching: { batch in
+            batch.changes.contains { $0.kind == .created && $0.relativePath.hasSuffix(".probe") }
+        }) {
+            try write("probe", to: ".probe")
         }
 
-        // Give FSEvents a moment to attach before mutating.
-        try await Task.sleep(nanoseconds: 80_000_000)
-        try write("one", to: "alpha.txt")
-        try await Task.sleep(nanoseconds: 120_000_000)
-        try FileManager.default.moveItem(
-            at: tmp.appendingPathComponent("alpha.txt"),
-            to: tmp.appendingPathComponent("beta.txt"))
-        try await Task.sleep(nanoseconds: 120_000_000)
-        try FileManager.default.removeItem(at: tmp.appendingPathComponent("beta.txt"))
+        let created = try await mutateAndWait(watcher, timeout: 8, matching: { batch in
+            batch.changes.contains { $0.kind == .created && $0.relativePath.hasSuffix("alpha.txt") }
+        }) {
+            try write("one", to: "alpha.txt")
+        }
+        XCTAssertTrue(created.changes.contains { $0.kind == .created && $0.relativePath.hasSuffix("alpha.txt") })
 
-        let collected = await withTimeout(seconds: 3, collector) ?? []
-        XCTAssertTrue(collected.contains { $0.kind == .created && $0.relativePath.hasSuffix("alpha.txt") },
-                      "expected created alpha, got \(collected)")
+        let renamed = try await mutateAndWait(watcher, timeout: 8, matching: { batch in
+            batch.changes.contains { $0.kind == .renamed && $0.relativePath.hasSuffix("beta.txt") }
+            || batch.changes.contains { $0.kind == .deleted && $0.relativePath.hasSuffix("alpha.txt") }
+        }) {
+            try FileManager.default.moveItem(
+                at: tmp.appendingPathComponent("alpha.txt"),
+                to: tmp.appendingPathComponent("beta.txt"))
+        }
         XCTAssertTrue(
-            collected.contains { $0.kind == .renamed && $0.relativePath.hasSuffix("beta.txt") }
-            || collected.contains { $0.kind == .deleted && $0.relativePath.hasSuffix("alpha.txt") },
-            "expected rename or delete of alpha, got \(collected)")
+            renamed.changes.contains { $0.kind == .renamed && $0.relativePath.hasSuffix("beta.txt") }
+            || renamed.changes.contains { $0.kind == .deleted && $0.relativePath.hasSuffix("alpha.txt") },
+            "expected rename or delete of alpha, got \(renamed.changes)")
+
+        let deleted = try await mutateAndWait(watcher, timeout: 8, matching: { batch in
+            batch.changes.contains { $0.kind == .deleted && ($0.relativePath.hasSuffix("beta.txt")
+                                                             || $0.relativePath.hasSuffix("alpha.txt")) }
+        }) {
+            try FileManager.default.removeItem(at: tmp.appendingPathComponent("beta.txt"))
+        }
+        XCTAssertTrue(
+            deleted.changes.contains { $0.kind == .deleted && ($0.relativePath.hasSuffix("beta.txt")
+                                                              || $0.relativePath.hasSuffix("alpha.txt")) },
+            "expected delete, got \(deleted.changes)")
+
+        // The public stream is registered at `events()` (unbounded buffer), so it
+        // must have seen the same create/rename/delete sequence.
+        var collected: [FileWatchChange] = []
+        let drain = Task {
+            for await batch in stream {
+                collected.append(contentsOf: batch.changes)
+                let kinds = Set(collected.map(\.kind))
+                if kinds.contains(.created) && kinds.contains(.deleted) { break }
+                if collected.count > 20 { break }
+            }
+        }
+        _ = await withTimeout(seconds: 2, drain)
+        XCTAssertTrue(collected.contains { $0.kind == .created && $0.relativePath.hasSuffix("alpha.txt") },
+                      "stream missed created alpha, got \(collected)")
         XCTAssertTrue(
             collected.contains { $0.kind == .deleted && ($0.relativePath.hasSuffix("beta.txt")
                                                          || $0.relativePath.hasSuffix("alpha.txt")) },
-            "expected delete, got \(collected)")
+            "stream missed delete, got \(collected)")
     }
 
     func testLiveWatcherReportsRootDeletion() async throws {
@@ -118,16 +139,47 @@ final class FileWatcherTests: XCTestCase {
         try watcher.start(root: root)
         defer { watcher.stop() }
 
+        // Attach handshake against a file inside the watched root.
+        _ = try await mutateAndWait(watcher, timeout: 8, matching: { batch in
+            batch.changes.contains { $0.kind == .created && $0.relativePath.hasSuffix("probe.txt") }
+        }) {
+            try write("p", to: "probe.txt", in: root)
+        }
+
         let waiter = Task<Bool, Never> {
             for await batch in stream {
                 if batch.rootDeleted { return true }
             }
             return false
         }
-        try await Task.sleep(nanoseconds: 80_000_000)
-        try FileManager.default.removeItem(at: root)
-        let deleted = await withTimeout(seconds: 3, waiter) ?? false
+        _ = try await mutateAndWait(watcher, timeout: 8, matching: { $0.rootDeleted }) {
+            try FileManager.default.removeItem(at: root)
+        }
+        let deleted = await withTimeout(seconds: 2, waiter) ?? false
         XCTAssertTrue(deleted)
+    }
+
+    /// Arm `onReconciled` first, then mutate, then wait. FSEvents/debounce
+    /// latency is bounded by `timeout` instead of a guessed sleep.
+    @discardableResult
+    private func mutateAndWait(
+        _ watcher: FileWatcher,
+        timeout: TimeInterval,
+        matching: @escaping @Sendable (FileWatchBatch) -> Bool,
+        mutate: () throws -> Void
+    ) async throws -> FileWatchBatch {
+        let box = OnceBox<FileWatchBatch>()
+        watcher.onReconciled = { batch in
+            if matching(batch) { box.resume(batch) }
+        }
+        try mutate()
+        let batch = await withTimeout(seconds: timeout, Task { await box.wait() })
+        watcher.onReconciled = nil
+        guard let batch else {
+            XCTFail("timed out waiting for file-watch reconcile (\(timeout)s)")
+            throw CancellationError()
+        }
+        return batch
     }
 
     private func withTimeout<T>(seconds: TimeInterval, _ task: Task<T, Never>) async -> T? {
@@ -142,6 +194,39 @@ final class FileWatcherTests: XCTestCase {
             group.cancelAll()
             task.cancel()
             return first ?? nil
+        }
+    }
+}
+
+/// One-shot handoff from the watcher queue onto the test task.
+private final class OnceBox<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: T?
+    private var continuation: CheckedContinuation<T, Never>?
+
+    func resume(_ value: T) {
+        lock.lock()
+        if self.value != nil {
+            lock.unlock()
+            return
+        }
+        self.value = value
+        let pending = continuation
+        continuation = nil
+        lock.unlock()
+        pending?.resume(returning: value)
+    }
+
+    func wait() async -> T {
+        await withCheckedContinuation { cont in
+            lock.lock()
+            if let value {
+                lock.unlock()
+                cont.resume(returning: value)
+                return
+            }
+            continuation = cont
+            lock.unlock()
         }
     }
 }

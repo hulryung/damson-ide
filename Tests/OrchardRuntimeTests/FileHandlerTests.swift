@@ -98,14 +98,14 @@ final class FileHandlerTests: XCTestCase {
     func testFileOpenPostsNotification() async throws {
         let (server, workspace, opens) = try makeFolderWorkspace()
         var received: [FileOpenRequest] = []
+        let stream = opens.events()
+        XCTAssertGreaterThan(opens.subscriberCount, 0, "events() registers immediately")
         let task = Task {
-            for await request in opens.events() {
+            for await request in stream {
                 received.append(request)
                 break
             }
         }
-        // Give the subscriber a tick to register before posting.
-        try await Task.sleep(nanoseconds: 20_000_000)
         let response = await call(server, "file-open", [
             "worktree": .string(workspace.id),
             "path": .string("README.md"),
@@ -190,13 +190,14 @@ final class FileHandlerTests: XCTestCase {
         let server = InMemoryRuntimeServer(registry: registry, runtimeId: "rt_changed")
 
         var received: [FileOpenRequest] = []
+        let stream = opens.events()
+        XCTAssertGreaterThan(opens.subscriberCount, 0, "events() registers immediately")
         let task = Task {
-            for await request in opens.events() {
+            for await request in stream {
                 received.append(request)
                 if received.count >= 2 { break }
             }
         }
-        try await Task.sleep(nanoseconds: 20_000_000)
         let response = await call(server, "file-open-changed", [
             "worktree": .string(workspace.id),
             "mode": .string("diff"),

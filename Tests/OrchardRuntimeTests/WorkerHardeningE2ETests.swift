@@ -280,7 +280,9 @@ final class WorkerHardeningE2ETests: XCTestCase {
                 "types": .string("escalation"), "timeout-ms": .number(10000),
             ])))
         }
-        try await Task.sleep(nanoseconds: 300_000_000)
+        try await waitUntil("check --wait parked") { [host] in
+            host!.waitCenter.waiterCount >= 1
+        }
 
         await MainActor.run { worker.session.exit(code: 137) }
 

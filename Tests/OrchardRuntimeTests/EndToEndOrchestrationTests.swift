@@ -40,6 +40,19 @@ final class EndToEndOrchestrationTests: XCTestCase {
         try await super.tearDown()
     }
 
+    private func waitUntil(_ what: String, timeout: TimeInterval = 5,
+                           file: StaticString = #filePath, line: UInt = #line,
+                           condition: () -> Bool) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while !condition() {
+            if Date() > deadline {
+                XCTFail("timed out waiting for \(what)", file: file, line: line)
+                throw CancellationError()
+            }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+    }
+
     func testWorkerDoneRoundTripOverTheSocket() async throws {
         // Boot published discovery metadata for the CLI.
         let metadataURL = root.appendingPathComponent("Orchard/orchard-runtime.json")
@@ -93,7 +106,9 @@ final class EndToEndOrchestrationTests: XCTestCase {
                 "timeout-ms": .number(10000),
             ])
         }
-        try await Task.sleep(nanoseconds: 300_000_000)
+        try await waitUntil("check --wait parked") { [host] in
+            host!.waitCenter.waiterCount >= 1
+        }
 
         let report = try client.call("send", [
             "from": .string("term_worker"),

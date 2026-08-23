@@ -10,8 +10,7 @@ final class WaitForMessageTests: StoreTestCase {
             await center.waitForMessage(
                 recipient: "run:r1", types: [.workerDone, .escalation], timeout: 5)
         }
-        // Give the waiter time to register before notifying.
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await waitUntilWaiter(center, count: 1)
         center.notifyMessageArrived(recipient: "run:r1", type: .workerDone)
 
         let outcome = await waiting.value
@@ -24,7 +23,7 @@ final class WaitForMessageTests: StoreTestCase {
         let waiting = Task {
             await center.waitForMessage(recipient: "run:r1", types: [.workerDone], timeout: 0.4)
         }
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await waitUntilWaiter(center, count: 1)
         // A status message must not wake a worker_done-focused waiter…
         center.notifyMessageArrived(recipient: "run:r1", type: .status)
         // …nor a matching type for a different recipient.
@@ -46,7 +45,7 @@ final class WaitForMessageTests: StoreTestCase {
         let waiting = Task {
             await center.waitForMessage(timeout: 5)
         }
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await waitUntilWaiter(center, count: 1)
         center.notifyMessageArrived(recipient: "term_x", type: .handoff)
         let outcome = await waiting.value
         XCTAssertEqual(outcome, .arrived(recipient: "term_x", type: .handoff))
@@ -56,7 +55,7 @@ final class WaitForMessageTests: StoreTestCase {
         let center = MessageWaitCenter()
         let first = Task { await center.waitForMessage(recipient: "run:r1", timeout: 5) }
         let second = Task { await center.waitForMessage(recipient: "run:r1", timeout: 5) }
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await waitUntilWaiter(center, count: 2)
         center.notifyMessageArrived(recipient: "run:r1", type: .status)
 
         let outcomes = await [first.value, second.value]
@@ -77,7 +76,7 @@ final class WaitForMessageTests: StoreTestCase {
         let waiting = Task {
             await center.waitForMessage(recipient: runAddress, types: [.workerDone], timeout: 5)
         }
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await waitUntilWaiter(center, count: 1)
         _ = try sendWorkerDone(fixture)
 
         let outcome = await waiting.value
@@ -87,5 +86,17 @@ final class WaitForMessageTests: StoreTestCase {
         let batch = try XCTUnwrap(try store.getOrCreateRunDelivery(
             runID: fixture.run.id, consumerGeneration: 1, wakeTypes: [.workerDone]))
         XCTAssertEqual(batch.messages.last?.type, .workerDone)
+    }
+
+    private func waitUntilWaiter(_ center: MessageWaitCenter, count: Int,
+                                 timeout: TimeInterval = 2) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while center.waiterCount < count {
+            if Date() > deadline {
+                XCTFail("timed out waiting for \(count) waiter(s), have \(center.waiterCount)")
+                return
+            }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
     }
 }

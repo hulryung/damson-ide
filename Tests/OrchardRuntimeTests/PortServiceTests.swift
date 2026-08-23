@@ -31,9 +31,16 @@ final class PortServiceTests: XCTestCase {
         XCTAssertEqual(probe.invocations, 0)
         XCTAssertTrue(service.snapshot().ports.isEmpty)
 
+        let stream = service.snapshots()
+        var iterator = stream.makeAsyncIterator()
+        _ = await iterator.next()   // current snapshot; continuation is now registered
         service.start()
-        try? await Task.sleep(nanoseconds: 120_000_000)
+        // First timer tick publishes the empty sweep (probe still skipped).
+        let published = await withTimeout(seconds: 2) { () -> Bool in
+            await iterator.next() != nil
+        }
         service.stop()
+        XCTAssertEqual(published, true, "expected the loop to publish at least one snapshot")
         XCTAssertEqual(probe.invocations, 0)
     }
 
@@ -86,5 +93,18 @@ final class PortServiceTests: XCTestCase {
         let cwd = ProcessWorkingDirectory.lookup(pid: getpid())
         XCTAssertNotNil(cwd)
         XCTAssertFalse(cwd?.isEmpty ?? true)
+    }
+
+    private func withTimeout<T>(seconds: TimeInterval, _ work: @escaping () async -> T) async -> T? {
+        await withTaskGroup(of: T?.self) { group in
+            group.addTask { await work() }
+            group.addTask {
+                try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+                return nil
+            }
+            let first = await group.next() ?? nil
+            group.cancelAll()
+            return first ?? nil
+        }
     }
 }
