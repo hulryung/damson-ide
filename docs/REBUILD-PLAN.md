@@ -530,7 +530,39 @@ be honest, archives readable. Record docs/reports/dogfood-2.md with a
 finding-by-finding comparison table against cycle 1, plus any new findings. Same
 safety rules: never touch resources you did not create; report bugs, do not fix.
 
-### Wave 10+ backlog
+### Wave 10 (T39–T42, parallel; merge order T40 → T42 → T41 → T39)
+
+**T39 — SSH stage 3: remote agent panes.** Per docs/design/remote-hosts.md: launch an
+agent CLI in a remote worktree (`ssh -tt <host> cd <wt> && exec <agent>`), with agent
+status detection carried over an SSH reverse tunnel (`-R 0:127.0.0.1:<hook-port>`)
+that lets the remote agent's hooks POST back to the local HookServer; fingerprints
+remain the fallback when the tunnel cannot bind. Supervised orchestration dispatch to
+remote agents stays a typed remote_unsupported (the remote host has no orchard CLI —
+lifecycle duties are impossible); these are handoff-style panes with live status only.
+Honest scope notes required in worker_done.
+
+**T40 — Worktree lifecycle polish.** `worktree rm` gains --delete-branch (safe `git
+branch -d` after removal, refusing unmerged unless --force-branch; preflight names the
+branch and its merged/unmerged state); the app delete sheet's branch checkbox drives
+the same path; finish archive readability (finding 4: the cleaner still collapses
+words — fix segmentation so words keep their spaces); investigate and fix the
+Swift-debug noisy send output from dogfood-2.
+
+**T41 — Composer & agent-flow polish.** The ⌘N composer gets the v1-spec surface on
+v2: engine picker from the live registry (aliases shown once), base-branch picker
+seeded with the repo default, fan-out count (N independent worktrees, same prompt),
+initial workspace status; workspace cards get a start/restart-agent affordance when no
+agent is live (spawn into the existing worktree, agent-first). No scheduler — fan-out
+just creates N workers now.
+
+**T42 — Headless E2E CI harness.** Extend scripts/ci.sh with a headless orchestration
+smoke: boot `orchard serve` against a temp data dir, drive the full cycle via the CLI
+(repo add → run/task → worker-start with the shell engine → check --wait to settled
+worker_done → worker-read → release → worktree rm), assert receipts at each step, and
+tear down cleanly. Must run without the GUI and leave nothing behind; wire it as an
+opt-in ci.sh stage (ORCHARD_CI_E2E=1) so plain unit runs stay fast.
+
+### Wave 11+ backlog
 
 From dogfood cycle 2 (docs/reports/dogfood-2.md): archive chrome-stripping still
 collapses words (finding 4 partially fixed); worker send in a Swift-debug context
