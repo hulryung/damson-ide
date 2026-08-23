@@ -6,8 +6,10 @@ struct RootView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
-        VStack(spacing: 0) {
-            NavigationSplitView(columnVisibility: $columnVisibility) {
+        // NavigationSplitView must stay the window-root view: wrapping it in a
+        // VStack breaks its NSSplitViewController sizing (content collapses to
+        // the top-left). The status bar rides in as a bottom safe-area inset.
+        NavigationSplitView(columnVisibility: $columnVisibility) {
                 SidebarView()
                     .navigationSplitViewColumnWidth(
                         min: Tokens.sidebarMinWidth,
@@ -17,16 +19,8 @@ struct RootView: View {
                 WorkbenchView()
                     .fileExplorerSidebar()
                     .toolbar {
-                        ToolbarItem(placement: .navigation) {
-                            Button {
-                                withAnimation(.easeInOut(duration: 0.2)) {
-                                    columnVisibility = (columnVisibility == .detailOnly) ? .all : .detailOnly
-                                }
-                            } label: {
-                                Image(systemName: "sidebar.left")
-                            }
-                            .help("Toggle sidebar")
-                        }
+                        // NavigationSplitView supplies its own sidebar toggle on
+                        // macOS 13+; a custom one shows as a duplicate icon.
                         ToolbarItem(placement: .primaryAction) {
                             Button { store.requestNewWorktree() } label: {
                                 Label("New Worktree", systemImage: "plus")
@@ -35,8 +29,7 @@ struct RootView: View {
                         }
                     }
             }
-            StatusBarView()
-        }
+        .safeAreaInset(edge: .bottom, spacing: 0) { StatusBarView() }
         .sheet(isPresented: composerPresented) {
             if let project = store.projects.first(where: { $0.id == store.composerProjectID }) {
                 ComposerView(project: project)

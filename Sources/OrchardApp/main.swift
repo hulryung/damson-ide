@@ -50,6 +50,9 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
             win.title = "Orchard"
             win.setContentSize(NSSize(width: 1180, height: 760))
             win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            // No window tabs: macOS otherwise adds its own "+" (new window tab)
+            // beside the toolbar's New Worktree "+", reading as a duplicate.
+            win.tabbingMode = .disallowed
             win.appearance = NSAppearance(named: .darkAqua)
             win.titlebarAppearsTransparent = false
             win.center()
