@@ -268,6 +268,83 @@ final class WorkspaceServiceTests: XCTestCase {
         let forced = try service.remove(selector: created.workspace.id, force: true)
         XCTAssertTrue(forced.removed)
     }
+
+    // MARK: - Repo registry (T8)
+
+    func testRepoPathLookupAndRemoveBySelector() throws {
+        let repo = try makeRepo()
+        let service = makeService()
+        let record = try service.addRepo(path: repo, displayName: "Named")
+        XCTAssertEqual(service.repo(path: repo)?.id, record.id)
+        XCTAssertEqual(service.repo(path: repo.appendingPathComponent("."))?.id, record.id)
+
+        let removed = try service.removeRepo("path:\(repo.path)")
+        XCTAssertEqual(removed.id, record.id)
+        XCTAssertTrue(service.listRepos().isEmpty)
+        XCTAssertNil(service.repo(path: repo))
+        XCTAssertThrowsError(try service.removeRepo(record.id)) { error in
+            XCTAssertEqual((error as? WorkspaceError)?.code, "unknown_repo")
+        }
+    }
+
+    func testRemoveRepoDropsFolderRowsAndLeavesGitWorktreesOnDisk() async throws {
+        let folder = tmp.appendingPathComponent("plain-rm")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let service = makeService()
+        let folderRepo = try service.addRepo(path: folder, kind: .folder)
+        XCTAssertEqual(try service.listWorkspaces(repo: folderRepo.id).count, 1)
+        _ = try service.removeRepo(folderRepo.id)
+        XCTAssertTrue(service.store.load().folderWorkspaces.isEmpty)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.path))
+
+        let repo = try makeRepo(name: "git-rm")
+        let gitRepo = try service.addRepo(path: repo)
+        let created = try await service.create(WorkspaceCreateRequest(repo: gitRepo.id, name: "keep-me"))
+        XCTAssertNotNil(service.store.load().worktreeMeta[created.workspace.id])
+        XCTAssertNotNil(service.store.load().worktreeLineageById[created.workspace.id])
+        _ = try service.removeRepo(gitRepo.id)
+        XCTAssertTrue(service.listRepos().isEmpty)
+        XCTAssertNil(service.store.load().worktreeMeta[created.workspace.id])
+        XCTAssertNil(service.store.load().worktreeLineageById[created.workspace.id])
+        XCTAssertNil(service.store.load().retiredWorktreeNamesByRepo[gitRepo.id])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: created.workspace.path))
+    }
+
+    func testRepoChangesEmitsSnapshotOnSubscribeThenAddAndRemove() async throws {
+        let repo = try makeRepo()
+        let service = makeService()
+        let stream = service.repoChanges()
+        var iterator = stream.makeAsyncIterator()
+
+        let initial = await iterator.next()
+        XCTAssertEqual(initial?.count, 0)
+
+        let record = try service.addRepo(path: repo)
+        let afterAdd = await iterator.next()
+        XCTAssertEqual(afterAdd?.map(\.id), [record.id])
+
+        _ = try service.addRepo(path: repo, displayName: "ignored")
+        _ = try service.removeRepo(record.id)
+        let afterRemove = await iterator.next()
+        XCTAssertEqual(afterRemove?.count, 0)
+    }
+
+    func testRepoChangesSupportsMultipleSubscribers() async throws {
+        let repo = try makeRepo()
+        let service = makeService()
+        var first = service.repoChanges().makeAsyncIterator()
+        var second = service.repoChanges().makeAsyncIterator()
+        let firstInitial = await first.next()
+        let secondInitial = await second.next()
+        XCTAssertEqual(firstInitial?.count, 0)
+        XCTAssertEqual(secondInitial?.count, 0)
+
+        _ = try service.addRepo(path: repo)
+        let firstAfter = await first.next()
+        let secondAfter = await second.next()
+        XCTAssertEqual(firstAfter?.count, 1)
+        XCTAssertEqual(secondAfter?.count, 1)
+    }
 }
 
 private final class StubLauncher: AgentLaunching, @unchecked Sendable {

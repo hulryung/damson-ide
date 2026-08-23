@@ -19,6 +19,7 @@ public final class WorkspaceService {
     public var worktreesRoot: URL?
 
     private var gitServices: [String: WorktreeService] = [:]
+    private var repoChangeContinuations: [UUID: AsyncStream<[RepoRecord]>.Continuation] = [:]
 
     public init(store: OrchardDataStore, agentLauncher: (any AgentLaunching)? = nil,
                 worktreesRoot: URL? = nil) {
@@ -41,6 +42,29 @@ public final class WorkspaceService {
         store.load().repos.first { $0.id.caseInsensitiveCompare(id) == .orderedSame }
     }
 
+    /// Lookup by standardized filesystem path.
+    public func repo(path: URL) -> RepoRecord? {
+        let standardized = path.standardizedFileURL.path
+        return store.load().repos.first {
+            URL(fileURLWithPath: $0.path).standardizedFileURL.path == standardized
+        }
+    }
+
+    /// Live snapshots of the repo registry. Emits the current `listRepos()`
+    /// immediately, then again after each successful add or remove. Multi-subscriber.
+    public func repoChanges() -> AsyncStream<[RepoRecord]> {
+        let id = UUID()
+        return AsyncStream { continuation in
+            continuation.yield(listRepos())
+            repoChangeContinuations[id] = continuation
+            continuation.onTermination = { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.repoChangeContinuations.removeValue(forKey: id)
+                }
+            }
+        }
+    }
+
     /// Register a repo (or folder) by filesystem path. Idempotent on the same
     /// standardized path: a re-add returns the existing record rather than
     /// minting a second id (worktree ids embed the repo id).
@@ -55,9 +79,7 @@ public final class WorkspaceService {
         } else {
             inferredKind = isGitRepo(standardized) ? .git : .folder
         }
-        if let existing = store.load().repos.first(where: {
-            URL(fileURLWithPath: $0.path).standardizedFileURL.path == standardized.path
-        }) {
+        if let existing = repo(path: standardized) {
             return existing
         }
         var record = RepoRecord(path: standardized.path, displayName: displayName,
@@ -69,9 +91,43 @@ public final class WorkspaceService {
             record.baseRef = baseRef
         }
         try store.modify { $0.repos.append(record) }
+        publishReposChanged()
         if inferredKind == .folder {
             _ = try ensurePrimaryFolderWorkspace(for: record, name: record.displayName)
         }
+        return record
+    }
+
+    /// Drop a registered repo. Git worktrees on disk are left intact (Close
+    /// Project, not delete). Folder rows, meta, lineage, and retired names
+    /// owned by this repo id are removed so a later re-add starts clean.
+    @discardableResult
+    public func removeRepo(_ selector: String) throws -> RepoRecord {
+        let record = try resolveRepo(selector)
+        try store.modify { data in
+            data.repos.removeAll {
+                $0.id.caseInsensitiveCompare(record.id) == .orderedSame
+            }
+            data.folderWorkspaces.removeAll {
+                $0.repoId.caseInsensitiveCompare(record.id) == .orderedSame
+            }
+            data.retiredWorktreeNamesByRepo = data.retiredWorktreeNamesByRepo.filter {
+                $0.key.caseInsensitiveCompare(record.id) != .orderedSame
+            }
+            data.worktreeMeta = data.worktreeMeta.filter { key, _ in
+                !Self.worktreeKey(key, belongsToRepo: record.id)
+            }
+            data.worktreeLineageById = data.worktreeLineageById.filter { key, _ in
+                !Self.worktreeKey(key, belongsToRepo: record.id)
+            }
+        }
+        let cached = gitServices.keys.filter {
+            $0.caseInsensitiveCompare(record.id) == .orderedSame
+        }
+        for key in cached {
+            gitServices.removeValue(forKey: key)?.shutdown(removeWorktrees: false)
+        }
+        publishReposChanged()
         return record
     }
 
@@ -85,10 +141,7 @@ public final class WorkspaceService {
         }
         if trimmed.hasPrefix("path:") || trimmed.hasPrefix("/") || trimmed.hasPrefix(".") {
             let path = trimmed.hasPrefix("path:") ? String(trimmed.dropFirst(5)) : trimmed
-            let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
-            if let byPath = data.repos.first(where: {
-                URL(fileURLWithPath: $0.path).standardizedFileURL.path == standardized
-            }) {
+            if let byPath = repo(path: URL(fileURLWithPath: path)) {
                 return byPath
             }
         }
@@ -656,6 +709,18 @@ public final class WorkspaceService {
 
     private func isGitRepo(_ url: URL) -> Bool {
         (try? WorktreeManager(root: url).detectBaseRepo(from: url)) != nil
+    }
+
+    private func publishReposChanged() {
+        let snapshot = listRepos()
+        for continuation in repoChangeContinuations.values {
+            continuation.yield(snapshot)
+        }
+    }
+
+    private static func worktreeKey(_ key: String, belongsToRepo repoId: String) -> Bool {
+        guard let parsed = WorktreeIdentity.parse(key) else { return false }
+        return parsed.repoId.caseInsensitiveCompare(repoId) == .orderedSame
     }
 
     static func stripPrefix(_ raw: String, _ prefix: String) -> String {
