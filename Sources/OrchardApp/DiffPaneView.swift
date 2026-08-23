@@ -2,16 +2,20 @@ import SwiftUI
 import AppKit
 import OrchardCore
 
-/// File list + unified diff vs the worktree fork point.
+/// File list + unified diff vs the worktree fork point, plus the review actions
+/// (`commitAll` / `push`) that the v1 pane documented but never called.
 ///
 /// Selection is pinned across refreshes (losing your place on every agent turn
 /// makes review impossible). In-flight loads are token-guarded so a stale
-/// `git diff` cannot overwrite a newer selection.
+/// `git diff` cannot overwrite a newer selection. Commit and push run only on
+/// an explicit click; failures surface git's own stderr inline.
 struct DiffPaneView: View {
     let worktreeURL: URL
     let baseRef: String
     let branch: String
     let stat: GitDiffStat
+    let hasUncommittedChanges: Bool
+    let unpushedCommits: Int?
     let isRefreshing: Bool
     let onRefresh: () async -> Void
 
@@ -19,23 +23,45 @@ struct DiffPaneView: View {
     @State private var diffText = ""
     @State private var isLoadingDiff = false
     @State private var loadToken = UUID()
+    @State private var currentHunk = 0
+    @State private var hunkJump: HunkJump?
+    @State private var commitMessage = ""
+    @State private var actionError: String?
+    @State private var isMutating = false
+    @State private var isHovered = false
+    @FocusState private var commitFocused: Bool
 
     private let service = GitService()
 
+    private var fileTree: [ReviewPathNode] { ReviewFileTree.collapsedRoots(from: stat.files) }
+    private var hunkLines: [Int] { ReviewHunkIndex.lineIndices(inDiff: diffText) }
+    private var upstream: ReviewUpstreamState { ReviewUpstreamState(unpushedCommits: unpushedCommits) }
+    private var canCommit: Bool {
+        ReviewCommitGate.canCommit(message: commitMessage,
+                                   hasUncommittedChanges: hasUncommittedChanges,
+                                   isBusy: isMutating || isRefreshing)
+    }
+
     var body: some View {
-        Group {
-            if stat.isEmpty {
-                emptyState
-            } else {
-                HSplitView {
-                    fileList
-                        .frame(minWidth: 200, idealWidth: 260, maxWidth: 420)
-                    diffContent
-                        .frame(minWidth: 320, maxWidth: .infinity)
+        VStack(spacing: 0) {
+            Group {
+                if stat.isEmpty {
+                    emptyState
+                } else {
+                    HSplitView {
+                        fileList
+                            .frame(minWidth: 200, idealWidth: 260, maxWidth: 420)
+                        diffContent
+                            .frame(minWidth: 320, maxWidth: .infinity)
+                    }
                 }
             }
+            Divider()
+            reviewFooter
         }
         .background(Tokens.background)
+        .onHover { isHovered = $0 }
+        .background(hunkKeyCapture)
         .task(id: worktreeURL.path) { await onRefresh() }
         .onChange(of: stat) { newStat in
             if let selected = selectedPath, newStat.files.contains(where: { $0.path == selected }) {
@@ -47,12 +73,20 @@ struct DiffPaneView: View {
         .onAppear { if selectedPath == nil { selectFirst(in: stat) } }
     }
 
+    @ViewBuilder
+    private var hunkKeyCapture: some View {
+        if isHovered && !commitFocused && !stat.isEmpty {
+            HunkKeyCapture(onNext: { moveHunk(1) }, onPrev: { moveHunk(-1) })
+        }
+    }
+
     private func selectFirst(in stat: GitDiffStat) {
         selectedPath = stat.files.first?.path
         if let path = selectedPath {
             Task { await loadDiff(for: path) }
         } else {
             diffText = ""
+            currentHunk = 0
         }
     }
 
@@ -76,10 +110,8 @@ struct DiffPaneView: View {
             .padding(.vertical, 7)
             Divider()
             List(selection: $selectedPath) {
-                ForEach(stat.files) { file in
-                    DiffFileRow(file: file)
-                        .tag(file.path)
-                        .listRowInsets(EdgeInsets(top: 1, leading: 6, bottom: 1, trailing: 6))
+                ForEach(fileTree) { node in
+                    ReviewTreeRows(node: node)
                 }
             }
             .listStyle(.sidebar)
@@ -101,6 +133,7 @@ struct DiffPaneView: View {
                         .truncationMode(.head)
                         .textSelection(.enabled)
                     Spacer(minLength: 4)
+                    hunkChrome
                     Button {
                         NSWorkspace.shared.selectFile(
                             worktreeURL.appendingPathComponent(path).path,
@@ -117,19 +150,49 @@ struct DiffPaneView: View {
                 .background(Tokens.surface)
                 Divider()
             }
-            ScrollView([.vertical, .horizontal]) {
-                if isLoadingDiff {
-                    ProgressView()
-                        .controlSize(.small)
-                        .frame(maxWidth: .infinity)
-                        .padding(.top, 24)
-                } else {
-                    DiffTextView(text: diffText)
+            ScrollViewReader { proxy in
+                ScrollView([.vertical, .horizontal]) {
+                    if isLoadingDiff {
+                        ProgressView()
+                            .controlSize(.small)
+                            .frame(maxWidth: .infinity)
+                            .padding(.top, 24)
+                    } else {
+                        DiffTextView(text: diffText, currentHunkLine: hunkLines.isEmpty ? nil : hunkLines[safe: currentHunk])
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .onChange(of: hunkJump) { jump in
+                    guard let jump else { return }
+                    proxy.scrollTo(jump.line, anchor: .top)
                 }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .background(Tokens.background)
+    }
+
+    private var hunkChrome: some View {
+        HStack(spacing: 4) {
+            Button { moveHunk(-1) } label: {
+                Image(systemName: "chevron.up")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .disabled(hunkLines.isEmpty)
+            .help("Previous hunk (p)")
+            Text(ReviewHunkIndex.positionLabel(current: currentHunk, count: hunkLines.count))
+                .font(Tokens.fontMeta)
+                .monospacedDigit()
+                .foregroundStyle(Tokens.textSecondary)
+                .help("Hunk position — n next, p previous")
+            Button { moveHunk(1) } label: {
+                Image(systemName: "chevron.down")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .disabled(hunkLines.isEmpty)
+            .help("Next hunk (n)")
+        }
     }
 
     private var emptyState: some View {
@@ -152,6 +215,53 @@ struct DiffPaneView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
+    private var reviewFooter: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                TextField("Commit message", text: $commitMessage)
+                    .textFieldStyle(.roundedBorder)
+                    .font(Tokens.fontRow)
+                    .focused($commitFocused)
+                    .disabled(isMutating)
+                    .help(hasUncommittedChanges
+                          ? "Required. Nothing is committed until you click Commit."
+                          : "Nothing to commit — working tree is clean.")
+                Button("Commit") { Task { await commit() } }
+                    .controlSize(.small)
+                    .disabled(!canCommit)
+                    .help("git add -A && git commit. Message required.")
+            }
+            HStack(spacing: 8) {
+                Text(upstream.help)
+                    .font(Tokens.fontMeta)
+                    .foregroundStyle(Tokens.textTertiary)
+                    .lineLimit(2)
+                Spacer(minLength: 4)
+                Button(upstream.buttonTitle) { Task { await push() } }
+                    .controlSize(.small)
+                    .disabled(!upstream.canPush || isMutating || isRefreshing)
+                    .help(upstream.help)
+            }
+            if let actionError {
+                Text(actionError)
+                    .font(Tokens.fontMono)
+                    .foregroundStyle(Color.orange)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Tokens.surface)
+    }
+
+    private func moveHunk(_ delta: Int) {
+        let lines = hunkLines
+        guard !lines.isEmpty else { return }
+        currentHunk = ReviewHunkIndex.move(current: currentHunk, count: lines.count, delta: delta)
+        hunkJump = HunkJump(line: lines[currentHunk])
+    }
+
     private func loadDiff(for path: String) async {
         let token = UUID()
         loadToken = token
@@ -164,7 +274,142 @@ struct DiffPaneView: View {
         }.value
         guard loadToken == token else { return }
         diffText = text
+        currentHunk = ReviewHunkIndex.clamp(current: 0, count: ReviewHunkIndex.lineIndices(inDiff: text).count)
+        hunkJump = nil
         isLoadingDiff = false
+    }
+
+    private func commit() async {
+        let message = commitMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard ReviewCommitGate.canCommit(message: message,
+                                         hasUncommittedChanges: hasUncommittedChanges,
+                                         isBusy: isMutating) else { return }
+        let worktree = worktreeURL
+        let service = self.service
+        isMutating = true
+        actionError = nil
+        do {
+            _ = try await Task.detached(priority: .userInitiated) {
+                try service.commitAll(worktree: worktree, message: message)
+            }.value
+            commitMessage = ""
+            await onRefresh()
+        } catch {
+            actionError = ReviewGitFailure.displayText(error)
+        }
+        isMutating = false
+    }
+
+    private func push() async {
+        guard upstream.canPush, !isMutating else { return }
+        let worktree = worktreeURL
+        let service = self.service
+        isMutating = true
+        actionError = nil
+        do {
+            try await Task.detached(priority: .userInitiated) {
+                try service.push(worktree: worktree)
+            }.value
+            await onRefresh()
+        } catch {
+            actionError = ReviewGitFailure.displayText(error)
+        }
+        isMutating = false
+    }
+}
+
+private struct HunkJump: Equatable {
+    let line: Int
+    let nonce: UUID
+    init(line: Int) {
+        self.line = line
+        self.nonce = UUID()
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
+/// Observe the worktree record so a refresh after commit/push updates the pane.
+struct WorktreeDiffPane: View {
+    @ObservedObject var record: WorktreeRecord
+
+    var body: some View {
+        DiffPaneView(
+            worktreeURL: record.path,
+            baseRef: record.worktree.baseRef.isEmpty ? "HEAD" : record.worktree.baseRef,
+            branch: record.branch,
+            stat: record.status.stat,
+            hasUncommittedChanges: record.status.hasUncommittedChanges,
+            unpushedCommits: record.status.unpushedCommits,
+            isRefreshing: record.isRefreshing,
+            onRefresh: { await record.refresh() })
+    }
+}
+
+/// Same review pane, bound to the project's primary checkout.
+struct ProjectCheckoutDiffPane: View {
+    @ObservedObject var project: ProjectSession
+
+    var body: some View {
+        DiffPaneView(
+            worktreeURL: project.repo,
+            baseRef: "HEAD",
+            branch: project.worktrees.currentBranchName ?? "",
+            stat: project.checkoutStatus.stat,
+            hasUncommittedChanges: project.checkoutStatus.hasUncommittedChanges,
+            unpushedCommits: project.checkoutStatus.unpushedCommits,
+            isRefreshing: false,
+            onRefresh: { await project.refreshCheckout() })
+    }
+}
+
+struct ReviewTreeRows: View {
+    let node: ReviewPathNode
+    @State private var expanded = true
+
+    var body: some View {
+        if let file = node.file {
+            DiffFileRow(file: file)
+                .tag(file.path)
+                .listRowInsets(EdgeInsets(top: 1, leading: 6, bottom: 1, trailing: 6))
+        } else {
+            DisclosureGroup(isExpanded: $expanded) {
+                ForEach(node.children) { child in
+                    ReviewTreeRows(node: child)
+                }
+            } label: {
+                ReviewFolderRow(node: node)
+            }
+            .listRowInsets(EdgeInsets(top: 1, leading: 6, bottom: 1, trailing: 6))
+        }
+    }
+}
+
+struct ReviewFolderRow: View {
+    let node: ReviewPathNode
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "folder")
+                .font(.system(size: 11))
+                .foregroundStyle(Tokens.textTertiary)
+                .frame(width: 12)
+            Text(node.label)
+                .font(Tokens.fontRow)
+                .lineLimit(1)
+                .truncationMode(.head)
+            Spacer(minLength: 4)
+            Text("\(node.fileCount)")
+                .font(.system(size: 10))
+                .monospacedDigit()
+                .foregroundStyle(Tokens.textTertiary)
+        }
+        .padding(.vertical, 2)
+        .help(node.path)
     }
 }
 
@@ -215,6 +460,7 @@ struct DiffFileRow: View {
 
 struct DiffTextView: View {
     let text: String
+    var currentHunkLine: Int?
     private var lines: [DiffLine] { DiffLine.parse(text) }
 
     var body: some View {
@@ -226,11 +472,19 @@ struct DiffTextView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 0.5)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(line.kind.background)
+                    .background(lineBackground(line))
                     .textSelection(.enabled)
+                    .id(line.id)
             }
         }
         .padding(.vertical, 6)
+    }
+
+    private func lineBackground(_ line: DiffLine) -> Color {
+        if line.id == currentHunkLine {
+            return Tokens.Git.hunkHeader.opacity(0.18)
+        }
+        return line.kind.background
     }
 }
 
@@ -277,5 +531,56 @@ struct DiffLine: Identifiable {
         if line.hasPrefix("+") { return .added }
         if line.hasPrefix("-") { return .removed }
         return .context
+    }
+}
+
+/// n/p while the pointer is over the diff pane. macOS 13 has no `onKeyPress`;
+/// the monitor is installed only while hovered and the commit field is not
+/// focused so a split terminal keeps its keys.
+struct HunkKeyCapture: NSViewRepresentable {
+    var onNext: () -> Void
+    var onPrev: () -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        context.coordinator.install(onNext: onNext, onPrev: onPrev)
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.install(onNext: onNext, onPrev: onPrev)
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    final class Coordinator {
+        private var monitor: Any?
+        private var onNext: (() -> Void)?
+        private var onPrev: (() -> Void)?
+
+        func install(onNext: @escaping () -> Void, onPrev: @escaping () -> Void) {
+            self.onNext = onNext
+            self.onPrev = onPrev
+            guard monitor == nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self else { return event }
+                let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                    .subtracting(.capsLock)
+                guard mods.isEmpty else { return event }
+                if let responder = NSApp.keyWindow?.firstResponder,
+                   responder is NSTextView || responder is NSTextField {
+                    return event
+                }
+                switch event.charactersIgnoringModifiers {
+                case "n": self.onNext?(); return nil
+                case "p": self.onPrev?(); return nil
+                default: return event
+                }
+            }
+        }
+
+        deinit {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+        }
     }
 }

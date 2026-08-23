@@ -355,23 +355,13 @@ struct DiffHost: View {
         case .worktree(let id):
             if let project = store.projects.first(where: { $0.record(id: id) != nil }),
                let record = project.record(id: id) {
-                DiffPaneView(
-                    worktreeURL: record.path,
-                    baseRef: record.worktree.baseRef.isEmpty ? "HEAD" : record.worktree.baseRef,
-                    branch: record.branch,
-                    stat: record.status.stat,
-                    isRefreshing: record.isRefreshing,
-                    onRefresh: { await record.refresh() })
+                // Observe the record so commit/push/refresh actually re-render
+                // the pane (stat and unpushedCommits live on @Published status).
+                WorktreeDiffPane(record: record)
             }
         case .projectRoot(let id):
             if let project = store.projects.first(where: { $0.id == id }) {
-                DiffPaneView(
-                    worktreeURL: project.repo,
-                    baseRef: "HEAD",
-                    branch: project.worktrees.currentBranchName ?? "",
-                    stat: project.checkoutStatus.stat,
-                    isRefreshing: false,
-                    onRefresh: { await project.refreshCheckout() })
+                ProjectCheckoutDiffPane(project: project)
             }
         }
     }
