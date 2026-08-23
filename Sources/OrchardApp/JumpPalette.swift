@@ -158,14 +158,21 @@ struct JumpPalette: View {
         }
     }
 
+    /// Default: open in an editor tab. Hold Option to open the worktree
+    /// diff instead (same alternate as the explorer's "Open Diff" item).
     private func activateFile(_ path: String) {
+        let mode: FileOpenRequest.Mode = NSEvent.modifierFlags.contains(.option) ? .diff : .edit
         if let record = store.selectedRecord,
            let project = store.project(owning: record) {
-            store.openPaletteFile(path, in: record, project: project)
+            store.openPaletteFile(path, in: record, project: project, mode: mode)
             return
         }
         store.pendingOpenPath = path
-        store.selectKind(.editor)
+        if mode == .diff {
+            store.selectKind(.diff)
+        } else {
+            store.openEditor(path)
+        }
     }
 
     private func loadQuickOpen() {

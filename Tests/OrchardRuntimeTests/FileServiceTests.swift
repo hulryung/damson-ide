@@ -97,6 +97,34 @@ final class FileServiceTests: XCTestCase {
         }
     }
 
+    func testWriteOverwritesAndCreatesConfinedFiles() throws {
+        try write("old\n", to: "notes.txt")
+        let updated = try files.write(root: tmp, relativePath: "notes.txt", contents: "new\n")
+        XCTAssertEqual(updated.size, 4)
+        XCTAssertEqual(try String(contentsOf: tmp.appendingPathComponent("notes.txt"), encoding: .utf8), "new\n")
+
+        let created = try files.write(root: tmp, relativePath: "fresh.txt", contents: "hi")
+        XCTAssertEqual(created.size, 2)
+        XCTAssertEqual(try files.preview(root: tmp, relativePath: "fresh.txt").content, "hi")
+
+        XCTAssertThrowsError(try files.write(root: tmp, relativePath: "../escape.txt", contents: "x")) { error in
+            XCTAssertEqual((error as? FileServiceError)?.code, "path_escape")
+        }
+        XCTAssertThrowsError(try files.write(root: tmp, relativePath: "notes.txt/nested", contents: "x")) { error in
+            let code = (error as? FileServiceError)?.code
+            XCTAssertTrue(code == "not_found" || code == "not_a_file" || code == "path_escape",
+                          "expected confinement/existence error, got \(String(describing: code))")
+        }
+        try FileManager.default.createDirectory(at: tmp.appendingPathComponent("dir"),
+                                                withIntermediateDirectories: true)
+        XCTAssertThrowsError(try files.write(root: tmp, relativePath: "dir", contents: "x")) { error in
+            XCTAssertEqual((error as? FileServiceError)?.code, "not_a_file")
+        }
+        XCTAssertThrowsError(try files.write(root: tmp, relativePath: "missing/new.txt", contents: "x")) { error in
+            XCTAssertEqual((error as? FileServiceError)?.code, "not_found")
+        }
+    }
+
     func testPreviewDetectsBinaryByNUL() throws {
         try writeData(Data([0x68, 0x69, 0x00, 0x21]), to: "blob.bin")
         let preview = try files.preview(root: tmp, relativePath: "blob.bin")

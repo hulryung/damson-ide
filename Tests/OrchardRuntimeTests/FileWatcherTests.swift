@@ -47,6 +47,27 @@ final class FileWatcherTests: XCTestCase {
         XCTAssertTrue(previous.keys.allSatisfy { !$0.hasPrefix("/") && !$0.contains("..") })
     }
 
+    func testReconcilerReportsInPlaceModification() throws {
+        try write("old", to: "keep.txt")
+        let previous = try FileWatchReconciler.identities(root: tmp)
+        // Force a distinct mtime so the identity comparison is deterministic
+        // even when the two writes land in the same second.
+        var attrs = try FileManager.default.attributesOfItem(atPath: tmp.appendingPathComponent("keep.txt").path)
+        attrs[.modificationDate] = Date(timeIntervalSince1970: 1)
+        try FileManager.default.setAttributes(attrs, ofItemAtPath: tmp.appendingPathComponent("keep.txt").path)
+        let stamped = try FileWatchReconciler.identities(root: tmp)
+
+        try write("new", to: "keep.txt")
+        attrs = try FileManager.default.attributesOfItem(atPath: tmp.appendingPathComponent("keep.txt").path)
+        attrs[.modificationDate] = Date(timeIntervalSince1970: 2)
+        try FileManager.default.setAttributes(attrs, ofItemAtPath: tmp.appendingPathComponent("keep.txt").path)
+        let current = try FileWatchReconciler.identities(root: tmp)
+
+        let mods = FileWatchReconciler.modifications(previous: stamped, current: current, excluding: [])
+        XCTAssertEqual(mods, [FileWatchChange(kind: .modified, relativePath: "keep.txt")])
+        XCTAssertEqual(previous["keep.txt"]?.inode, stamped["keep.txt"]?.inode)
+    }
+
     func testReconcilerSnapshotSkipsGitAndSymlinkEscape() throws {
         try write("x", to: "ok.txt")
         try write("x", to: ".git/objects/pack")

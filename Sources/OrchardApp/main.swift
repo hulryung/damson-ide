@@ -97,6 +97,7 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
     @MainActor @objc func refreshDiff(_ sender: Any?) {
         if let record = store.selectedRecord { Task { await record.refresh() } }
     }
+    @MainActor @objc func saveFocusedEditor(_ sender: Any?) { store.saveFocusedEditor() }
 
     @MainActor @objc func showSettings(_ sender: Any?) {
         if let settingsWindow {
@@ -183,6 +184,10 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
         nw.keyEquivalentModifierMask = [.command, .shift]
         nw.target = self
         fileMenu.addItem(nw)
+        fileMenu.addItem(.separator())
+        let save = NSMenuItem(title: "Save", action: #selector(saveFocusedEditor(_:)), keyEquivalent: "s")
+        save.target = self
+        fileMenu.addItem(save)
         fileMenu.addItem(.separator())
         fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
 

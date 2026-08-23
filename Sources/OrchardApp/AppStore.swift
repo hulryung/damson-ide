@@ -68,6 +68,8 @@ final class AppStore: ObservableObject {
 
     /// Bounded chat transcripts keyed by tab id (app-session lifetime).
     private var chatControllers: [UUID: ChatPaneController] = [:]
+    /// Open editor buffers, keyed by workspace root + relative path.
+    let editorSessions = EditorSessionStore()
 
     var focusMainWindow: (() -> Void)?
     var showDashboard: (() -> Void)?
@@ -335,16 +337,22 @@ final class AppStore: ObservableObject {
         }
     }
 
-    func openPaletteFile(_ relativePath: String, in record: WorktreeRecord, project: ProjectSession) {
+    /// Jump-palette file activation. Default is the editor; pass `.diff` when
+    /// the caller held Option (documented on `JumpPalette.activateFile`).
+    func openPaletteFile(_ relativePath: String, in record: WorktreeRecord, project: ProjectSession,
+                         mode: FileOpenRequest.Mode = .edit) {
         select(record, in: project)
-        let changed = record.status.stat.files.contains { $0.path == relativePath }
         pendingOpenPath = relativePath
-        selectKind(changed ? .diff : .editor)
+        if mode == .diff {
+            selectKind(.diff)
+        } else {
+            openEditor(relativePath)
+        }
         runtime?.fileOpenCenter.post(FileOpenRequest(
             worktreeId: workspaceIdentity(for: record, in: project) ?? "",
             worktreePath: record.path.path,
             relativePath: relativePath,
-            mode: changed ? .diff : .edit))
+            mode: mode))
     }
 
     func runPaletteCommand(_ command: PaletteCommand) {
@@ -726,6 +734,10 @@ final class AppStore: ObservableObject {
 
     func closeTab(_ tabID: UUID, in groupID: UUID, key: WorkbenchKey) {
         dropChat(tabID)
+        if let tab = layout(for: key).tab(id: tabID), tab.kind == .editor,
+           let path = tab.filePath, let root = workspaceRoot(for: key) {
+            editorSessions.drop(root: root, path: path)
+        }
         if let session = shells.removeValue(forKey: tabID) {
             session.terminate()
         }
@@ -876,6 +888,110 @@ final class AppStore: ObservableObject {
         } else {
             addTab(kind, to: groupID, key: key)
         }
+    }
+
+    func workspaceRoot(for key: WorkbenchKey) -> URL? {
+        switch key {
+        case .projectRoot(let id):
+            return projects.first { $0.id == id }?.repo
+        case .worktree(let id):
+            for project in projects {
+                if let record = project.record(id: id) { return record.path }
+            }
+            return nil
+        }
+    }
+
+    func editorController(root: URL, path: String) -> EditorDocumentController {
+        editorSessions.controller(root: root, path: path,
+                                  files: runtime?.fileService ?? FileService())
+    }
+
+    /// Open (or focus) an editor tab for `relativePath` in the selected workbench.
+    func openEditor(_ relativePath: String) {
+        pendingOpenPath = relativePath
+        guard let key = selection else { return }
+        var node = layout(for: key)
+        if let found = node.findEditor(path: relativePath) {
+            selectTab(found.tabID, in: found.groupID, key: key)
+            prepareEditor(relativePath, key: key)
+            return
+        }
+        guard let groupID = focusedGroupID ?? node.firstGroupID() else { return }
+        var reused = false
+        _ = node.mutateGroup(groupID) { group in
+            if let index = group.tabs.firstIndex(where: { $0.kind == .editor && $0.filePath == nil }) {
+                group.tabs[index].filePath = relativePath
+                group.tabs[index].title = (relativePath as NSString).lastPathComponent
+                group.tabs[index].isDirty = false
+                group.selectedID = group.tabs[index].id
+                reused = true
+            }
+        }
+        if reused {
+            layouts[key] = node
+            focusedGroupID = groupID
+            objectWillChange.send()
+            prepareEditor(relativePath, key: key)
+            return
+        }
+        let tab = WorkbenchTab(kind: .editor, filePath: relativePath)
+        updateLayout(key) { node in
+            _ = node.mutateGroup(groupID) { group in
+                group.tabs.append(tab)
+                group.selectedID = tab.id
+            }
+        }
+        focusedGroupID = groupID
+        prepareEditor(relativePath, key: key)
+    }
+
+    func openDiff(_ relativePath: String) {
+        pendingOpenPath = relativePath
+        selectKind(.diff)
+    }
+
+    func setEditorDirty(_ tabID: UUID, _ dirty: Bool, key: WorkbenchKey) {
+        if layout(for: key).tab(id: tabID)?.isDirty == dirty { return }
+        updateLayout(key) { node in
+            _ = node.mutateTab(tabID) { $0.isDirty = dirty }
+        }
+    }
+
+    func saveFocusedEditor() {
+        guard let key = selection else { return }
+        let node = layout(for: key)
+        guard let groupID = focusedGroupID ?? node.firstGroupID(),
+              let tab = node.selectedTab(in: groupID),
+              tab.kind == .editor,
+              let path = tab.filePath,
+              let root = workspaceRoot(for: key) else { return }
+        let saved = editorSessions.save(root: root, path: path)
+        if saved {
+            setEditorDirty(tab.id, false, key: key)
+            Task { await refreshGit(for: key) }
+        }
+    }
+
+    func refreshGit(for key: WorkbenchKey) async {
+        switch key {
+        case .worktree(let id):
+            for project in projects {
+                if let record = project.record(id: id) {
+                    await record.refresh()
+                    return
+                }
+            }
+        case .projectRoot(let id):
+            if let project = projects.first(where: { $0.id == id }) {
+                await project.refreshCheckout()
+            }
+        }
+    }
+
+    private func prepareEditor(_ relativePath: String, key: WorkbenchKey) {
+        guard let root = workspaceRoot(for: key) else { return }
+        _ = editorController(root: root, path: relativePath)
     }
 
     /// Damson session for a terminal tab. Agent tabs use the supervisor's session;

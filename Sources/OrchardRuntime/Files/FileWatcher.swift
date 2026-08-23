@@ -45,13 +45,19 @@ public enum FileWatchReconciler {
     /// Worktree-confined snapshot of files and directories. `.git` is skipped
     /// and symlink descendants are not followed, matching `FileService.walk`.
     public static func snapshot(root: URL) throws -> [String: UInt64] {
+        try identities(root: root).mapValues(\.inode)
+    }
+
+    /// Same walk as `snapshot`, plus mtime so in-place writes can be reported
+    /// as `.modified` after the structural create/delete/rename pass.
+    public static func identities(root: URL) throws -> [String: FileWatchIdentity] {
         let rootStd = root.standardizedFileURL.resolvingSymlinksInPath()
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: rootStd.path, isDirectory: &isDir),
               isDir.boolValue else {
             throw FileServiceError.notADirectory
         }
-        var result: [String: UInt64] = [:]
+        var result: [String: FileWatchIdentity] = [:]
         guard let enumerator = FileManager.default.enumerator(
             at: rootStd,
             includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey, .fileResourceIdentifierKey],
@@ -73,16 +79,38 @@ public enum FileWatchReconciler {
             guard path.hasPrefix(prefix) else { continue }
             let rel = String(path.dropFirst(prefix.count))
             if rel.isEmpty { continue }
-            if let inode = inode(at: url) {
-                result[rel] = inode
+            if let identity = identity(at: url) {
+                result[rel] = identity
             }
         }
         return result
     }
 
-    static func inode(at url: URL) -> UInt64? {
+    /// Paths present in both snapshots whose inode or mtime moved, excluding
+    /// anything already reported as created/deleted/renamed.
+    public static func modifications(previous: [String: FileWatchIdentity],
+                                     current: [String: FileWatchIdentity],
+                                     excluding: Set<String>) -> [FileWatchChange] {
+        var changes: [FileWatchChange] = []
+        for path in current.keys.sorted() {
+            if excluding.contains(path) { continue }
+            guard let now = current[path], let before = previous[path] else { continue }
+            if before.inode != now.inode || before.mtime != now.mtime {
+                changes.append(FileWatchChange(kind: .modified, relativePath: path))
+            }
+        }
+        return changes
+    }
+
+    static func identity(at url: URL) -> FileWatchIdentity? {
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
-        return (attrs?[.systemFileNumber] as? NSNumber)?.uint64Value
+        guard let inode = (attrs?[.systemFileNumber] as? NSNumber)?.uint64Value else { return nil }
+        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        return FileWatchIdentity(inode: inode, mtime: mtime)
+    }
+
+    static func inode(at url: URL) -> UInt64? {
+        identity(at: url)?.inode
     }
 }
 
@@ -96,7 +124,7 @@ public final class FileWatcher: @unchecked Sendable {
     private var continuations: [UUID: AsyncStream<FileWatchBatch>.Continuation] = [:]
     private var stream: FSEventStreamRef?
     private var debounceWork: DispatchWorkItem?
-    private var previous: [String: UInt64] = [:]
+    private var previous: [String: FileWatchIdentity] = [:]
     private var root: URL?
     private var running = false
     private let queue: DispatchQueue
@@ -145,7 +173,7 @@ public final class FileWatcher: @unchecked Sendable {
         }
         guard isDir.boolValue else { throw FileServiceError.notADirectory }
 
-        let snap = try FileWatchReconciler.snapshot(root: resolved)
+        let snap = try FileWatchReconciler.identities(root: resolved)
         lock.lock()
         self.root = resolved
         self.previous = snap
@@ -255,9 +283,9 @@ public final class FileWatcher: @unchecked Sendable {
             return
         }
 
-        let current: [String: UInt64]
+        let current: [String: FileWatchIdentity]
         do {
-            current = try FileWatchReconciler.snapshot(root: root)
+            current = try FileWatchReconciler.identities(root: root)
         } catch {
             let batch = FileWatchBatch(rootDeleted: true)
             emit(batch)
@@ -269,7 +297,15 @@ public final class FileWatcher: @unchecked Sendable {
             return
         }
 
-        let changes = FileWatchReconciler.diff(previous: previous, current: current)
+        let inodePrev = previous.mapValues(\.inode)
+        let inodeCurr = current.mapValues(\.inode)
+        let structural = FileWatchReconciler.diff(previous: inodePrev, current: inodeCurr)
+        var excluded = Set(structural.map(\.relativePath))
+        for change in structural {
+            if let prior = change.previousRelativePath { excluded.insert(prior) }
+        }
+        let changes = structural + FileWatchReconciler.modifications(
+            previous: previous, current: current, excluding: excluded)
         lock.lock()
         self.previous = current
         lock.unlock()
