@@ -97,6 +97,9 @@ public final class AgentSupervisor {
         guard let engine = AgentEngineRegistry.engine(id: engineID) else {
             throw GitError("unknown engine: \(engineID)")
         }
+        // `engineID` may be an accepted alias ("claude"); everything persisted from
+        // here on uses the canonical id so restoration can resolve it again.
+        let engineID = engine.id
         let task = AgentTask(
             title: title ?? worktree?.title ?? engine.displayName,
             prompt: prompt,
@@ -191,6 +194,7 @@ public final class AgentSupervisor {
         guard let engine = AgentEngineRegistry.engine(id: engineID) else {
             throw GitError("unknown engine: \(engineID)")
         }
+        let engineID = engine.id
         let task = AgentTask(title: title ?? worktree?.title ?? engine.displayName,
                              prompt: "",
                              engineID: engineID,

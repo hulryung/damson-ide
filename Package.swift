@@ -104,7 +104,10 @@ let package = Package(
         .testTarget(
             name: "OrchardTerminalsTests",
             dependencies: ["OrchardTerminals", "OrchardCore"],
-            path: "Tests/OrchardTerminalsTests"
+            path: "Tests/OrchardTerminalsTests",
+            // The verbatim dogfood-1 TUI archive the capture cleaner is measured
+            // against; see Tests/OrchardTerminalsTests/Fixtures/README.md.
+            resources: [.copy("Fixtures")]
         ),
         .testTarget(
             name: "OrchardOrchestrationTests",

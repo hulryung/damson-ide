@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import OrchardRuntime
 
 /// Relaunches Orchard inside its own `.app` bundle when run as a raw binary, so it gets
 /// its own dock icon, name, and GUI-app registration — independent of damson.
@@ -53,13 +54,46 @@ enum OrchardTrampoline {
             }
         }
 
+        let resourcesDir = contentsDir.appendingPathComponent("Resources")
+        try? fm.createDirectory(at: resourcesDir, withIntermediateDirectories: true)
+
         if let iconURL = Bundle.module.url(forResource: "Orchard", withExtension: "icns") {
-            let resourcesDir = contentsDir.appendingPathComponent("Resources")
-            try? fm.createDirectory(at: resourcesDir, withIntermediateDirectories: true)
             let dstIcon = resourcesDir.appendingPathComponent("Orchard.icns")
             if fm.fileExists(atPath: dstIcon.path) { try? fm.removeItem(at: dstIcon) }
             try? fm.copyItem(at: iconURL, to: dstIcon)
         }
+
+        // T35: workers are handed ORCHARD_CLI_COMMAND as an absolute path, and this
+        // bundle lives in ~/Library/Caches — nowhere near the build the CLI was
+        // compiled into. Carry the CLI in when it exists, and either way record the
+        // path resolved from THIS location (which can still see the build directory)
+        // so the relaunched copy resolves the same command instead of a bare
+        // `orchard` a worker's login shell cannot find.
+        carryCLI(from: srcDir, contentsDir: contentsDir, resourcesDir: resourcesDir)
+    }
+
+    /// The CLI goes into `Contents/Helpers`, never `Contents/MacOS`: this bundle's
+    /// executable is `Orchard`, which on a case-insensitive filesystem IS the path
+    /// `Contents/MacOS/orchard` — copying there would overwrite the app itself.
+    private static func carryCLI(from srcDir: URL, contentsDir: URL, resourcesDir: URL) {
+        let fm = FileManager.default
+        let source = srcDir.appendingPathComponent(OrchardCLIPath.commandName)
+        if fm.isExecutableFile(atPath: source.path) {
+            let helpersDir = contentsDir.appendingPathComponent("Helpers")
+            try? fm.createDirectory(at: helpersDir, withIntermediateDirectories: true)
+            let destination = helpersDir.appendingPathComponent(OrchardCLIPath.commandName)
+            if fm.fileExists(atPath: destination.path) { try? fm.removeItem(at: destination) }
+            if (try? fm.copyItem(at: source, to: destination)) != nil {
+                try? fm.setAttributes([.posixPermissions: 0o755],
+                                      ofItemAtPath: destination.path)
+                return
+            }
+        }
+        let resolution = OrchardCLIPath.resolution()
+        guard resolution.origin != .unresolved else { return }
+        let sidecar = resourcesDir.appendingPathComponent(
+            (OrchardCLIPath.recordedPathRelativeToBundle as NSString).lastPathComponent)
+        try? Data(resolution.command.utf8).write(to: sidecar, options: .atomic)
     }
 
     private static func infoPlist() -> String {

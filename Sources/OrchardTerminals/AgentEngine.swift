@@ -66,6 +66,14 @@ public protocol AgentEngine {
     /// (Orca's `AgentType` vocabulary: "claude", "codex", "grok", "cursor", …).
     /// Defaults to `id`; engines whose id differs from the keyword override it.
     var agentType: String { get }
+
+    /// Additional spellings `AgentEngineRegistry.engine(id:)` accepts for this engine.
+    /// T35 (dogfood-1 finding 1): every caller-facing surface — `worker-start --agent`,
+    /// `terminal create --engine` — advertises the agent-type keyword ("claude"), so the
+    /// keyword must resolve to the engine whose `id` differs from it ("claude-code")
+    /// instead of failing mid-pipeline with `unknown engine`. Defaults to `agentType`
+    /// when it differs from `id`, which is exactly that case.
+    var aliases: [String] { get }
 }
 
 public extension AgentEngine {
@@ -78,6 +86,7 @@ public extension AgentEngine {
     var hookEvents: [String]? { nil }
     func hookSignal(event: String, body: Data) -> AgentRuntimeState? { nil }
     var agentType: String { id }
+    var aliases: [String] { agentType == id ? [] : [agentType] }
 }
 
 /// Built-in engine registry. Keyed by `id`. UI/controller resolve engines from here.
@@ -90,7 +99,32 @@ public enum AgentEngineRegistry {
         GenericShellEngine(),
     ]
 
+    /// Resolve an engine by its canonical `id` or any registered alias. Matching is
+    /// case-insensitive and tolerates surrounding whitespace: an agent typing
+    /// `--agent Claude` means the same thing as `--agent claude-code`, and refusing it
+    /// after a worktree already exists is the failure dogfood-1 recorded.
     public static func engine(id: String) -> AgentEngine? {
-        all.first { $0.id == id }
+        let wanted = normalize(id)
+        guard !wanted.isEmpty else { return nil }
+        if let exact = all.first(where: { normalize($0.id) == wanted }) { return exact }
+        return all.first { $0.aliases.contains { normalize($0) == wanted } }
+    }
+
+    /// The canonical `id` for any accepted spelling — what callers must persist so a
+    /// terminal record never stores an alias the rest of the system has to re-resolve.
+    public static func canonicalID(_ id: String) -> String? { engine(id: id)?.id }
+
+    /// Every spelling `engine(id:)` accepts, canonical ids first then aliases, each
+    /// group sorted. This is what `agent-context` enumerates on `worker-start --agent`
+    /// and `terminal create --engine` so the accepted values are discoverable without
+    /// a failed launch (dogfood-1 finding 1).
+    public static var acceptedIdentifiers: [String] {
+        let ids = all.map(\.id).sorted()
+        let aliases = all.flatMap(\.aliases).filter { !ids.contains($0) }.sorted()
+        return ids + aliases
+    }
+
+    private static func normalize(_ value: String) -> String {
+        value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     }
 }

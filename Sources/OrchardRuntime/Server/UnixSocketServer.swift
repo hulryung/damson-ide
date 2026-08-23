@@ -26,7 +26,8 @@ public final class UnixSocketServer: @unchecked Sendable {
     public init(registry: CommandRegistry, fileManager: FileManager = .default,
                 runtimeId: String = "rt_" + UUID().uuidString,
                 authToken: String = UUID().uuidString.replacingOccurrences(of: "-", with: ""),
-                dataDirectory: URL? = nil, mode: RuntimeMode = .app) throws {
+                dataDirectory: URL? = nil, mode: RuntimeMode = .app,
+                cliCommand: String? = nil) throws {
         let resolvedData = dataDirectory ?? RuntimePaths.applicationSupport(fileManager: fileManager)
         if let owner = try? RuntimeDiscovery.load(fileManager: fileManager,
                                                   dataDirectory: resolvedData),
@@ -59,7 +60,7 @@ public final class UnixSocketServer: @unchecked Sendable {
         socketFD = fd; self.registry = registry; self.fileManager = fileManager
         self.dataDirectory = paths.data
         metadata = RuntimeMetadata(runtimeId: runtimeId, pid: getpid(), socketPath: socketURL.path,
-                                   authToken: authToken, mode: mode)
+                                   authToken: authToken, mode: mode, cliCommand: cliCommand)
         try fileManager.createDirectory(at: paths.data, withIntermediateDirectories: true,
                                         attributes: [.posixPermissions: 0o700])
         let data = try JSONEncoder.orchard.encode(metadata)

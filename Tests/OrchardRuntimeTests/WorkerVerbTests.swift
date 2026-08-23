@@ -21,6 +21,11 @@ final class WorkerVerbTests: XCTestCase {
         var worktreeCreates: [WorkerWorktreeSpec] = []
         var transcriptResolution: WorkerRuntimeContext.ProviderTranscriptResolution =
             .unavailable(reason: "provider_session_unavailable")
+        /// Worktree ids the rollback seam was asked to delete, in order.
+        var rollbackRequests: [String] = []
+        /// What the stub workspace layer's unforced delete reports. `nil` = a clean
+        /// worktree that removes; a value = the preflight refusal it reports instead.
+        var rollbackRefusal: String?
 
         init() {
             var detector = ReadinessDetector.Config()
@@ -55,6 +60,9 @@ final class WorkerVerbTests: XCTestCase {
     private var store: OrchestrationStore!
     private var live: LiveOrchestrationStore!
     private var handler: WorkerCommandHandler!
+    /// The context `setUp` wired; kept so a test can rebuild the handler with one
+    /// field changed (e.g. a different injected CLI command).
+    private var runtimeContext: WorkerRuntimeContext!
 
     override func setUp() async throws {
         try await super.setUp()
@@ -102,7 +110,18 @@ final class WorkerVerbTests: XCTestCase {
             },
             closeTerminal: { handle in
                 try await harness.service.close(handle: handle)
+            },
+            rollbackWorktree: { worktreeID in
+                await MainActor.run {
+                    harness.rollbackRequests.append(worktreeID)
+                    if let refusal = harness.rollbackRefusal {
+                        return .retained(reason: refusal)
+                    }
+                    harness.workspaces.removeValue(forKey: worktreeID)
+                    return .removed
+                }
             })
+        runtimeContext = context
         handler = WorkerCommandHandler(store: live, runtime: context)
     }
 
@@ -111,6 +130,7 @@ final class WorkerVerbTests: XCTestCase {
         store = nil
         live = nil
         handler = nil
+        runtimeContext = nil
         terminalHarness = nil
         try await super.tearDown()
     }
@@ -303,6 +323,160 @@ final class WorkerVerbTests: XCTestCase {
         XCTAssertEqual(try store.task(taskID)?.status, .failed)
     }
 
+    // MARK: - T35: engine alias, rollback, injected CLI command
+
+    /// dogfood-1 finding 1: `--agent claude` is the spelling every surface advertises
+    /// and the one a coordinator reaches for. It must launch the `claude-code` engine
+    /// rather than dying at terminal_create, and the terminal must record the
+    /// canonical id.
+    func testWorkerStartAcceptsTheClaudeEngineAlias() async throws {
+        let taskID = try await makeTask()
+        let response = try await startReadyWorker(
+            taskID: taskID, extra: ["agent": .string("claude")])
+        XCTAssertTrue(response.ok, String(describing: response.error))
+        XCTAssertEqual(response.result?.field("state")?.stringValue, "ready")
+
+        let handle = try agentHandle(response)
+        let engineID = await MainActor.run { [terminalHarness] in
+            try? terminalHarness!.service.summary(handle: handle).engine
+        }
+        XCTAssertEqual(engineID, "claude-code",
+                       "the alias must be canonicalized before it is persisted")
+        // The receipt still echoes what the caller asked for.
+        XCTAssertEqual(response.result?.field("launch")?.field("agent")?.stringValue, "claude")
+    }
+
+    func testUnknownEngineStillFailsTypedAtTerminalCreate() async throws {
+        let taskID = try await makeTask()
+        let response = await call("worker-start", [
+            "task": .string(taskID),
+            "agent": .string("clod"),
+            "worktree": .string("new-top-level"),
+            "repo": .string("demo"),
+        ])
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.error?.code, "worker_start_failed")
+        XCTAssertEqual(response.error?.data?.field("failedStage")?.stringValue, "terminal_create")
+    }
+
+    /// dogfood-1 finding 1 (second half): the launch that died at terminal_create left
+    /// a worktree behind and a cleanup chore. A definitively-failed start now removes
+    /// the fresh worktree it created, reports the rollback, and lists no residual.
+    func testFailedWorkerStartRollsBackItsFreshWorktree() async throws {
+        let taskID = try await makeTask()
+        let response = await call("worker-start", [
+            "task": .string(taskID),
+            "agent": .string("clod"),
+            "worktree": .string("new-top-level"),
+            "repo": .string("demo"),
+        ])
+        XCTAssertFalse(response.ok)
+        let receipt = try XCTUnwrap(response.error?.data)
+        XCTAssertEqual(receipt.field("state")?.stringValue, "failed")
+
+        let rollback = try XCTUnwrap(receipt.field("rollback")?.arrayValue)
+        XCTAssertEqual(rollback.count, 1)
+        XCTAssertEqual(rollback.first?.field("kind")?.stringValue, "worktree")
+        XCTAssertEqual(rollback.first?.field("action")?.stringValue, "removed")
+        XCTAssertEqual(receipt.field("residualResources")?.arrayValue?.count, 0,
+                       "a removed worktree is not a residual")
+
+        let created = try XCTUnwrap(receipt.field("effects")?.arrayValue?
+            .first { $0.field("kind")?.stringValue == "worktree" }?
+            .field("id")?.stringValue)
+        let requested = await MainActor.run { [terminalHarness] in terminalHarness!.rollbackRequests }
+        XCTAssertEqual(requested, [created])
+
+        // The dispatch row is settled with the reason, not left starting.
+        let dispatchID = try XCTUnwrap(receipt.field("dispatchId")?.stringValue)
+        let worker = try XCTUnwrap(try store.workerDispatch(dispatchID))
+        XCTAssertEqual(worker.state, .failed)
+        XCTAssertTrue((worker.lastError ?? "").contains("unknown engine"),
+                      "the dispatch must record why it failed: \(worker.lastError ?? "nil")")
+        XCTAssertEqual(try store.dispatchContext(dispatchID)?.status, .failed)
+        XCTAssertEqual(Self.residualKinds(worker.residualResources), [])
+    }
+
+    /// Rollback is never forced. A worktree the workspace preflight refuses to delete
+    /// stays a residual — with the refusal reason and the exact cleanup command.
+    func testFailedWorkerStartRetainsAWorktreeItCannotSafelyRemove() async throws {
+        await MainActor.run { terminalHarness.rollbackRefusal = "worktree_dirty: 1 uncommitted file" }
+        let taskID = try await makeTask()
+        let response = await call("worker-start", [
+            "task": .string(taskID),
+            "agent": .string("clod"),
+            "worktree": .string("new-top-level"),
+            "repo": .string("demo"),
+        ])
+        let receipt = try XCTUnwrap(response.error?.data)
+        XCTAssertEqual(receipt.field("rollback")?.arrayValue?.first?.field("action")?.stringValue,
+                       "retained")
+        let residuals = try XCTUnwrap(receipt.field("residualResources")?.arrayValue)
+        XCTAssertEqual(residuals.count, 1)
+        let residual = try XCTUnwrap(residuals.first)
+        XCTAssertEqual(residual.field("kind")?.stringValue, "worktree")
+        XCTAssertEqual(residual.field("retainedReason")?.stringValue,
+                       "worktree_dirty: 1 uncommitted file")
+        let id = try XCTUnwrap(residual.field("id")?.stringValue)
+        XCTAssertEqual(residual.field("cleanupCommand")?.stringValue,
+                       "orchard worktree rm --worktree '\(id)' --json")
+    }
+
+    /// A worktree that already has an agent pane inside it is never auto-deleted: the
+    /// process's cwd lives there. It is retained with that as the reason.
+    func testRollbackSkipsAWorktreeThatAlreadyHasAnAgentTerminal() async throws {
+        let taskID = try await makeTask()
+        let response = await call("worker-start", [
+            "task": .string(taskID),
+            "agent": .string("claude-code"),
+            "worktree": .string("new-top-level"),
+            "repo": .string("demo"),
+            "timeout-ms": .number(300),      // readiness never satisfied
+        ])
+        XCTAssertFalse(response.ok)
+        let receipt = try XCTUnwrap(response.error?.data)
+        XCTAssertEqual(receipt.field("failedStage")?.stringValue, "agent_readiness")
+        let requested = await MainActor.run { [terminalHarness] in terminalHarness!.rollbackRequests }
+        XCTAssertEqual(requested, [], "a worktree with a live pane must not be deleted")
+        XCTAssertEqual(receipt.field("rollback")?.arrayValue?.first?.field("reason")?.stringValue,
+                       "agent_terminal_created_in_worktree")
+        let residualKinds = receipt.field("residualResources")?.arrayValue?
+            .compactMap { $0.field("kind")?.stringValue }
+        XCTAssertEqual(residualKinds, ["worktree", "terminal"])
+    }
+
+    /// dogfood-1 finding 2: the worker followed the preamble literally, ran a bare
+    /// `orchard`, and got `command not found`. Every lifecycle example must carry the
+    /// runtime's resolved command string.
+    func testInjectedPreambleUsesTheRuntimeCLICommandNotBareOrchard() async throws {
+        let absolute = "/Users/dkkang/dev/damson-ide/.build/release/orchard"
+        var runtime = runtimeContext!
+        runtime.cliCommand = absolute
+        handler = WorkerCommandHandler(store: live, runtime: runtime)
+
+        let taskID = try await makeTask()
+        let started = try await startReadyWorker(taskID: taskID)
+        let handle = try agentHandle(started)
+        let typed = try await session(handle).writtenText
+
+        XCTAssertTrue(typed.contains("\(absolute) send --from "),
+                      "worker_done must be shown as the absolute command")
+        XCTAssertTrue(typed.contains("\(absolute) ask --from "))
+        XCTAssertTrue(typed.contains("$ORCHARD_CLI_COMMAND"),
+                      "the preamble must point at the env var carrying the same path")
+        for line in typed.split(separator: "\n") {
+            XCTAssertFalse(line.trimmingCharacters(in: .whitespaces).hasPrefix("orchard "),
+                           "a lifecycle example still starts with a bare orchard: \(line)")
+        }
+    }
+
+    static func residualKinds(_ encoded: String?) -> [String] {
+        guard let encoded, let data = encoded.data(using: .utf8),
+              let value = try? JSONDecoder().decode(JSONValue.self, from: data),
+              let rows = value.arrayValue else { return [] }
+        return rows.compactMap { $0.field("kind")?.stringValue }
+    }
+
     func testWorkerStartRequiresExactlyOneOfAgentOrTerminal() async throws {
         let taskID = try await makeTask()
         let neither = await call("worker-start", ["task": .string(taskID)])
@@ -415,13 +589,21 @@ final class WorkerVerbTests: XCTestCase {
         XCTAssertTrue(lines.contains("all tests passed"))
         XCTAssertEqual(read.result?.field("status")?.field("terminal")?.stringValue, "archived")
 
+        // T35: a transcript request against a terminal-tail archive fails typed. The
+        // archive is real output, but it is not the thing the caller asked for.
         let requestedTranscript = await call("worker-read", [
             "dispatch": .string(dispatchID), "source": .string("transcript"),
         ])
-        XCTAssertTrue(requestedTranscript.ok, String(describing: requestedTranscript.error))
-        XCTAssertEqual(requestedTranscript.result?.field("source")?.stringValue, "terminal")
-        XCTAssertEqual(requestedTranscript.result?.field("fallbackReason")?.stringValue,
-                       "provider_session_unavailable")
+        XCTAssertFalse(requestedTranscript.ok)
+        let refusal = try XCTUnwrap(requestedTranscript.error)
+        XCTAssertEqual(refusal.code, "transcript_unavailable")
+        XCTAssertEqual(refusal.data?.field("reason")?.stringValue, "provider_session_unavailable")
+        XCTAssertEqual(refusal.data?.field("archived")?.boolValue, true)
+        XCTAssertEqual(refusal.data?.field("availableSource")?.stringValue, "terminal")
+        let recovery = refusal.data?.field("nextCommands")?.arrayValue?
+            .compactMap(\.stringValue) ?? []
+        XCTAssertTrue(recovery.contains { $0.contains("--source terminal") },
+                      "the refusal must name the read that would answer: \(recovery)")
 
         // Idempotent: a second release reports already_released, changing nothing.
         let again = await call("worker-release", ["dispatch": .string(dispatchID)])
@@ -525,6 +707,8 @@ final class WorkerVerbTests: XCTestCase {
         XCTAssertTrue(read.ok, String(describing: read.error))
         XCTAssertEqual(read.result?.field("archived")?.boolValue, false)
         XCTAssertEqual(read.result?.field("source")?.stringValue, "terminal")
+        // `auto` on a live worker keeps the bounded, cursor-paged terminal shape and
+        // names why it is not a transcript (T35): nothing is pinned before release.
         XCTAssertEqual(read.result?.field("fallbackReason")?.stringValue,
                        "provider_transcript_not_pinned")
         let lines = read.result?.field("lines")?.arrayValue ?? []
@@ -534,10 +718,110 @@ final class WorkerVerbTests: XCTestCase {
         let transcript = await call("worker-read", [
             "dispatch": .string(dispatchID), "source": .string("transcript"),
         ])
-        XCTAssertTrue(transcript.ok, String(describing: transcript.error))
-        XCTAssertEqual(transcript.result?.field("source")?.stringValue, "terminal")
-        XCTAssertEqual(transcript.result?.field("fallbackReason")?.stringValue,
+        XCTAssertFalse(transcript.ok, "an unpinnable transcript must not answer as terminal output")
+        XCTAssertEqual(transcript.error?.code, "transcript_unavailable")
+        XCTAssertEqual(transcript.error?.data?.field("reason")?.stringValue,
+                       "provider_session_unavailable")
+        XCTAssertEqual(transcript.error?.data?.field("archived")?.boolValue, false)
+
+        // …and `--source terminal` is never second-guessed.
+        let terminalOnly = await call("worker-read", [
+            "dispatch": .string(dispatchID), "source": .string("terminal"),
+        ])
+        XCTAssertTrue(terminalOnly.ok, String(describing: terminalOnly.error))
+        XCTAssertEqual(terminalOnly.result?.field("source")?.stringValue, "terminal")
+        XCTAssertNil(terminalOnly.result?.field("fallbackReason"))
+    }
+
+    /// T35: a live worker whose provider session IS resolvable answers a transcript
+    /// request with the transcript — no release required.
+    func testWorkerReadLiveTranscriptIsServedWhenResolvable() async throws {
+        let taskID = try await makeTask()
+        let started = try await startReadyWorker(taskID: taskID)
+        let dispatchID = try XCTUnwrap(started.result?.field("dispatchId")?.stringValue)
+        await MainActor.run {
+            terminalHarness.transcriptResolution = .resolved(
+                content: #"{"type":"assistant","message":"live answer"}"#,
+                path: "/tmp/claude/live.jsonl", truncated: false)
+        }
+        let read = await call("worker-read", [
+            "dispatch": .string(dispatchID), "source": .string("transcript"),
+        ])
+        XCTAssertTrue(read.ok, String(describing: read.error))
+        XCTAssertEqual(read.result?.field("source")?.stringValue, "transcript")
+        XCTAssertEqual(read.result?.field("archived")?.boolValue, false)
+        XCTAssertEqual(read.result?.field("content")?.stringValue,
+                       #"{"type":"assistant","message":"live answer"}"#)
+        XCTAssertEqual(read.result?.field("transcriptPath")?.stringValue, "/tmp/claude/live.jsonl")
+
+        // `auto` keeps the paged terminal shape even now that a transcript could be
+        // resolved: the same command must not sometimes return a whole document.
+        let auto = await call("worker-read", ["dispatch": .string(dispatchID)])
+        XCTAssertTrue(auto.ok, String(describing: auto.error))
+        XCTAssertEqual(auto.result?.field("source")?.stringValue, "terminal")
+        XCTAssertNotNil(auto.result?.field("lines"))
+        XCTAssertEqual(auto.result?.field("fallbackReason")?.stringValue,
                        "provider_transcript_not_pinned")
+    }
+
+    /// T35 (dogfood-1 finding 4): the released archive keeps two faces — readable
+    /// text for humans and the untouched capture for evidence.
+    func testReleaseArchivesReadableTextAlongsideTheRawCapture() async throws {
+        let taskID = try await makeTask()
+        let started = try await startReadyWorker(taskID: taskID)
+        let dispatchID = try XCTUnwrap(started.result?.field("dispatchId")?.stringValue)
+        let handle = try agentHandle(started)
+        let fake = try await session(handle)
+
+        // A miniature repaint stream: box frame, separator rules, spinner frames, the
+        // same status bar redrawn with a ticking counter, and one real result line.
+        let noise = [
+            "╭──────────────────────────────╮",
+            "│ ✻ Levitating… (3s · ↓ 12 tokens)",
+            "╰──────────────────────────────╯",
+            "──────────────────────────────",
+            "⏵⏵ bypass permissions on · ⎇ main · $0.01",
+            "✢ 41",
+            "all tests passed",
+            "──────────────────────────────",
+            "⏵⏵ bypass permissions on · ⎇ main · $0.02",
+            "✳ Levitating… (4s · ↓ 30 tokens)",
+        ]
+        await MainActor.run { fake.emitOutput(noise.joined(separator: "\n") + "\n") }
+        try await reportDone(taskID: taskID, dispatchID: dispatchID, handle: handle)
+        let release = await call("worker-release", ["dispatch": .string(dispatchID)])
+        XCTAssertTrue(release.ok, String(describing: release.error))
+        let archiveSummary = try XCTUnwrap(release.result?.field("archive"))
+        XCTAssertEqual(archiveSummary.field("status")?.stringValue, "captured")
+        let rawCount = try XCTUnwrap(archiveSummary.field("rawLineCount")?.numberValue)
+        let readableCount = try XCTUnwrap(archiveSummary.field("readableLineCount")?.numberValue)
+        XCTAssertLessThan(readableCount, rawCount)
+
+        // The default read is the readable face.
+        let read = await call("worker-read", ["dispatch": .string(dispatchID),
+                                              "limit": .number(500)])
+        XCTAssertTrue(read.ok, String(describing: read.error))
+        XCTAssertEqual(read.result?.field("raw")?.boolValue, false)
+        let clean = read.result?.field("lines")?.arrayValue?.compactMap(\.stringValue) ?? []
+        XCTAssertTrue(clean.contains("all tests passed"))
+        XCTAssertFalse(clean.contains { $0.contains("✻") || $0.contains("✳") },
+                       "spinner chrome reached the readable archive: \(clean)")
+        XCTAssertFalse(clean.contains { $0.hasPrefix("──") })
+        XCTAssertEqual(clean.filter { $0.contains("bypass permissions") }.count, 1,
+                       "the redrawn status bar was not collapsed: \(clean)")
+        let chrome = try XCTUnwrap(read.result?.field("chromeStripped"))
+        XCTAssertGreaterThan(try XCTUnwrap(chrome.field("separatorLines")?.numberValue), 0)
+        XCTAssertGreaterThan(try XCTUnwrap(chrome.field("spinnerLines")?.numberValue), 0)
+
+        // …and --raw still serves every captured byte.
+        let raw = await call("worker-read", ["dispatch": .string(dispatchID),
+                                             "raw": .bool(true), "limit": .number(500)])
+        XCTAssertTrue(raw.ok, String(describing: raw.error))
+        XCTAssertEqual(raw.result?.field("raw")?.boolValue, true)
+        let rawLines = raw.result?.field("lines")?.arrayValue?.compactMap(\.stringValue) ?? []
+        for line in noise {
+            XCTAssertTrue(rawLines.contains(line), "the raw capture lost: \(line)")
+        }
     }
 
     // MARK: - worker-show

@@ -37,13 +37,48 @@ public struct FlagSpec: Codable, Equatable, Sendable {
     /// Placeholder for the flag's value in usage text (nil = boolean flag).
     public let valueHint: String?
     public let required: Bool
+    /// The exact set of values this flag accepts, when it is closed. A `valueHint`
+    /// like "agent" tells a reader the shape but not the vocabulary — dogfood-1
+    /// spent a failed `worker-start` discovering that `--agent claude` was not an
+    /// accepted spelling — so closed flags enumerate here and agents read the list
+    /// out of `agent-context` instead of guessing. nil means "open value".
+    public let allowedValues: [String]?
 
-    public init(name: String, summary: String, valueHint: String? = nil, required: Bool = false) {
+    public init(name: String, summary: String, valueHint: String? = nil, required: Bool = false,
+                allowedValues: [String]? = nil) {
         self.name = name
         self.summary = summary
         self.valueHint = valueHint
         self.required = required
+        self.allowedValues = allowedValues
     }
+
+    private enum CodingKeys: String, CodingKey {
+        case name, summary, valueHint, required, allowedValues
+    }
+
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        name = try values.decode(String.self, forKey: .name)
+        summary = try values.decode(String.self, forKey: .summary)
+        valueHint = try values.decodeIfPresent(String.self, forKey: .valueHint)
+        required = try values.decodeIfPresent(Bool.self, forKey: .required) ?? false
+        allowedValues = try values.decodeIfPresent([String].self, forKey: .allowedValues)
+    }
+}
+
+/// The engine spellings `worker-start --agent` and `terminal create --engine` accept.
+///
+/// OrchardProtocol has no dependencies by design, so this list is a literal rather
+/// than a projection of `AgentEngineRegistry`; `EngineIdentifierDriftTests` fails the
+/// build's test run if the two ever disagree, which is what keeps the vocabulary an
+/// agent reads and the vocabulary the runtime accepts the same vocabulary.
+public enum OrchardAgentEngines {
+    /// Canonical engine ids first, then the accepted aliases.
+    public static let acceptedIdentifiers = [
+        "claude-code", "codex", "cursor-agent", "grok", "shell",
+        "claude", "cursor",
+    ]
 }
 
 /// The shape `orchard agent-context --json` serializes — a pure local read that works
@@ -67,6 +102,10 @@ public enum OrchardCommands {
 
     public static let all: [CommandSpec] = {
         let json = flag("json", "Emit machine-readable JSON")
+        func enumerated(_ name: String, _ summary: String, _ value: String,
+                        _ allowed: [String]) -> FlagSpec {
+            FlagSpec(name: name, summary: summary, valueHint: value, allowedValues: allowed)
+        }
         let retry = flag("retry-request", "Idempotency request identifier", "id")
         // Sender identity + proof, exactly as the dispatch preamble teaches workers
         // (`send --from <handle> --dispatch-capability <secret> …`).
@@ -103,9 +142,9 @@ public enum OrchardCommands {
             command("gate-create", "Create a decision gate", [flag("task", "Task identifier", "id", required: true), flag("question", "Question", "text", required: true), flag("options", "Options JSON", "json"), from, retry]),
             command("gate-resolve", "Resolve a decision gate", [flag("id", "Gate identifier", "id", required: true), flag("resolution", "Resolution", "text", required: true), retry]),
             command("gate-list", "List decision gates", [flag("task", "Task identifier", "id"), flag("status", "Gate status", "status")]),
-            command("worker-start", "Start a supervised worker", [flag("task", "Task identifier", "id", required: true), flag("on", "Environment", "environment"), flag("worktree", "Workspace placement", "selector"), flag("agent", "Agent type", "agent"), flag("terminal", "Existing terminal", "handle"), flag("model", "Model", "id"), flag("effort", "Reasoning effort", "level"), flag("name", "Worktree name", "name"), flag("repo", "Repository", "selector"), flag("base-branch", "Git base", "ref"), flag("setup", "Setup policy", "run|skip|inherit"), flag("retry-of", "Prior dispatch", "id"), flag("timeout-ms", "Agent readiness timeout", "ms"), retry]),
+            command("worker-start", "Start a supervised worker", [flag("task", "Task identifier", "id", required: true), flag("on", "Environment", "environment"), flag("worktree", "Workspace placement", "selector"), enumerated("agent", "Agent engine id or alias", "agent", OrchardAgentEngines.acceptedIdentifiers), flag("terminal", "Existing terminal", "handle"), flag("model", "Model", "id"), flag("effort", "Reasoning effort", "level"), flag("name", "Worktree name", "name"), flag("repo", "Repository", "selector"), flag("base-branch", "Git base", "ref"), flag("setup", "Setup policy", "run|skip|inherit"), flag("retry-of", "Prior dispatch", "id"), flag("timeout-ms", "Agent readiness timeout", "ms"), retry]),
             command("worker-show", "Show a supervised worker", [flag("dispatch", "Dispatch identifier", "id", required: true)]),
-            command("worker-read", "Read archived or live worker output", [flag("dispatch", "Dispatch identifier", "id", required: true), flag("source", "Output source", "auto|transcript|terminal"), flag("cursor", "Paging cursor", "cursor"), flag("limit", "Maximum entries", "n")]),
+            command("worker-read", "Read archived or live worker output", [flag("dispatch", "Dispatch identifier", "id", required: true), enumerated("source", "Output source; transcript fails typed rather than falling back", "auto|transcript|terminal", ["auto", "transcript", "terminal"]), flag("raw", "Serve the untouched capture instead of the chrome-stripped text"), flag("cursor", "Paging cursor", "cursor"), flag("limit", "Maximum entries", "n")]),
             command("worker-stop", "Stop a worker", [flag("dispatch", "Dispatch identifier", "id", required: true), retry]),
             command("worker-abandon", "Abandon uncertain worker resources", [flag("dispatch", "Dispatch identifier", "id", required: true), retry]),
             command("worker-release", "Archive and release worker resources", [flag("dispatch", "Dispatch identifier", "id", required: true), retry]),
@@ -151,7 +190,8 @@ public enum OrchardCommands {
                 flag("worktree", "Worktree selector for list or create", "selector"),
                 flag("terminal", "Terminal handle", "handle"),
                 flag("title", "Terminal title", "text"),
-                flag("engine", "Terminal engine (default shell)", "engine"),
+                enumerated("engine", "Terminal engine id or alias (default shell)", "engine",
+                           OrchardAgentEngines.acceptedIdentifiers),
                 flag("prompt", "Initial agent prompt", "text"),
                 flag("cwd", "Initial working directory", "path"),
                 flag("cursor", "Stream cursor for incremental reads", "n"),

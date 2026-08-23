@@ -15,6 +15,42 @@ final class EngineRegistryTests: XCTestCase {
         XCTAssertNil(AgentEngineRegistry.engine(id: "nope"))
     }
 
+    // MARK: - T35 aliases (dogfood-1 finding 1)
+
+    /// `--agent claude` is the spelling every surface advertises. It must resolve to
+    /// the `claude-code` engine instead of failing with `unknown engine` after a
+    /// worktree has already been created.
+    func testAgentTypeKeywordsResolveAsEngineAliases() {
+        XCTAssertEqual(AgentEngineRegistry.engine(id: "claude")?.id, "claude-code")
+        XCTAssertEqual(AgentEngineRegistry.engine(id: "cursor")?.id, "cursor-agent")
+        XCTAssertEqual(AgentEngineRegistry.canonicalID("claude"), "claude-code")
+        // An engine whose id already IS its agent-type keyword needs no alias.
+        XCTAssertEqual(ClaudeCodeEngine().aliases, ["claude"])
+        XCTAssertEqual(CodexEngine().aliases, [])
+        XCTAssertEqual(GenericShellEngine().aliases, [])
+    }
+
+    func testAliasResolutionIsCaseAndWhitespaceInsensitive() {
+        for spelling in ["Claude", "CLAUDE", "  claude  ", "Claude-Code"] {
+            XCTAssertEqual(AgentEngineRegistry.engine(id: spelling)?.id, "claude-code", spelling)
+        }
+        XCTAssertNil(AgentEngineRegistry.engine(id: ""))
+        XCTAssertNil(AgentEngineRegistry.engine(id: "   "))
+        XCTAssertNil(AgentEngineRegistry.engine(id: "clod"))
+    }
+
+    /// The list `agent-context` publishes: canonical ids first, then aliases, with no
+    /// duplicates and every entry actually resolvable.
+    func testAcceptedIdentifiersAreTheResolvableSpellings() {
+        let accepted = AgentEngineRegistry.acceptedIdentifiers
+        XCTAssertEqual(accepted, ["claude-code", "codex", "cursor-agent", "grok", "shell",
+                                  "claude", "cursor"])
+        XCTAssertEqual(Set(accepted).count, accepted.count)
+        for id in accepted {
+            XCTAssertNotNil(AgentEngineRegistry.engine(id: id), id)
+        }
+    }
+
     func testAgentTypeVocabularyMatchesOrca() {
         XCTAssertEqual(ClaudeCodeEngine().agentType, "claude")
         XCTAssertEqual(CodexEngine().agentType, "codex")
