@@ -109,6 +109,9 @@ public enum OrchardCommands {
             command("worker-retain", "Retain worker resources", [flag("dispatch", "Dispatch identifier", "id", required: true), retry]),
             command("worker-list", "List supervised workers", [flag("terminal-state", "Terminal state filter", "state")]),
             command("repo", "Manage registered repositories", [flag("path", "Repository path", "path"), flag("repo", "Repository selector", "selector"), flag("display-name", "Display name", "text")], positionals: ["list|add|show"]),
+            // T10 embedded browser. Refs (@eN) come from the latest `snapshot` of a
+            // page and are invalidated by any navigation — re-snapshot, don't guess.
+            command("browser", "Drive a workspace's embedded browser", [flag("worktree", "Workspace selector", "selector", required: true), flag("page", "Browser tab id", "id"), flag("url", "Destination URL", "url"), flag("ref", "Snapshot element ref (@eN)", "ref"), flag("text", "Text for fill/type", "text"), flag("js", "JavaScript expression for eval", "expr"), flag("limit", "Maximum console entries", "n")], positionals: ["goto|back|forward|reload|snapshot|click|fill|type|screenshot|eval|console|tab"]),
             command("reset", "Reset orchestration state", [flag("all", "Reset all"), flag("tasks", "Reset tasks"), flag("messages", "Reset messages")]),
         ]
     }()
@@ -129,5 +132,6 @@ public enum CommandGroup: String, Codable, CaseIterable, Sendable {
     case worktree     // worktree list/show/current/create/set/rm
     case repo         // repo list/add/show
     case file         // file open/diff/open-changed (wave 2)
+    case browser      // browser goto/…/tab (wave 2)
     case guide        // agent-context, guide get <topic>
 }

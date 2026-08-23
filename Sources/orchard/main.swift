@@ -80,7 +80,11 @@ do {
         if parsed.json { let data = try JSONEncoder.pretty.encode(["topic": "orchestration", "content": orchestrationGuide]); FileHandle.standardOutput.write(data + Data("\n".utf8)) } else { print(orchestrationGuide) }
     default:
         var method = parsed.spec.name, params = parsed.params; params.removeValue(forKey: "json")
-        if method == "repo", case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue { method = "repo-\(subcommand)" }
+        if method == "repo" || method == "browser", case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue {
+            method = "\(method)-\(subcommand)"
+            let rest = Array(values.dropFirst())
+            if !rest.isEmpty { params["_args"] = .array(rest) }
+        }
         let response = try callRuntime(method: method, params: .object(params))
         if parsed.json { let data = try JSONEncoder.pretty.encode(response); FileHandle.standardOutput.write(data + Data("\n".utf8)) }
         else if response.ok { print(response.result.map(String.init(describing:)) ?? "ok") }

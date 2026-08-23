@@ -22,6 +22,8 @@ final class AppStore: ObservableObject {
     let meta: WorkspaceMetaStore
     /// The in-process runtime (nil only if its data directory is unusable).
     let runtime: OrchardRuntimeHost?
+    /// T10: WKWebView host for the runtime's browser service (nil with no runtime).
+    let browser: BrowserManager?
 
     @Published var projects: [ProjectSession] = []
     @Published var selectedProjectID: UUID?
@@ -68,6 +70,7 @@ final class AppStore: ObservableObject {
             context: TerminalHostContext(cliCommand: "orchard", dataPath: dataDirectory.path))
         let runtime = try? OrchardRuntimeHost(terminalFactory: factory)
         self.runtime = runtime
+        self.browser = runtime.map { BrowserManager(service: $0.browserService) }
         let dataStore = runtime?.dataStore
             ?? OrchardDataStore(url: dataDirectory.appendingPathComponent("orchard-data.json"))
         self.meta = meta ?? WorkspaceMetaStore(store: dataStore)
