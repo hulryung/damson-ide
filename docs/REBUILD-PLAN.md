@@ -503,6 +503,10 @@ code). No damson-ide source changes.
 
 ### Wave 9+ backlog
 
+T32 leftovers: human-readable remote worktree-list formatter (staleness warning is
+JSON-only), remote file backend + remote agents (SSH stage 3), app-side UI to open a
+remote workspace (the host chip renders; opening flow does not exist).
+
 From the first dogfood cycle (docs/reports/dogfood-1.md, all verified live):
 worker-start `--agent claude` fails with unknown engine (accepted id is
 `claude-code`; alias it and enumerate engines in agent-context, and make the
