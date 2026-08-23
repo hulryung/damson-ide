@@ -330,6 +330,13 @@ additions, Tests/OrchardRuntimeTests/File*.
 
 ### Wave 4+ backlog
 
+Project the repo primary checkout (and folder workspaces) into the runtime workspace
+registry as `repoId::path` the way Orca does — today `orchard file search --worktree
+path:<repo>` fails with unknown_worktree until a worktree is created through the
+runtime (verified live 2026-08-23). Also: headless serve refuses socket paths over the
+104-byte sun_path limit with a typed error — consider defaulting the socket into
+$TMPDIR when --data-dir is deep.
+
 App sidebar duality was resolved by T8 (was: `orchard repo add` never surfaced in the
 UI, verified live 2026-08-23). Remaining: chat view-mode overlay on agent PTYs,
 `orchard serve` headless mode, capability-hash enforcement on `send`, full-text file
