@@ -258,6 +258,7 @@ public final class WorktreeService {
     @discardableResult
     public func deleteWorktree(_ record: WorktreeRecord, force: Bool = false,
                                deleteBranch: Bool = false,
+                               forceBranch: Bool = false,
                                runHooks: Bool = false) throws -> DeletionResult {
         var warning: String?
         if let script = manager.archiveScript(for: record.worktree) {
@@ -271,7 +272,9 @@ public final class WorktreeService {
                 warning = "orchard.yaml archive hook skipped for \(record.path.path); pass --run-hooks to run it."
             }
         }
-        let removed = try manager.remove(record.worktree, force: force, deleteBranch: deleteBranch)
+        let removed = try manager.remove(record.worktree, force: force,
+                                         deleteBranch: deleteBranch,
+                                         forceBranch: forceBranch)
         guard removed else { return DeletionResult(removed: false, warning: warning) }
         worktrees.removeAll { $0.id == record.id }
         eventSink.yield(.worktreeRemoved(worktreeID: record.id, branch: record.branch))

@@ -138,6 +138,70 @@ final class WorkspaceHandlerTests: XCTestCase {
             "term_instant")
     }
 
+    func testRmDeleteBranchRemovesMergedAndRefusesUnmerged() async throws {
+        let (server, _, repo) = try makeServer()
+
+        let merged = await server.perform(RPCRequest(
+            id: "m1", method: "worktree-create",
+            params: .object(["repo": .string(repo.id), "name": .string("merged-br")])))
+        XCTAssertTrue(merged.ok, merged.error?.message ?? "")
+        let mergedWT = try XCTUnwrap(merged.result?.objectValue?["worktree"]?.objectValue)
+        let mergedId = try XCTUnwrap(mergedWT["id"]?.stringValue)
+        let mergedBranch = try XCTUnwrap(mergedWT["branch"]?.stringValue)
+
+        let dropped = await server.perform(RPCRequest(
+            id: "m2", method: "worktree-rm",
+            params: .object([
+                "worktree": .string(mergedId),
+                "delete-branch": .bool(true),
+            ])))
+        XCTAssertTrue(dropped.ok, dropped.error?.message ?? "")
+        XCTAssertEqual(dropped.result?.objectValue?["removed"]?.boolValue, true)
+        XCTAssertEqual(dropped.result?.objectValue?["branchDeleted"]?.boolValue, true)
+        XCTAssertEqual(dropped.result?.objectValue?["branch"]?.stringValue, mergedBranch)
+        XCTAssertEqual(dropped.result?.objectValue?["branchMerged"]?.boolValue, true)
+
+        let unmerged = await server.perform(RPCRequest(
+            id: "u1", method: "worktree-create",
+            params: .object(["repo": .string(repo.id), "name": .string("unmerged-br")])))
+        XCTAssertTrue(unmerged.ok, unmerged.error?.message ?? "")
+        let unmergedWT = try XCTUnwrap(unmerged.result?.objectValue?["worktree"]?.objectValue)
+        let unmergedId = try XCTUnwrap(unmergedWT["id"]?.stringValue)
+        let unmergedPath = try XCTUnwrap(unmergedWT["path"]?.stringValue)
+        let unmergedBranch = try XCTUnwrap(unmergedWT["branch"]?.stringValue)
+
+        try "extra\n".write(to: URL(fileURLWithPath: unmergedPath)
+            .appendingPathComponent("extra.txt"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(try git(["add", "."], cwd: URL(fileURLWithPath: unmergedPath)), 0)
+        XCTAssertEqual(try git(["commit", "-q", "-m", "unmerged"],
+                               cwd: URL(fileURLWithPath: unmergedPath)), 0)
+
+        let refused = await server.perform(RPCRequest(
+            id: "u2", method: "worktree-rm",
+            params: .object([
+                "worktree": .string(unmergedId),
+                "delete-branch": .bool(true),
+            ])))
+        XCTAssertFalse(refused.ok)
+        XCTAssertEqual(refused.error?.code, "branch_not_merged")
+        XCTAssertEqual(refused.error?.message,
+                       BranchDeletionError.unmergedMessage(for: unmergedBranch))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: unmergedPath))
+
+        let forced = await server.perform(RPCRequest(
+            id: "u3", method: "worktree-rm",
+            params: .object([
+                "worktree": .string(unmergedId),
+                "force": .bool(true),
+                "delete-branch": .bool(true),
+                "force-branch": .bool(true),
+            ])))
+        XCTAssertTrue(forced.ok, forced.error?.message ?? "")
+        XCTAssertEqual(forced.result?.objectValue?["removed"]?.boolValue, true)
+        XCTAssertEqual(forced.result?.objectValue?["branchDeleted"]?.boolValue, true)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: unmergedPath))
+    }
+
     func testUnknownWorktreeIsTypedError() async throws {
         let (server, _, _) = try makeServer()
         let response = await server.perform(RPCRequest(

@@ -361,7 +361,9 @@ public final class WorkspaceService {
     }
 
     public func remove(selector: String, cwd: String? = nil,
-                       force: Bool = false, runHooks: Bool = false) throws -> WorkspaceRemoveResult {
+                       force: Bool = false, runHooks: Bool = false,
+                       deleteBranch: Bool = false,
+                       forceBranch: Bool = false) throws -> WorkspaceRemoveResult {
         let workspace = try resolveWorkspace(selector, cwd: cwd)
         if isPrimaryCheckout(workspace) {
             throw WorkspaceError("invalid_argument",
@@ -392,21 +394,43 @@ public final class WorkspaceService {
                 throw WorkspaceError("unknown_worktree", "git worktree vanished: \(workspace.id)")
             }
             let preflight = service.deletionPreflight(record)
+            var warnings = preflight.warnings
+            warnings.append(preflight.branchStatusMessage)
+            let dropBranch = deleteBranch || forceBranch
+            // More specific than dirty: --delete-branch on an unmerged branch is
+            // refused with git's exact line before anything is removed.
+            if dropBranch && !forceBranch && !preflight.branchMerged {
+                throw WorkspaceError(
+                    "branch_not_merged",
+                    BranchDeletionError.unmergedMessage(for: preflight.worktree.branch))
+            }
             if !preflight.isSafe && !force {
                 return WorkspaceRemoveResult(removed: false,
                                              warning: nil,
-                                             preflightWarnings: preflight.warnings)
+                                             preflightWarnings: warnings,
+                                             branch: preflight.worktree.branch,
+                                             branchMerged: preflight.branchMerged)
             }
-            let deletion = try service.deleteWorktree(record, force: force,
-                                                      deleteBranch: false,
-                                                      runHooks: runHooks)
-            try store.modify { data in
-                data.worktreeMeta.removeValue(forKey: workspace.id)
-                data.worktreeLineageById.removeValue(forKey: workspace.id)
+            do {
+                let deletion = try service.deleteWorktree(record, force: force,
+                                                          deleteBranch: dropBranch,
+                                                          forceBranch: forceBranch,
+                                                          runHooks: runHooks)
+                try store.modify { data in
+                    data.worktreeMeta.removeValue(forKey: workspace.id)
+                    data.worktreeLineageById.removeValue(forKey: workspace.id)
+                }
+                let branchGone = dropBranch && deletion.removed
+                    && !service.branchStillExists(preflight.worktree.branch)
+                return WorkspaceRemoveResult(removed: deletion.removed,
+                                             warning: deletion.warning,
+                                             preflightWarnings: warnings,
+                                             branch: preflight.worktree.branch,
+                                             branchMerged: preflight.branchMerged,
+                                             branchDeleted: dropBranch ? branchGone : false)
+            } catch let error as BranchDeletionError {
+                throw WorkspaceError("branch_not_merged", error.message)
             }
-            return WorkspaceRemoveResult(removed: deletion.removed,
-                                         warning: deletion.warning,
-                                         preflightWarnings: preflight.warnings)
         }
     }
 

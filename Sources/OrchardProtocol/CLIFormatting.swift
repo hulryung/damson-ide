@@ -41,6 +41,44 @@ public enum CommandHelpRenderer {
 }
 
 public enum OrchardHumanFormatter {
+    /// Pretty JSON for verbs that have no dedicated human layout. The previous
+    /// fallback was `String(describing:)` of `JSONValue`, which printed a Swift
+    /// debug dump (`object(["type": OrchardProtocol.JSONValue.string(...)])`)
+    /// into worker terminals (dogfood-2).
+    public static func json(_ result: JSONValue?) -> String {
+        guard let result else { return "ok" }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        guard let data = try? encoder.encode(result),
+              let text = String(data: data, encoding: .utf8) else { return "ok" }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Compact receipt for `orchard send` without `--json`.
+    public static func send(_ result: JSONValue?) -> String {
+        let object = result?.objectValue ?? [:]
+        let type = object["type"]?.stringValue ?? "message"
+        let count = object["count"]?.numberValue.map { Int($0) } ?? 0
+        var parts: [String] = count <= 1 ? ["sent \(type)"] : ["sent \(type) ×\(count)"]
+        if let run = object["runId"]?.stringValue { parts.append("run:\(run)") }
+        if let lifecycle = object["lifecycle"]?.objectValue {
+            if let status = lifecycle["status"]?.stringValue { parts.append(status) }
+            if let outcome = lifecycle["outcome"]?.stringValue { parts.append(outcome) }
+            if let task = lifecycle["taskId"]?.stringValue { parts.append("task:\(task)") }
+            if let dispatch = lifecycle["dispatchId"]?.stringValue {
+                parts.append("dispatch:\(dispatch)")
+            }
+            if let reason = lifecycle["reason"]?.stringValue, !reason.isEmpty {
+                parts.append("reason:\(reason)")
+            }
+        }
+        if let ids = object["messageIds"]?.arrayValue?.compactMap(\.stringValue),
+           ids.count == 1 {
+            parts.append("id:\(ids[0])")
+        }
+        return parts.joined(separator: "  ")
+    }
+
     public static func worktreeList(_ result: JSONValue?) -> String {
         let object = result?.objectValue
         let rows = object?["worktrees"]?.arrayValue ?? []

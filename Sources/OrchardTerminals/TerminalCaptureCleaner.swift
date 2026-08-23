@@ -32,21 +32,24 @@ public enum TerminalCaptureCleaner {
         public var blankLines: Int
         /// Lines that still carried escape/control remnants after the VT parser.
         public var escapeRemnantLines: Int
+        /// Swift debug dumps of `JSONValue` (dogfood-2: `orchard send` without `--json`).
+        public var debugDumpLines: Int
 
         public var inputLineCount: Int {
             lines.count + separatorLines + spinnerLines + duplicateLines
-                + blankLines
+                + blankLines + debugDumpLines
         }
 
         public init(lines: [String], separatorLines: Int = 0, spinnerLines: Int = 0,
                     duplicateLines: Int = 0, blankLines: Int = 0,
-                    escapeRemnantLines: Int = 0) {
+                    escapeRemnantLines: Int = 0, debugDumpLines: Int = 0) {
             self.lines = lines
             self.separatorLines = separatorLines
             self.spinnerLines = spinnerLines
             self.duplicateLines = duplicateLines
             self.blankLines = blankLines
             self.escapeRemnantLines = escapeRemnantLines
+            self.debugDumpLines = debugDumpLines
         }
     }
 
@@ -102,9 +105,13 @@ public enum TerminalCaptureCleaner {
                              duplicateWindow: Int = TerminalCaptureCleaner.duplicateWindow) -> Report {
         var report = Report(lines: [])
         var window: [String] = []
+        var squeezedWindow: [String] = []
         var maskedWindow: [String] = []
         var suffixWindow: [String] = []
         var lastEmittedWasBlank = true
+        // Well-spaced originals, used to rehydrate lines the TUI concatenated without
+        // emitting the space cells. The raw capture is the source of truth for spacing.
+        let corpus = input.map { squeezeSpace(normalize($0).line) }.filter { $0.contains(" ") }
 
         for raw in input {
             let (normalized, hadRemnant) = normalize(raw)
@@ -125,14 +132,30 @@ public enum TerminalCaptureCleaner {
                 report.separatorLines += 1
                 continue
             }
-            let flattened = flattenSpinners(normalized)
+            var flattened = flattenSpinners(normalized)
+            flattened = segment(flattened, corpus: corpus)
+            if isSwiftDebugDump(flattened) {
+                report.debugDumpLines += 1
+                continue
+            }
             if isSpinnerResidue(flattened) {
                 report.spinnerLines += 1
                 continue
             }
-            // An exact repeat inside the window is a repaint of the same frame,
-            // whatever the line says.
-            if window.contains(flattened) {
+            let squeezed = squeezeKey(flattened)
+            // An exact repeat, or the same letters with worse/equal spacing, is a
+            // repaint of the same frame. A later copy with *more* spaces replaces
+            // the collapsed original — the raw capture's spaced paint is kept.
+            if let existingIndex = window.firstIndex(of: flattened)
+                ?? squeezedWindow.firstIndex(of: squeezed) {
+                let existing = window[existingIndex]
+                if spaceCount(flattened) > spaceCount(existing) {
+                    if let lineIndex = report.lines.lastIndex(of: existing) {
+                        report.lines[lineIndex] = flattened
+                    }
+                    window[existingIndex] = flattened
+                    squeezedWindow[existingIndex] = squeezed
+                }
                 report.duplicateLines += 1
                 continue
             }
@@ -151,11 +174,15 @@ public enum TerminalCaptureCleaner {
             report.lines.append(flattened)
             lastEmittedWasBlank = false
             window.append(flattened)
+            squeezedWindow.append(squeezed)
             if chrome {
                 maskedWindow.append(masked)
                 suffixWindow.append(String(masked.suffix(20)))
             }
-            if window.count > duplicateWindow { window.removeFirst() }
+            if window.count > duplicateWindow {
+                window.removeFirst()
+                squeezedWindow.removeFirst()
+            }
             if maskedWindow.count > duplicateWindow {
                 maskedWindow.removeFirst()
                 suffixWindow.removeFirst()
@@ -172,12 +199,16 @@ public enum TerminalCaptureCleaner {
 
     /// Strip escape remnants, control characters, and frame borders. Returns the
     /// trimmed line and whether anything escape-shaped was removed.
+    ///
+    /// Codes are stripped without joining adjacent cells: a remnant sitting between
+    /// two printable fragments becomes a space, and interior box-drawing glyphs
+    /// (the TUI's cell walls) become spaces rather than disappearing.
     static func normalize(_ line: String) -> (line: String, hadEscapeRemnant: Bool) {
         var value = line
         let before = value
-        value = replacing(escapeSequence, in: value)
-        value = replacing(orphanSequence, in: value)
-        value = replacing(controlCharacters, in: value)
+        value = replacingWithoutJoining(escapeSequence, in: value)
+        value = replacingWithoutJoining(orphanSequence, in: value)
+        value = replacingWithoutJoining(controlCharacters, in: value)
         let hadRemnant = value != before
         // NBSP is how a TUI pads its prompt; it reads as a space, not as content.
         value = value.replacingOccurrences(of: "\u{00A0}", with: " ")
@@ -185,11 +216,18 @@ public enum TerminalCaptureCleaner {
         value = value.trimmingCharacters(in: .whitespaces)
         while let first = value.first, leadingBorders.contains(first) {
             value.removeFirst()
+            value = value.trimmingCharacters(in: .whitespaces)
         }
         while let last = value.last, trailingBorders.contains(last) {
             value.removeLast()
+            value = value.trimmingCharacters(in: .whitespaces)
         }
-        return (value.trimmingCharacters(in: .whitespaces), hadRemnant)
+        value = value.trimmingCharacters(in: .whitespaces)
+        // Pure rules stay rules so `isSeparator` still sees them; mixed lines have
+        // interior walls turned into spaces instead of joining the cells.
+        if isSeparator(value) { return (value, hadRemnant) }
+        value = String(value.map { boxGlyphs.contains($0) ? " " : $0 })
+        return (squeezeSpace(value.trimmingCharacters(in: .whitespaces)), hadRemnant)
     }
 
     static func isSeparator(_ line: String) -> Bool {
@@ -203,8 +241,24 @@ public enum TerminalCaptureCleaner {
     static func flattenSpinners(_ line: String) -> String {
         guard line.contains(where: { spinnerGlyphs.contains($0) }) else { return line }
         let replaced = String(line.map { spinnerGlyphs.contains($0) ? " " : $0 })
-        return replaced.split(separator: " ", omittingEmptySubsequences: true)
-            .joined(separator: " ")
+        return squeezeSpace(replaced)
+    }
+
+    /// Restore word boundaries a TUI stream buffer dropped (empty cells never
+    /// became space characters). Uses the raw capture as the spacing source of
+    /// truth when a better-spaced copy of the same letters exists; otherwise
+    /// splits glued `--flags` and camelCase runs.
+    static func segment(_ line: String, corpus: [String]) -> String {
+        var value = splitGluedFlags(line)
+        if looksCollapsed(value) {
+            value = splitCamelCase(value)
+        }
+        return rehydrateSpacing(value, corpus: corpus)
+    }
+
+    static func isSwiftDebugDump(_ line: String) -> Bool {
+        line.contains("OrchardProtocol.JSONValue")
+            || (line.contains("object([") && line.contains("JSONValue"))
     }
 
     static func isSpinnerResidue(_ line: String) -> Bool {
@@ -242,12 +296,175 @@ public enum TerminalCaptureCleaner {
         return out
     }
 
+    // MARK: - Spacing
+
+    static func squeezeSpace(_ line: String) -> String {
+        line.split(separator: " ", omittingEmptySubsequences: true)
+            .joined(separator: " ")
+    }
+
+    static func squeezeKey(_ line: String) -> String {
+        String(line.filter { !$0.isWhitespace })
+    }
+
+    private static func spaceCount(_ line: String) -> Int {
+        line.reduce(0) { $0 + ($1.isWhitespace ? 1 : 0) }
+    }
+
+    /// A line with no spaces and a run of letters was concatenated from TUI cells.
+    /// Lines that already have spaces (real command output, identifiers like
+    /// `OrchardTerminals`) are left alone so camelCase splitting cannot rewrite them.
+    static func looksCollapsed(_ line: String) -> Bool {
+        let letters = line.reduce(0) { $0 + ($1.isLetter ? 1 : 0) }
+        return letters >= 10 && spaceCount(line) == 0
+    }
+
+    /// `orchardsend--from` → `orchardsend --from`. The TUI paints `--flag` as its
+    /// own cells and the stream buffer concatenates them onto the previous token.
+    static func splitGluedFlags(_ line: String) -> String {
+        guard line.contains("--") else { return line }
+        var out = ""
+        var index = line.startIndex
+        while index < line.endIndex {
+            if line[index] == "-",
+               line.index(after: index) < line.endIndex,
+               line[line.index(after: index)] == "-",
+               let last = out.last, last.isLetter || last.isNumber || last == ")" {
+                out.append(" ")
+            }
+            out.append(line[index])
+            index = line.index(after: index)
+        }
+        return out
+    }
+
+    /// `Updateavailable!Run` → `Update available! Run`. Only applied to collapsed
+    /// lines so a camelCase identifier in real command output is left alone.
+    static func splitCamelCase(_ line: String) -> String {
+        var out = ""
+        var previous: Character?
+        for character in line {
+            if let previous {
+                let boundary =
+                    (previous.isLowercase && character.isUppercase)
+                    || (previous.isLetter && character.isNumber)
+                    || (previous.isNumber && character.isLetter)
+                if boundary { out.append(" ") }
+            }
+            out.append(character)
+            previous = character
+        }
+        return out
+    }
+
+    /// Prefer a better-spaced copy of the same letters from the raw capture.
+    static func rehydrateSpacing(_ line: String, corpus: [String]) -> String {
+        let compact = squeezeKey(line)
+        guard compact.count >= 8 else { return line }
+        var best = line
+        var bestSpaces = spaceCount(line)
+        for spaced in corpus {
+            let spacedCompact = squeezeKey(spaced)
+            if spacedCompact == compact {
+                let spaces = spaceCount(spaced)
+                if spaces > bestSpaces {
+                    best = spaced
+                    bestSpaces = spaces
+                }
+            } else if compact.count >= 12, spacedCompact.contains(compact) {
+                if let extracted = extractSpaced(from: spaced, matching: compact) {
+                    let spaces = spaceCount(extracted)
+                    if spaces > bestSpaces {
+                        best = extracted
+                        bestSpaces = spaces
+                    }
+                }
+            } else if spacedCompact.count >= 16, compact.contains(spacedCompact) {
+                if let spliced = replaceCompactSubstring(
+                    in: best, compactNeedle: spacedCompact, with: spaced) {
+                    let spaces = spaceCount(spliced)
+                    if spaces > bestSpaces {
+                        best = spliced
+                        bestSpaces = spaces
+                    }
+                }
+            }
+        }
+        return best
+    }
+
+    /// Walk `spaced`, skipping its whitespace, and copy the span whose letters
+    /// equal `compact` — keeping the original spaces.
+    static func extractSpaced(from spaced: String, matching compact: String) -> String? {
+        guard !compact.isEmpty else { return nil }
+        var compactIndex = compact.startIndex
+        var start: String.Index?
+        var pendingSpace = false
+        var result = ""
+        for index in spaced.indices {
+            let character = spaced[index]
+            if character.isWhitespace {
+                if start != nil { pendingSpace = true }
+                continue
+            }
+            if compactIndex < compact.endIndex, character == compact[compactIndex] {
+                if start == nil { start = index }
+                if pendingSpace { result.append(" "); pendingSpace = false }
+                result.append(character)
+                compactIndex = compact.index(after: compactIndex)
+                if compactIndex == compact.endIndex { return result }
+            } else if start != nil {
+                return nil
+            }
+        }
+        return nil
+    }
+
+    static func replaceCompactSubstring(in line: String, compactNeedle: String,
+                                        with spaced: String) -> String? {
+        let compactLine = squeezeKey(line)
+        guard let range = compactLine.range(of: compactNeedle) else { return nil }
+        let startOffset = compactLine.distance(from: compactLine.startIndex, to: range.lowerBound)
+        let endOffset = compactLine.distance(from: compactLine.startIndex, to: range.upperBound)
+        var seen = 0
+        var startIndex: String.Index?
+        var endIndex: String.Index?
+        for index in line.indices {
+            if line[index].isWhitespace { continue }
+            if seen == startOffset { startIndex = index }
+            seen += 1
+            if seen == endOffset {
+                endIndex = line.index(after: index)
+                break
+            }
+        }
+        guard let startIndex, let endIndex else { return nil }
+        return String(line[line.startIndex..<startIndex]) + spaced + String(line[endIndex...])
+    }
+
     // MARK: - Regex helpers
 
-    private static func replacing(_ regex: NSRegularExpression, in value: String) -> String {
+    /// Replace regex matches with nothing, inserting a single space when the match
+    /// sat between two non-whitespace characters so adjacent fragments stay words.
+    private static func replacingWithoutJoining(_ regex: NSRegularExpression,
+                                                in value: String) -> String {
         guard !value.isEmpty else { return value }
-        return regex.stringByReplacingMatches(
-            in: value, range: NSRange(value.startIndex..., in: value), withTemplate: "")
+        let matches = regex.matches(in: value, range: NSRange(value.startIndex..., in: value))
+        guard !matches.isEmpty else { return value }
+        var result = ""
+        var cursor = value.startIndex
+        for match in matches {
+            guard let range = Range(match.range, in: value) else { continue }
+            result += value[cursor..<range.lowerBound]
+            let left = result.last
+            let right = range.upperBound < value.endIndex ? value[range.upperBound] : nil
+            if let left, !left.isWhitespace, let right, !right.isWhitespace {
+                result.append(" ")
+            }
+            cursor = range.upperBound
+        }
+        result += value[cursor...]
+        return result
     }
 
     private static func matches(_ regex: NSRegularExpression, _ value: String) -> Bool {
