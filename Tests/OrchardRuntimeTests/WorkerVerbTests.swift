@@ -19,6 +19,8 @@ final class WorkerVerbTests: XCTestCase {
         private(set) var service: TerminalService!
         var workspaces: [String: WorkerWorktreeReceipt] = [:]
         var worktreeCreates: [WorkerWorktreeSpec] = []
+        var transcriptResolution: WorkerRuntimeContext.ProviderTranscriptResolution =
+            .unavailable(reason: "provider_session_unavailable")
 
         init() {
             var detector = ReadinessDetector.Config()
@@ -94,6 +96,9 @@ final class WorkerVerbTests: XCTestCase {
             },
             readTerminal: { handle, cursor, limit in
                 try await harness.service.read(handle: handle, cursor: cursor, limit: limit)
+            },
+            resolveProviderTranscript: { _, _ in
+                await harness.transcriptResolution
             },
             closeTerminal: { handle in
                 try await harness.service.close(handle: handle)
@@ -404,14 +409,75 @@ final class WorkerVerbTests: XCTestCase {
         XCTAssertTrue(read.ok, String(describing: read.error))
         XCTAssertEqual(read.result?.field("archived")?.boolValue, true)
         XCTAssertEqual(read.result?.field("source")?.stringValue, "terminal")
+        XCTAssertEqual(read.result?.field("fallbackReason")?.stringValue,
+                       "provider_session_unavailable")
         let lines = read.result?.field("lines")?.arrayValue?.compactMap(\.stringValue) ?? []
         XCTAssertTrue(lines.contains("all tests passed"))
         XCTAssertEqual(read.result?.field("status")?.field("terminal")?.stringValue, "archived")
+
+        let requestedTranscript = await call("worker-read", [
+            "dispatch": .string(dispatchID), "source": .string("transcript"),
+        ])
+        XCTAssertTrue(requestedTranscript.ok, String(describing: requestedTranscript.error))
+        XCTAssertEqual(requestedTranscript.result?.field("source")?.stringValue, "terminal")
+        XCTAssertEqual(requestedTranscript.result?.field("fallbackReason")?.stringValue,
+                       "provider_session_unavailable")
 
         // Idempotent: a second release reports already_released, changing nothing.
         let again = await call("worker-release", ["dispatch": .string(dispatchID)])
         XCTAssertTrue(again.ok)
         XCTAssertEqual(again.result?.field("state")?.stringValue, "already_released")
+    }
+
+    func testReleasePinsProviderTranscriptAndReadPrefersIt() async throws {
+        let taskID = try await makeTask()
+        let started = try await startReadyWorker(taskID: taskID)
+        let dispatchID = try XCTUnwrap(started.result?.field("dispatchId")?.stringValue)
+        let handle = try agentHandle(started)
+        await MainActor.run {
+            terminalHarness.transcriptResolution = .resolved(
+                content: #"{"type":"assistant","message":"pinned answer"}"#,
+                path: "/tmp/claude/session.jsonl", truncated: false)
+        }
+        try await reportDone(taskID: taskID, dispatchID: dispatchID, handle: handle)
+
+        let release = await call("worker-release", ["dispatch": .string(dispatchID)])
+        XCTAssertTrue(release.ok, String(describing: release.error))
+        XCTAssertEqual(release.result?.field("archive")?.field("source")?.stringValue,
+                       "transcript")
+        XCTAssertEqual(try store.workerTerminalArchive(dispatchID: dispatchID)?.kind,
+                       .transcriptPin)
+
+        let read = await call("worker-read", ["dispatch": .string(dispatchID)])
+        XCTAssertTrue(read.ok, String(describing: read.error))
+        XCTAssertEqual(read.result?.field("source")?.stringValue, "transcript")
+        XCTAssertEqual(read.result?.field("content")?.stringValue,
+                       #"{"type":"assistant","message":"pinned answer"}"#)
+        XCTAssertEqual(read.result?.field("transcriptPath")?.stringValue,
+                       "/tmp/claude/session.jsonl")
+    }
+
+    func testClaudeTranscriptResolverUsesHookSessionAndEncodedCWD() async throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("orchard-transcript-\(UUID().uuidString)", isDirectory: true)
+        let summary = try await terminalHarness.service.create(
+            worktreeId: "repo::/tmp/project", cwd: "/tmp/my project",
+            engineID: "claude-code", prompt: "", title: "Claude")
+        try await terminalHarness.service.applyHookStatus(
+            handle: summary.handle,
+            fields: HookStatusFields(providerSessionID: "session-123"))
+        let directory = home.appendingPathComponent(
+            ".claude/projects/-tmp-my project", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory,
+                                                withIntermediateDirectories: true)
+        let transcript = directory.appendingPathComponent("session-123.jsonl")
+        try Data("one\ntwo\nthree\n".utf8).write(to: transcript)
+
+        let resolution = await WorkerRuntimeContext.resolveClaudeTranscript(
+            terminalHarness.service, handle: summary.handle,
+            maximumBytes: 8, homeDirectory: home)
+        XCTAssertEqual(resolution, .resolved(
+            content: "three\n", path: transcript.path, truncated: true))
     }
 
     func testReleaseRefusesUnsettledWorker() async throws {
@@ -459,7 +525,8 @@ final class WorkerVerbTests: XCTestCase {
         XCTAssertTrue(read.ok, String(describing: read.error))
         XCTAssertEqual(read.result?.field("archived")?.boolValue, false)
         XCTAssertEqual(read.result?.field("source")?.stringValue, "terminal")
-        XCTAssertEqual(read.result?.field("fallbackReason")?.stringValue, "transcript_unavailable")
+        XCTAssertEqual(read.result?.field("fallbackReason")?.stringValue,
+                       "provider_transcript_not_pinned")
         let lines = read.result?.field("lines")?.arrayValue ?? []
         XCTAssertLessThanOrEqual(lines.count, 3)
         XCTAssertNotNil(read.result?.field("latestCursor"))
@@ -467,7 +534,10 @@ final class WorkerVerbTests: XCTestCase {
         let transcript = await call("worker-read", [
             "dispatch": .string(dispatchID), "source": .string("transcript"),
         ])
-        XCTAssertEqual(transcript.error?.code, "transcript_required")
+        XCTAssertTrue(transcript.ok, String(describing: transcript.error))
+        XCTAssertEqual(transcript.result?.field("source")?.stringValue, "terminal")
+        XCTAssertEqual(transcript.result?.field("fallbackReason")?.stringValue,
+                       "provider_transcript_not_pinned")
     }
 
     // MARK: - worker-show

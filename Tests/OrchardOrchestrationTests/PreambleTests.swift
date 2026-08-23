@@ -99,4 +99,14 @@ final class PreambleTests: XCTestCase {
         XCTAssertTrue(text.contains("orchard-dev check --terminal term_worker"))
         XCTAssertFalse(text.contains("orchard send "))
     }
+
+    func testGuideAndPreambleShareWorkerDutiesSource() {
+        let preamble = DispatchPreamble.build(params())
+        XCTAssertTrue(preamble.contains(OrchestrationContract.workerDuties))
+        XCTAssertTrue(OrchestrationContract.coordinatorGuide.contains(
+            OrchestrationContract.workerDuties))
+        XCTAssertTrue(OrchestrationContract.coordinatorGuide.contains("worker-start` receipt"))
+        XCTAssertTrue(OrchestrationContract.coordinatorGuide.contains("check --ack"))
+        XCTAssertEqual(OrchestrationContract.topics, ["orchestration"])
+    }
 }

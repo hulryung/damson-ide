@@ -11,19 +11,25 @@ public struct HookStatusFields: Equatable, Sendable {
     public var lastAssistantMessage: String?
     public var toolName: String?
     public var toolInput: String?
+    /// Provider-owned conversation identifier. Claude lifecycle hooks call this
+    /// `session_id`; retaining it lets orchestration prove and pin the exact JSONL.
+    public var providerSessionID: String?
 
     public init(prompt: String? = nil, lastAssistantMessage: String? = nil,
-                toolName: String? = nil, toolInput: String? = nil) {
+                toolName: String? = nil, toolInput: String? = nil,
+                providerSessionID: String? = nil) {
         self.prompt = prompt
         self.lastAssistantMessage = lastAssistantMessage
         self.toolName = toolName
         self.toolInput = toolInput
+        self.providerSessionID = providerSessionID
     }
 
     /// True when at least one optional field is present. Empty payloads are a no-op
     /// so a keyword-only OSC (`9999;idle`) does not look like new chat evidence.
     public var hasValues: Bool {
         prompt != nil || lastAssistantMessage != nil || toolName != nil || toolInput != nil
+            || providerSessionID != nil
     }
 
     /// Overlay non-nil incoming fields. Omission means "no new info", not "clear"
@@ -36,6 +42,9 @@ public struct HookStatusFields: Equatable, Sendable {
         }
         if let toolName = other.toolName { self.toolName = toolName }
         if let toolInput = other.toolInput { self.toolInput = toolInput }
+        if let providerSessionID = other.providerSessionID {
+            self.providerSessionID = providerSessionID
+        }
     }
 
     /// Parse a hook POST body or OSC 9999 JSON payload. Unknown / non-object JSON
@@ -60,7 +69,10 @@ public struct HookStatusFields: Equatable, Sendable {
             toolName: clip(firstString(object, keys: ["toolName", "tool_name"]),
                            max: agentStatusToolNameMax),
             toolInput: clip(firstString(object, keys: ["toolInput", "tool_input"]),
-                            max: agentStatusToolInputMax))
+                            max: agentStatusToolInputMax),
+            providerSessionID: clip(
+                firstString(object, keys: ["session_id", "sessionId", "provider_session_id"]),
+                max: agentStatusProviderSessionIDMax))
     }
 }
 
@@ -69,6 +81,7 @@ public struct HookStatusFields: Equatable, Sendable {
 public let agentStatusAssistantMessageMax = 8_000
 public let agentStatusToolNameMax = 60
 public let agentStatusToolInputMax = 160
+public let agentStatusProviderSessionIDMax = 256
 
 private func firstString(_ object: [String: Any], keys: [String]) -> String? {
     for key in keys {

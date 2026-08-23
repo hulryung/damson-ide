@@ -346,6 +346,12 @@ public final class TerminalService {
         try registry.resolve(handle).statusSnapshot()
     }
 
+    /// Spawn cwd for provider transcript resolution. Kept behind the terminal
+    /// service so runtime callers do not reach into registry records.
+    public func workingDirectory(handle: String) throws -> String? {
+        try registry.resolve(handle).spec.cwd
+    }
+
     /// A live stream of status snapshots for one terminal. Emits the current snapshot
     /// immediately (the never-cleared last status), then one per state update; finishes
     /// when the terminal is closed.

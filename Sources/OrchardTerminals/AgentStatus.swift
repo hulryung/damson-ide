@@ -89,6 +89,8 @@ public struct AgentStatusSnapshot: Codable, Equatable, Sendable {
     public let lastCompletedAssistantMessage: String?
     /// Tool the agent reported it is currently using, when the hook carried one.
     public let toolName: String?
+    /// Exact provider session reported by the latest hook (for transcript pinning).
+    public let providerSessionID: String?
 
     public init(state: AgentStatusState, prompt: String, updatedAt: Double,
                 stateStartedAt: Double, agentType: String, paneKey: String,
@@ -98,7 +100,7 @@ public struct AgentStatusSnapshot: Codable, Equatable, Sendable {
                 stateHistory: [AgentStateHistoryRecord] = [],
                 lastAssistantMessage: String? = nil,
                 lastCompletedAssistantMessage: String? = nil,
-                toolName: String? = nil) {
+                toolName: String? = nil, providerSessionID: String? = nil) {
         self.state = state
         self.prompt = prompt
         self.updatedAt = updatedAt
@@ -114,6 +116,7 @@ public struct AgentStatusSnapshot: Codable, Equatable, Sendable {
         self.lastAssistantMessage = lastAssistantMessage
         self.lastCompletedAssistantMessage = lastCompletedAssistantMessage
         self.toolName = toolName
+        self.providerSessionID = providerSessionID
     }
 }
 
@@ -140,6 +143,7 @@ final class AgentStatusTracker {
     var lastAssistantMessage = ""
     var lastCompletedAssistantMessage = ""
     var lastToolName = ""
+    var providerSessionID = ""
 
     /// Fold hook/OSC chat fields into the factual record. Returns true when a
     /// field actually changed so callers can publish even without a state flip —
@@ -162,6 +166,10 @@ final class AgentStatusTracker {
         }
         if let tool = fields.toolName, tool != lastToolName {
             lastToolName = tool
+            changed = true
+        }
+        if let sessionID = fields.providerSessionID, sessionID != providerSessionID {
+            providerSessionID = sessionID
             changed = true
         }
         if changed { updatedAt = Date() }
@@ -207,6 +215,7 @@ final class AgentStatusTracker {
             lastAssistantMessage: lastAssistantMessage.isEmpty ? nil : lastAssistantMessage,
             lastCompletedAssistantMessage: lastCompletedAssistantMessage.isEmpty
                 ? nil : lastCompletedAssistantMessage,
-            toolName: lastToolName.isEmpty ? nil : lastToolName)
+            toolName: lastToolName.isEmpty ? nil : lastToolName,
+            providerSessionID: providerSessionID.isEmpty ? nil : providerSessionID)
     }
 }

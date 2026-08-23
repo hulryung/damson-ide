@@ -92,6 +92,8 @@ public enum DispatchPreamble {
         You talk to the coordinator only through the CLI commands below. Do not use
         Slack, GitHub comments, or any other channel to reach a human during the run.
 
+        \(OrchestrationContract.workerDuties)
+
         === CLI COMMANDS ===
 
           # Report the terminal task outcome (REQUIRED exactly once).
