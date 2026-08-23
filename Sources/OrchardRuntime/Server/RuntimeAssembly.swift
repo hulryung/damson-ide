@@ -92,10 +92,11 @@ public final class OrchardRuntimeHost {
 
         // Browser workspaces are keyed by worktree path; CLI selectors resolve
         // through the workspace registry when possible, else pass through raw.
+        // The data store carries T21 session profiles + per-workspace bindings.
         let workspaceService = self.workspaceService
         self.browserService = BrowserService(resolver: { selector in
             await MainActor.run { (try? workspaceService.show(selector: selector))?.path }
-        })
+        }, store: dataStore)
 
         let workerRuntime = WorkerRuntimeContext.live(cliCommand: cliCommand,
                                                       workspaces: workspaceService,

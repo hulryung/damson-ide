@@ -12,7 +12,10 @@ import Foundation
 public protocol BrowserWebHost: AnyObject, Sendable {
     /// Create the backing web view for a new page (offscreen if the pane for
     /// `workspace` is not open — CLI verbs must work before any UI exists).
-    func createPage(workspace: String, pageId: String) async throws
+    /// `profile` is the workspace's bound session profile: the host derives the
+    /// web view's website data store from it (default scope ⇒ the shared default
+    /// store; isolated ⇒ a persistent store keyed by the profile id).
+    func createPage(workspace: String, pageId: String, profile: BrowserProfile) async throws
     func closePage(pageId: String) async
     /// Make the page the visibly selected tab if its pane is showing.
     func showPage(pageId: String) async

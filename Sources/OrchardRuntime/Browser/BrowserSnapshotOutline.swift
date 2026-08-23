@@ -11,6 +11,23 @@ struct BrowserWalkerPayload: Codable, Equatable, Sendable {
         var value: String
         /// Index into the page-side `window.__orchardRefs.els`; -1 = not interactive.
         var i: Int
+        /// Owning frame id ("f1"…) for nodes inside same-origin subframes; nil =
+        /// main frame. On an `iframe` boundary node it names the frame whose
+        /// children follow.
+        var f: String?
+        /// True on an opaque cross-origin frame node (name = the frame's origin).
+        var x: Bool?
+
+        init(d: Int, role: String, name: String, value: String, i: Int,
+             f: String? = nil, x: Bool? = nil) {
+            self.d = d
+            self.role = role
+            self.name = name
+            self.value = value
+            self.i = i
+            self.f = f
+            self.x = x
+        }
     }
 
     var title: String
@@ -57,11 +74,15 @@ enum BrowserSnapshotOutline {
             if !node.value.isEmpty {
                 line += " (value: \(node.value))"
             }
+            if node.x == true {
+                line += " (cross-origin)"
+            }
             if node.i >= 0 {
                 counter += 1
                 let ref = "@e\(counter)"
                 refs[ref] = BrowserSnapshotRef(ref: ref, index: node.i,
-                                               role: node.role, name: node.name)
+                                               role: node.role, name: node.name,
+                                               frame: node.f ?? "")
                 line += " [\(ref)]"
             }
             lines.append(line)

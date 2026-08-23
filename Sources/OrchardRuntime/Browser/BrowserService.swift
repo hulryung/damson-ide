@@ -54,8 +54,19 @@ public actor BrowserService {
     private var workspaces: [String: BrowserWorkspace] = [:]
     private var pages: [String: PageRecord] = [:]
 
-    public init(resolver: WorkspaceResolver? = nil) {
+    // T21 session profiles. Working state lives here (the actor); the store —
+    // when given one — is the orchard-data.json write-through, hydrated once at
+    // init. Without a store the profiles work in-memory (tests, headless).
+    private let store: OrchardDataStore?
+    private var profiles: [BrowserProfile]
+    private var profileBindings: [String: String]
+
+    public init(resolver: WorkspaceResolver? = nil, store: OrchardDataStore? = nil) {
         self.resolver = resolver
+        self.store = store
+        let data = store?.load()
+        self.profiles = data?.browserProfiles ?? []
+        self.profileBindings = data?.browserWorkspaceProfiles ?? [:]
     }
 
     public func attach(host: any BrowserWebHost) {
@@ -274,6 +285,83 @@ public actor BrowserService {
         return await refreshedPage(pageId)
     }
 
+    // MARK: - Session profiles (T21)
+
+    /// Every selectable profile: the built-in default first, then user-created
+    /// isolated profiles in creation order.
+    public func listProfiles() -> [BrowserProfile] {
+        [.defaultProfile] + profiles
+    }
+
+    /// Mint a new isolated profile. Labels must be non-empty and unique (the
+    /// built-in default's label included) because `profile set` accepts labels.
+    @discardableResult
+    public func createProfile(label raw: String) throws -> BrowserProfile {
+        let label = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !label.isEmpty else {
+            throw BrowserError("invalid_argument", "profile label must not be empty")
+        }
+        guard !listProfiles().contains(where: { $0.label.caseInsensitiveCompare(label) == .orderedSame }) else {
+            throw BrowserError.profileExists(label)
+        }
+        let id = "pf_" + UUID().uuidString.lowercased()
+            .replacingOccurrences(of: "-", with: "").prefix(12)
+        let profile = BrowserProfile(id: String(id), label: label, scope: .isolated)
+        profiles.append(profile)
+        try persistProfiles()
+        return profile
+    }
+
+    /// Bind a workspace to a profile (by id or unique label). The binding is
+    /// persisted and applies to web views created after it: WebKit cannot swap a
+    /// live web view's data store, so already-open tabs keep the store they were
+    /// created with until they are closed and reopened.
+    @discardableResult
+    public func bindProfile(workspace selector: String, profile profileSelector: String) async throws
+        -> (workspace: String, profile: BrowserProfile) {
+        guard let profile = resolveProfile(profileSelector) else {
+            throw BrowserError.profileNotFound(profileSelector)
+        }
+        let key = await resolveKey(selector)
+        if profile.id == BrowserProfile.defaultProfile.id {
+            profileBindings.removeValue(forKey: key)
+        } else {
+            profileBindings[key] = profile.id
+        }
+        try persistProfiles()
+        return (key, profile)
+    }
+
+    /// The workspace's bound profile; the built-in default when unset (or when a
+    /// stored binding points at a profile that no longer exists).
+    public func boundProfile(workspace selector: String) async -> (workspace: String, profile: BrowserProfile) {
+        let key = await resolveKey(selector)
+        return (key, profileForKey(key))
+    }
+
+    private func profileForKey(_ key: String) -> BrowserProfile {
+        guard let id = profileBindings[key],
+              let profile = profiles.first(where: { $0.id == id }) else {
+            return .defaultProfile
+        }
+        return profile
+    }
+
+    private func resolveProfile(_ selector: String) -> BrowserProfile? {
+        listProfiles().first { $0.id == selector }
+            ?? listProfiles().first { $0.label.caseInsensitiveCompare(selector) == .orderedSame }
+    }
+
+    private func persistProfiles() throws {
+        guard let store else { return }
+        let profiles = profiles
+        let bindings = profileBindings
+        try store.modify {
+            $0.browserProfiles = profiles
+            $0.browserWorkspaceProfiles = bindings
+        }
+    }
+
     // MARK: - Host callbacks
 
     /// The host reports every committed navigation — including link clicks and
@@ -292,6 +380,16 @@ public actor BrowserService {
     public func pageDidUpdate(pageId: String, state: BrowserPageState) {
         guard var record = pages[pageId] else { return }
         record.page = Self.merge(record.page, state: state)
+        pages[pageId] = record
+    }
+
+    /// A subframe of the page navigated (the host sees it via the policy
+    /// delegate; main-frame commits arrive as `pageDidCommitNavigation`). The
+    /// outline may now describe a dead frame, so refs die exactly like on a
+    /// top-level navigation — page facts (url/title) are untouched.
+    public func subframeDidNavigate(pageId: String) {
+        guard var record = pages[pageId] else { return }
+        record.snapshot = nil
         pages[pageId] = record
     }
 
@@ -345,11 +443,12 @@ public actor BrowserService {
     }
 
     /// Mint the page id and register the model only after the host succeeds, so
-    /// a failed web-view creation leaves no phantom tab.
+    /// a failed web-view creation leaves no phantom tab. The workspace's bound
+    /// profile rides along so the host builds the web view on the right store.
     private func createPage(key: String) async throws -> String {
         let host = try requireHost()
         let id = "pg_" + UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "").prefix(12)
-        try await host.createPage(workspace: key, pageId: id)
+        try await host.createPage(workspace: key, pageId: id, profile: profileForKey(key))
         var ws = workspaces[key] ?? BrowserWorkspace(key: key)
         ws.pageIds.append(id)
         if ws.activePageId == nil { ws.activePageId = id }
