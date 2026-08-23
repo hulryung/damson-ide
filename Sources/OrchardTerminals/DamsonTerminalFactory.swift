@@ -51,7 +51,10 @@ public enum DamsonTerminalFactory {
                                  prompt: spec.prompt,
                                  engineID: engine.id,
                                  baseRepoPath: "")
-            config.argv = EngineLaunch.argv(
+            // A spec-supplied argv wins: a remote agent pane is a Claude Code pane for
+            // readiness and sends, but its PTY child is `ssh`, and the engine cannot
+            // describe that launch (T39).
+            config.argv = spec.launchArgv ?? EngineLaunch.argv(
                 engine: engine, task: task,
                 worktree: URL(fileURLWithPath: cwd ?? FileManager.default.currentDirectoryPath))
             // Engine env shaping first (e.g. Claude's inherited-session-marker

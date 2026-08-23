@@ -122,15 +122,23 @@ func formatHuman(method: String, result: JSONValue?) -> String {
 func formatTerminalList(_ result: JSONValue?) -> String {
     let rows = result?.objectValue?["terminals"]?.arrayValue ?? []
     if rows.isEmpty { return "No terminals found." }
-    let headings = ["TITLE", "HANDLE", "WORKTREE", "STATE"]
+    let headings = ["TITLE", "HANDLE", "WORKTREE", "HOST", "STATE"]
     let values = rows.map { value -> [String] in
         let row = value.objectValue ?? [:]
         let connected = row["connected"]?.boolValue == true
+        var state = row["agentState"]?.stringValue ?? (connected ? "running" : "exited")
+        // A remote agent pane whose hook tunnel could not be established reads its state
+        // off the screen. Saying so here is the point: an unqualified `idle` in a listing
+        // is what a coordinator dispatches into (T39).
+        if row["statusDetection"]?.objectValue?["mode"]?.stringValue == "fingerprint-only" {
+            state += " (fingerprint-only)"
+        }
         return [
             row["title"]?.stringValue ?? row["engine"]?.stringValue ?? "",
             row["handle"]?.stringValue ?? "",
             row["worktreeId"]?.stringValue ?? "-",
-            row["agentState"]?.stringValue ?? (connected ? "running" : "exited"),
+            row["executionHostId"]?.stringValue ?? "local",
+            state,
         ]
     }
     let widths = headings.indices.map { index in

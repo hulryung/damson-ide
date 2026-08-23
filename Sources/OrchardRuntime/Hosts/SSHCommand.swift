@@ -45,18 +45,37 @@ public enum SSHCommand {
             + [destination(for: host), "true"]
     }
 
-    /// `ssh -tt <dest> [command]` — the remote shell PTY.
+    /// `ssh -tt [options] <dest> [command]` — the remote shell PTY.
     ///
     /// `-tt` forces a remote TTY even though `ssh`'s own stdin is already a PTY the
     /// local pane owns; without it the far side runs without a controlling terminal and
     /// no interactive shell or agent TUI can draw. With no command, this is a remote
     /// login shell.
-    public static func remoteShellArgv(for host: HostRecord, command: String? = nil) -> [String] {
-        var argv = [binary, "-tt"] + portArguments(for: host) + [destination(for: host)]
+    ///
+    /// `options` is where a remote agent pane's reverse tunnel goes (T39). It carries
+    /// no `ExitOnForwardFailure`: a pane whose tunnel loses its port race must keep
+    /// running and degrade to fingerprint-only status, not die at spawn. Killing an
+    /// agent because Orchard could not watch it is the wrong trade.
+    public static func remoteShellArgv(for host: HostRecord, command: String? = nil,
+                                       options: [String] = []) -> [String] {
+        var argv = [binary, "-tt"] + options + portArguments(for: host)
+            + [destination(for: host)]
         if let command, !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             argv.append(command)
         }
         return argv
+    }
+
+    /// `-R <remotePort>:127.0.0.1:<localPort>` — the reverse tunnel that carries a
+    /// remote agent's hook POSTs back to this machine's `HookServer`.
+    ///
+    /// The remote end binds the *remote* loopback, so the hook command a remote agent
+    /// runs is byte-identical to a local one's (`curl http://127.0.0.1:<port>/hook…`)
+    /// and nothing on the far side is exposed to that host's network. `remotePort: 0`
+    /// asks OpenSSH to let sshd choose, which it then reports on stderr — see
+    /// `RemoteHookTunnel.parseAllocatedPort`.
+    public static func reverseTunnelArguments(remotePort: UInt16, localPort: UInt16) -> [String] {
+        ["-R", "\(remotePort):127.0.0.1:\(localPort)"]
     }
 
     /// `ssh -o BatchMode=yes -o ConnectTimeout=<n> [-p <port>] <dest> <command>` — one
@@ -67,10 +86,12 @@ public enum SSHCommand {
     /// this is a captured command, not a pane, and allocating a TTY would fold stderr
     /// into stdout and echo the output back at us.
     public static func commandArgv(for host: HostRecord, command: String,
-                                   connectTimeoutSeconds: Int = 5) -> [String] {
+                                   connectTimeoutSeconds: Int = 5,
+                                   options: [String] = []) -> [String] {
         [binary,
          "-o", "BatchMode=yes",
          "-o", "ConnectTimeout=\(connectTimeoutSeconds)"]
+            + options
             + portArguments(for: host)
             + [destination(for: host), command]
     }
@@ -88,8 +109,10 @@ public enum SSHCommand {
 
     /// The remote-shell argv as one shell command line, for the launch paths that take
     /// a command string (the `shell` engine's prompt-as-command-line contract).
-    public static func remoteShellCommandLine(for host: HostRecord, command: String? = nil) -> String {
-        remoteShellArgv(for: host, command: command).map(shellQuote).joined(separator: " ")
+    public static func remoteShellCommandLine(for host: HostRecord, command: String? = nil,
+                                              options: [String] = []) -> String {
+        remoteShellArgv(for: host, command: command, options: options)
+            .map(shellQuote).joined(separator: " ")
     }
 
     public static func shellQuote(_ value: String) -> String {

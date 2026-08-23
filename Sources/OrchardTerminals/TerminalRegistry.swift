@@ -148,7 +148,8 @@ public final class TerminalRecord {
             writable: connected,
             lastOutputAt: lastOutputAt.map { $0.timeIntervalSince1970 * 1000 },
             preview: buffer.previewTail,
-            agentState: isRunningAgent ? tracker.currentState.runtimeProjection : nil)
+            agentState: isRunningAgent ? tracker.currentState.runtimeProjection : nil,
+            statusDetection: spec.statusDetection)
     }
 
     func statusSnapshot() -> AgentStatusSnapshot {

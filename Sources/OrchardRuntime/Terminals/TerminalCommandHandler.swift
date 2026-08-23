@@ -20,12 +20,18 @@ public struct TerminalCommandHandler: CommandHandler, @unchecked Sendable {
     private let service: TerminalService
     private let workspaces: WorkspaceService?
     private let hosts: HostRegistry?
+    private let hookChannel: AgentHookChannel?
+    /// Injected so tests can drive the remote agent path with a scripted `ssh`.
+    private let hostRunner: HostCommandRunner
 
     public init(service: TerminalService, workspaces: WorkspaceService? = nil,
-                hosts: HostRegistry? = nil) {
+                hosts: HostRegistry? = nil, hookChannel: AgentHookChannel? = nil,
+                hostRunner: HostCommandRunner = ProcessHostCommandRunner()) {
         self.service = service
         self.workspaces = workspaces
         self.hosts = hosts
+        self.hookChannel = hookChannel
+        self.hostRunner = hostRunner
     }
 
     public var verbs: [String] {
@@ -69,7 +75,11 @@ public struct TerminalCommandHandler: CommandHandler, @unchecked Sendable {
 
         case "terminal-create":
             let resolved = try await resolvedWorktree(params)
-            let engineID = params["engine"]?.stringValue ?? "shell"
+            // Canonical first: `--engine Claude` and `--engine claude` must take the
+            // same fork as `claude-code`, and an unknown id must reach the engine
+            // registry's own typed refusal rather than being read as "not the shell".
+            let requestedEngine = params["engine"]?.stringValue ?? "shell"
+            let engineID = AgentEngineRegistry.canonicalID(requestedEngine) ?? requestedEngine
             let prompt = params["prompt"]?.stringValue ?? ""
             var host = try executionHost(params)
             // T32: a pane opened in a remote worktree inherits that workspace's host.
@@ -91,18 +101,20 @@ public struct TerminalCommandHandler: CommandHandler, @unchecked Sendable {
                         "worktree \(workspace.id) lives on \(workspaceHost.rawValue), "
                             + "not \(host.rawValue)")
                 }
-                // Agents on remote files are stage 3 (their argv, config, hooks and
-                // transcript all assume a local filesystem), so this refuses rather than
-                // launching one here under the remote host's name.
-                guard engineID == "shell" else {
-                    throw RemoteHostError.unsupported(
-                        "the '\(engineID)' agent cannot run on \(host.rawValue) yet; "
-                            + "open a remote shell in the worktree instead")
-                }
                 let record = try requireHosts().require(host: host)
                 guard let path = workspace.path, !path.isEmpty else {
                     throw TerminalServiceError.invalidArgument(
                         "worktree \(workspace.id) has no remote path to open")
+                }
+                let title = params["title"]?.stringValue
+                    ?? (path.split(separator: "/").last.map(String.init) ?? record.name)
+                // T39: an agent engine in a remote worktree launches the agent on the
+                // far side, with its status carried home over an SSH reverse tunnel.
+                if engineID != "shell" {
+                    let summary = try await createRemoteAgent(
+                        engineID: engineID, hostRecord: record, workspaceID: workspace.id,
+                        path: path, title: title, executionHostId: host.rawValue)
+                    return try encodeJSON(summary)
                 }
                 // `cd` happens on the far side. The local PTY's own cwd is only where
                 // `ssh` is launched from and is deliberately left alone: a remote path
@@ -116,8 +128,7 @@ public struct TerminalCommandHandler: CommandHandler, @unchecked Sendable {
                     cwd: nil,
                     engineID: "shell",
                     prompt: SSHCommand.remoteShellCommandLine(for: record, command: remoteCommand),
-                    title: params["title"]?.stringValue
-                        ?? (path.split(separator: "/").last.map(String.init) ?? record.name),
+                    title: title,
                     executionHostId: host.rawValue)
                 return try encodeJSON(summary)
             }
@@ -131,12 +142,14 @@ public struct TerminalCommandHandler: CommandHandler, @unchecked Sendable {
                 return try encodeJSON(summary)
             }
             let record = try requireHosts().require(host: host)
-            // Remote agents are a later stage: an agent engine's argv, hooks, config
-            // and transcript all assume a local filesystem, and pretending otherwise
-            // would launch the agent on this machine under a remote host's name.
+            // A remote agent needs a remote *worktree*: its hook config is written into
+            // one, and an agent with no repo to work in is not the feature. `--host`
+            // alone names a connection, not a workspace, so this stays refused (T39
+            // implements the `--worktree <remote id> --engine <agent>` spelling).
             guard engineID == "shell" else {
                 throw TerminalServiceError.notImplemented(
-                    "running the '\(engineID)' agent on \(host.rawValue)")
+                    "running the '\(engineID)' agent on \(host.rawValue) without a "
+                        + "remote worktree — pass --worktree <remote worktree id>")
             }
             // The worktree selector still resolves locally: a remote pane has no local
             // workspace, so `cwd` is where `ssh` is launched from, not where the work
@@ -197,6 +210,49 @@ public struct TerminalCommandHandler: CommandHandler, @unchecked Sendable {
         default:
             throw TerminalServiceError.invalidArgument("unrouted verb '\(request.method)'")
         }
+    }
+
+    /// Open an agent pane whose agent runs on `hostRecord`, in the remote worktree at
+    /// `path` (docs/design/remote-hosts.md stage 3).
+    ///
+    /// The pane is a *local* PTY whose child is `ssh`, and whose engine is the agent's:
+    /// readiness fingerprints, `wait --for tui-idle`, verified sends and the agent-state
+    /// projection all work on it unchanged. What differs is where status comes from —
+    /// hooks reach us only if the reverse tunnel and the remote config both succeeded —
+    /// and that answer is recorded on the summary rather than assumed.
+    ///
+    /// The hook token is minted here, before the PTY exists, because the remote config
+    /// has to carry it and Claude Code reads that config at startup.
+    private func createRemoteAgent(engineID: String, hostRecord: HostRecord,
+                                   workspaceID: String, path: String, title: String,
+                                   executionHostId: String) async throws -> TerminalSummary {
+        guard let engine = AgentEngineRegistry.engine(id: engineID) else {
+            throw TerminalServiceError.unknownEngine(engineID)
+        }
+        let remote = RemoteAgentService(host: hostRecord, runner: hostRunner)
+        let token = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+        let plan = try await remote.plan(
+            engine: engine, worktreePath: path, hookToken: token,
+            localHookPort: hookChannel?.localHookPort ?? 0)
+        return try await service.create(
+            worktreeId: workspaceID,
+            // The local PTY's cwd is only where `ssh` is launched from; the remote
+            // command does its own `cd`. Handing a remote path to a local chdir is the
+            // one mistake that silently relocates the work.
+            cwd: nil,
+            engineID: engine.id,
+            // Empty, and it must be: for a `.typeWhenIdle` engine the prompt is what
+            // gets *typed into the agent* on its first idle, and typing an `ssh`
+            // command line into Claude Code is not a launch, it is a message. The
+            // invocation lives in `launchArgv` instead, which a respawn carries — the
+            // §4 rule (a remote pane keeps its launch command) held by the field that
+            // actually launches it rather than by one that would also be typed.
+            prompt: "",
+            title: title,
+            executionHostId: executionHostId,
+            launchArgv: plan.argv,
+            hookToken: plan.hookToken,
+            statusDetection: plan.detection)
     }
 
     /// `--host` defaults to `local`. An unparseable value is rejected rather than

@@ -67,6 +67,12 @@ public protocol AgentEngine {
     /// Defaults to `id`; engines whose id differs from the keyword override it.
     var agentType: String { get }
 
+    /// How this engine launches on a remote host, or `nil` when Orchard does not know
+    /// how to run it there (T39). Separate from `launchArgv` because that resolves an
+    /// absolute path on *this* filesystem, which is not a fact about the far side —
+    /// see `RemoteEngineLaunch`.
+    var remoteLaunch: RemoteEngineLaunch? { get }
+
     /// Additional spellings `AgentEngineRegistry.engine(id:)` accepts for this engine.
     /// T35 (dogfood-1 finding 1): every caller-facing surface — `worker-start --agent`,
     /// `terminal create --engine` — advertises the agent-type keyword ("claude"), so the
@@ -87,6 +93,7 @@ public extension AgentEngine {
     func hookSignal(event: String, body: Data) -> AgentRuntimeState? { nil }
     var agentType: String { id }
     var aliases: [String] { agentType == id ? [] : [agentType] }
+    var remoteLaunch: RemoteEngineLaunch? { nil }
 }
 
 /// Built-in engine registry. Keyed by `id`. UI/controller resolve engines from here.

@@ -26,11 +26,27 @@ public struct TerminalCreateSpec: Sendable {
     /// consumer immediately reflowed away from.
     public let initialCols: Int?
     public let initialRows: Int?
+    /// Verbatim argv for this pane's PTY child, bypassing the engine's own
+    /// `launchArgv`. Set only where the engine cannot describe its own launch: a
+    /// remote agent pane runs `ssh -tt … <agent>` locally while *being* a Claude Code
+    /// pane for readiness, sends and status (T39). nil — the normal case — means the
+    /// factory builds argv from the engine as always.
+    public let launchArgv: [String]?
+    /// Pre-minted lifecycle-hook token, so a hook config can be written *before* the
+    /// PTY exists. A remote agent's config has to be on the far side before the agent
+    /// reads it at startup, which is strictly earlier than the pane's `AgentSession`
+    /// would mint one. nil mints per session, as before.
+    public let hookToken: String?
+    /// What this pane's agent status can actually be read from, when that differs from
+    /// the default for its engine. nil = the default; see `TerminalStatusDetection`.
+    public let statusDetection: TerminalStatusDetection?
 
     public init(handle: String, paneKey: String, worktreeId: String?, cwd: String?,
                 engineID: String, prompt: String, title: String?,
                 executionHostId: String = "local",
-                initialCols: Int? = nil, initialRows: Int? = nil) {
+                initialCols: Int? = nil, initialRows: Int? = nil,
+                launchArgv: [String]? = nil, hookToken: String? = nil,
+                statusDetection: TerminalStatusDetection? = nil) {
         self.handle = handle
         self.paneKey = paneKey
         self.worktreeId = worktreeId
@@ -41,6 +57,52 @@ public struct TerminalCreateSpec: Sendable {
         self.executionHostId = executionHostId
         self.initialCols = initialCols
         self.initialRows = initialRows
+        self.launchArgv = launchArgv
+        self.hookToken = hookToken
+        self.statusDetection = statusDetection
+    }
+}
+
+/// Where one pane's agent status comes from, and what it therefore cannot report.
+///
+/// Local agent panes read status from two tiers at once: lifecycle hooks the CLI POSTs
+/// to a loopback server (structured, authoritative) and screen fingerprints (a
+/// maintained guess). A remote agent pane only gets the first tier if an SSH reverse
+/// tunnel carries the hook channel back, and tunnels fail for ordinary reasons — a
+/// sshd with `AllowTcpForwarding no`, every candidate port taken, a config write that
+/// could not reach the host.
+///
+/// When that happens the pane still runs; it just knows less. This type is how it says
+/// so, instead of presenting a fingerprint-only guess with the same confidence as a
+/// hook-attested fact. `limitation` is one sentence, already written for a human.
+public struct TerminalStatusDetection: Codable, Equatable, Sendable {
+    public enum Mode: String, Codable, Sendable {
+        /// Lifecycle hooks reach us; fingerprints still back them up.
+        case hooks
+        /// Screen fingerprints only — no hook channel to this agent.
+        case fingerprintOnly = "fingerprint-only"
+    }
+
+    public let mode: Mode
+    /// The remote listen port of the reverse tunnel carrying the hook channel, when
+    /// one does. Recorded so an operator can see (and, on the host, verify) it.
+    public let tunnelPort: Int?
+    /// What this pane cannot report, and why. nil when nothing is lost.
+    public let limitation: String?
+
+    public init(mode: Mode, tunnelPort: Int? = nil, limitation: String? = nil) {
+        self.mode = mode
+        self.tunnelPort = tunnelPort
+        self.limitation = limitation
+    }
+
+    public static func hooks(tunnelPort: Int? = nil) -> TerminalStatusDetection {
+        TerminalStatusDetection(mode: .hooks, tunnelPort: tunnelPort, limitation: nil)
+    }
+
+    public static func fingerprintOnly(_ limitation: String) -> TerminalStatusDetection {
+        TerminalStatusDetection(mode: .fingerprintOnly, tunnelPort: nil,
+                                limitation: limitation)
     }
 }
 
@@ -79,6 +141,11 @@ public struct TerminalSummary: Codable, Equatable, Sendable {
     public let preview: String
     /// The runtime agent-state projection (`nil` = no live agent).
     public let agentState: AgentRuntimeProjection?
+    /// Present when this pane's status detection differs from the default for its
+    /// engine — today, a remote agent pane whose hook tunnel could not be established
+    /// (T39). Carries the limitation in words, so a coordinator reading the summary
+    /// learns what the pane cannot tell it before it trusts an `idle`.
+    public let statusDetection: TerminalStatusDetection?
 }
 
 /// `terminal read` result. `source` says which question was answered: `stream` is the

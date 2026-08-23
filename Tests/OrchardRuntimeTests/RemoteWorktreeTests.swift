@@ -111,7 +111,7 @@ final class RemoteWorktreeTests: XCTestCase {
         registry.register(RepoRegistryHandler(service: service))
         registry.register(WorkspaceCommandHandler(service: service))
         registry.register(TerminalCommandHandler(service: terminals, workspaces: service,
-                                                 hosts: hosts))
+                                                 hosts: hosts, hostRunner: runner))
         registry.register(FileCommandHandler(workspaces: service))
         server = InMemoryRuntimeServer(registry: registry, runtimeId: "rt_remote")
     }
@@ -402,14 +402,24 @@ final class RemoteWorktreeTests: XCTestCase {
         XCTAssertTrue(spec.prompt.contains("exec \"${SHELL:-/bin/sh}\" -l"), spec.prompt)
     }
 
-    func testTerminalInARemoteWorktreeRefusesAnAgentEngine() async throws {
+    /// T39 replaced T32's refusal here: an agent engine in a remote worktree now
+    /// launches the agent *there*. With no hook channel installed in this fixture the
+    /// pane degrades typed to fingerprint-only rather than claiming a channel it does
+    /// not have — the behaviour T39's own suite pins in both directions.
+    func testTerminalInARemoteWorktreeLaunchesTheAgentOnTheFarSide() async throws {
         let repo = try await addRemoteRepo()
         _ = await call("worktree-list", ["repo": .string(repo.id)])
         let created = await call("terminal-create", [
             "worktree": .string("\(repo.id)::/home/ci/Orchard/worktrees/orchard/apricot"),
             "engine": .string("claude-code")])
-        XCTAssertEqual(created.error?.code, "remote_unsupported")
-        XCTAssertTrue(terminalSpecs.isEmpty)
+        XCTAssertTrue(created.ok, String(describing: created.error))
+        XCTAssertEqual(created.result?.objectValue?["engine"]?.stringValue, "claude-code")
+        XCTAssertEqual(
+            created.result?.objectValue?["statusDetection"]?.objectValue?["mode"]?.stringValue,
+            "fingerprint-only")
+        let argv = try XCTUnwrap(terminalSpecs.last?.launchArgv)
+        XCTAssertEqual(argv.first, "/usr/bin/ssh")
+        XCTAssertTrue(argv.last?.hasSuffix("exec claude") ?? false, argv.last ?? "")
     }
 
     func testAgentFirstCreateOnARemoteRepoIsRefused() async throws {

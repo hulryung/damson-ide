@@ -58,6 +58,14 @@ public struct ClaudeCodeEngine: AgentEngine {
         return env
     }
 
+    /// Remote launch: the bare command name, resolved by the *remote* login shell, with
+    /// the same marker set stripped on the far side. `executablePath` deliberately does
+    /// not travel — it is a path on this machine.
+    public var remoteLaunch: RemoteEngineLaunch? {
+        RemoteEngineLaunch(command: "claude",
+                           strippedEnvironment: Self.inheritedSessionMarkers)
+    }
+
     public func classify(_ snapshot: ReadinessSnapshot) -> AgentRuntimeState? {
         ClaudeFingerprints.classify(snapshot)
     }

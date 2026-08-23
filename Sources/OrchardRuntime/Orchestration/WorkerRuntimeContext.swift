@@ -111,13 +111,14 @@ public struct WorkerRuntimeContext: Sendable {
                 return WorkerWorktreeReceipt(
                     id: result.worktreeId, instanceId: result.instanceId,
                     path: result.workspace.path, displayName: result.workspace.displayName,
-                    warning: result.warning)
+                    warning: result.warning, hostId: result.workspace.hostId)
             },
             resolveWorktree: { selector, cwd in
                 let workspace = try await workspaces.resolveWorkspace(selector, cwd: cwd)
                 return WorkerWorktreeReceipt(
                     id: workspace.id, instanceId: workspace.instanceId,
-                    path: workspace.path, displayName: workspace.displayName, warning: nil)
+                    path: workspace.path, displayName: workspace.displayName, warning: nil,
+                    hostId: workspace.hostId)
             },
             createAgentTerminal: { engineID, worktreeID, cwd, title in
                 try await terminals.create(worktreeId: worktreeID, cwd: cwd,
@@ -259,14 +260,20 @@ public struct WorkerWorktreeReceipt: Sendable {
     public var path: String
     public var displayName: String
     public var warning: String?
+    /// Which machine this workspace's files live on (`local` / `ssh:<name>`), carried
+    /// so `worker-start` can refuse a supervised dispatch into a remote workspace
+    /// *before* it spawns anything (T39). nil means the caller did not stamp it, and
+    /// the guard treats that as local — every live path here sets it.
+    public var hostId: String?
 
     public init(id: String, instanceId: String, path: String,
-                displayName: String, warning: String? = nil) {
+                displayName: String, warning: String? = nil, hostId: String? = nil) {
         self.id = id
         self.instanceId = instanceId
         self.path = path
         self.displayName = displayName
         self.warning = warning
+        self.hostId = hostId
     }
 }
 
