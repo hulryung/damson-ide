@@ -9,16 +9,19 @@ import OrchardTerminals
 
 /// Top-level app client of the in-process runtime.
 ///
-/// T2–T4's RPC handlers aren't in this worktree (`allow-stale-base`); the UI
-/// talks to `WorktreeService` / `AgentSupervisor` and observes their
+/// The app hosts `OrchardRuntimeHost` in-process: the unix-socket control plane,
+/// the live orchestration store, and the terminal/workspace services boot with the
+/// app, and every `AgentSupervisor` is attached so its PTYs carry the ORCHARD_*
+/// identity env and register into T3's terminal registry. The UI still drives
+/// `WorktreeService` / `AgentSupervisor` directly and observes their
 /// `AsyncStream<OrchardEvent>`. Views must not spawn PTYs or keep engine
 /// sessions of their own — shells live here, keyed by tab id.
 @MainActor
 final class AppStore: ObservableObject {
     let settings: OrchardSettings
     let meta: WorkspaceMetaStore
-    /// Reserved so the app hosts OrchardRuntime in-process from day one.
-    let runtimeServer: InMemoryRuntimeServer
+    /// The in-process runtime (nil only if its data directory is unusable).
+    let runtime: OrchardRuntimeHost?
 
     @Published var projects: [ProjectSession] = []
     @Published var selectedProjectID: UUID?
@@ -57,10 +60,24 @@ final class AppStore: ObservableObject {
 
     init(settings: OrchardSettings, meta: WorkspaceMetaStore? = nil) {
         self.settings = settings
-        self.meta = meta ?? WorkspaceMetaStore()
-        let registry = CommandRegistry()
-        _ = registry.registeredVerbs
-        self.runtimeServer = InMemoryRuntimeServer(registry: registry)
+        let dataDirectory = OrchardRuntimeHost.defaultDataDirectory()
+        // The factory injects ORCHARD_* into service-created PTYs; supervisor-spawned
+        // PTYs get the same identity via attach().
+        let factory = DamsonTerminalFactory.make(
+            template: settings.terminalConfig(),
+            context: TerminalHostContext(cliCommand: "orchard", dataPath: dataDirectory.path))
+        let runtime = try? OrchardRuntimeHost(terminalFactory: factory)
+        self.runtime = runtime
+        let dataStore = runtime?.dataStore
+            ?? OrchardDataStore(url: dataDirectory.appendingPathComponent("orchard-data.json"))
+        self.meta = meta ?? WorkspaceMetaStore(store: dataStore)
+        if let runtime {
+            do {
+                _ = try runtime.startSocketServer()
+            } catch {
+                NSLog("orchard: control-plane socket failed to start: %@", String(describing: error))
+            }
+        }
         settings.onTerminalConfigChange = { [weak self] in
             self?.applyTerminalConfigToAll()
         }
@@ -186,7 +203,15 @@ final class AppStore: ObservableObject {
             project.onEvent = { [weak self] project, event in
                 self?.handle(event, from: project)
             }
+            if let runtime {
+                // Runtime wiring: supervisor PTYs get ORCHARD_* identity and land in
+                // the terminal registry; the repo lands in T4's registry so worktree
+                // meta keys can use real `<repoId>::<path>` identities.
+                runtime.attach(project.agents)
+                project.repoID = (try? runtime.workspaceService.addRepo(path: repo))?.id
+            }
             for record in project.records {
+                registerMetaKey(record, in: project)
                 _ = meta.ensure(record.id)
             }
             projects.append(project)
@@ -226,6 +251,18 @@ final class AppStore: ObservableObject {
         for project in projects { project.shutdown() }
         for session in shells.values { session.terminate() }
         shells.removeAll()
+        runtime?.shutdown()
+    }
+
+    /// Bind a record's meta to its worktree id once the owning repo is registered.
+    private func registerMetaKey(_ record: WorktreeRecord, in project: ProjectSession) {
+        guard let repoID = project.repoID else { return }
+        meta.register(record.id, key: record.worktree.workspaceId(repoId: repoID))
+    }
+
+    /// The RPC-facing worktree identity for a record (`ORCHARD_WORKTREE_ID`).
+    private func workspaceID(for record: WorktreeRecord, in project: ProjectSession) -> String? {
+        project.repoID.map { record.worktree.workspaceId(repoId: $0) }
     }
 
     // MARK: - Composer / delete
@@ -240,20 +277,21 @@ final class AppStore: ObservableObject {
     }
 
     func compose(project: ProjectSession, name: String, prompt: String,
-                 engine: ComposerEngine, baseRef: String?, count: Int) throws {
-        let engineID = engine.resolvedEngineID
+                 engineID: String, baseRef: String?, count: Int) throws {
         guard AgentEngineRegistry.engine(id: engineID) != nil else {
-            throw GitError("\(engine.displayName) isn't registered in this build — it lands with the terminal service.")
+            throw GitError("engine '\(engineID)' isn't registered in this build.")
         }
         var first: WorktreeRecord?
         for _ in 0..<max(1, count) {
             let record = try project.worktrees.createWorktree(
                 name: name, baseRef: baseRef, title: name)
             project.worktrees.runSetupScriptIfEnabled(for: record)
+            registerMetaKey(record, in: project)
             _ = meta.ensure(record.id, status: .inProgress)
             meta.setStatus(.inProgress, for: record.id)
             let agent = try project.agents.spawnAgent(
-                engineID: engineID, prompt: prompt, in: record.worktree, title: name)
+                engineID: engineID, prompt: prompt, in: record.worktree, title: name,
+                workspaceID: workspaceID(for: record, in: project))
             record.agentState = agent.state
             record.lastPrompt = prompt.isEmpty ? nil : prompt
             bindAgentTab(agent, key: .worktree(record.id))
@@ -263,16 +301,16 @@ final class AppStore: ObservableObject {
         if let first { select(first, in: project) }
     }
 
-    func startAgent(in record: WorktreeRecord, project: ProjectSession, engine: ComposerEngine) throws {
-        let engineID = engine.resolvedEngineID
+    func startAgent(in record: WorktreeRecord, project: ProjectSession, engineID: String) throws {
         guard AgentEngineRegistry.engine(id: engineID) != nil else {
-            throw GitError("\(engine.displayName) isn't registered in this build.")
+            throw GitError("engine '\(engineID)' isn't registered in this build.")
         }
         let agent = try project.agents.spawnAgent(
             engineID: engineID,
             prompt: record.lastPrompt ?? "",
             in: record.worktree,
-            title: record.title)
+            title: record.title,
+            workspaceID: workspaceID(for: record, in: project))
         record.agentState = agent.state
         bindAgentTab(agent, key: .worktree(record.id))
         select(record, in: project)
@@ -481,6 +519,9 @@ final class AppStore: ObservableObject {
                 notify(record: record, project: project, state: state)
             }
         case .worktreeCreated(let worktree):
+            if let repoID = project.repoID {
+                meta.register(worktree.id, key: worktree.workspaceId(repoId: repoID))
+            }
             _ = meta.ensure(worktree.id)
         case .worktreeRemoved(let worktreeID, _):
             meta.remove(worktreeID)

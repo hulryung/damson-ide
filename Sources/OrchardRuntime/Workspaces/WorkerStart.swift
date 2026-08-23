@@ -6,10 +6,10 @@ import OrchardTerminals
 /// agent-first creation ran, the handle of the agent terminal spawned in it.
 ///
 /// The RPC-level `worker-start` verb is a follow-up once T1–T4 merge; this is
-/// the composition those handlers will call. `agentTerminalHandle` is minted
-/// here as `term_<uuid>` from the `AgentSession` id — T3's terminal registry
-/// remints handles, and the follow-up verb should treat this as a provisional
-/// handle to re-list against, not as a durable pane key.
+/// the composition those handlers will call. `agentTerminalHandle` is the real
+/// registry handle when the supervisor is attached to the runtime host (its
+/// spawns are adopted into T3's terminal registry, so remint semantics apply);
+/// only a detached supervisor falls back to the provisional session-id handle.
 public struct WorkerStartResult: Sendable {
     public var worktreeId: String
     public var instanceId: String
@@ -23,8 +23,10 @@ public struct WorkerStartResult: Sendable {
 /// workspace tests can stub launching without a PTY, and so T3 can swap the
 /// production implementation without a signature change here.
 public protocol AgentLaunching: Sendable {
+    /// `worktreeId` is the RPC-facing workspace identity (`<repoId>::<path>`), so the
+    /// launcher can stamp `ORCHARD_WORKTREE_ID` and list the terminal under it.
     func launch(engineID: String, prompt: String, worktree: Worktree,
-                title: String?) async throws -> LaunchedAgent
+                title: String?, worktreeId: String?) async throws -> LaunchedAgent
 }
 
 public struct LaunchedAgent: Sendable {
@@ -61,13 +63,16 @@ public final class AgentSupervisorLauncher: AgentLaunching, @unchecked Sendable 
     }
 
     public func launch(engineID: String, prompt: String, worktree: Worktree,
-                       title: String?) async throws -> LaunchedAgent {
+                       title: String?, worktreeId: String?) async throws -> LaunchedAgent {
         let (session, handle) = try await MainActor.run { () -> (AgentSession, String) in
             let session = try supervisor.spawnAgent(engineID: engineID, prompt: prompt,
-                                                    in: worktree, title: title)
-            // Provisional handle. T3 remints `term_<uuid>` against its registry;
-            // callers of worker-start should re-list if a later send reports stale.
-            let handle = "term_\(session.id.uuidString.lowercased())"
+                                                    in: worktree, title: title,
+                                                    workspaceID: worktreeId)
+            // The registry-real handle minted at spawn (adopted into T3's registry by
+            // the runtime host, so reminting/staleness semantics apply). Only a
+            // supervisor detached from any host lacks one; the session-id form then
+            // remains a last-resort provisional handle.
+            let handle = session.terminalHandle ?? "term_\(session.id.uuidString.lowercased())"
             return (session, handle)
         }
         return LaunchedAgent(terminalHandle: handle) { timeout in

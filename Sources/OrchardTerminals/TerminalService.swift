@@ -56,6 +56,38 @@ public final class TerminalService {
         registry.list(worktreeId: worktreeId).map { $0.summary() }
     }
 
+    /// Adopt an externally spawned agent session (an `AgentSupervisor` PTY) under the
+    /// identity that was injected into its environment. The pane then behaves like any
+    /// service-created terminal: the handle resolves, remints, and answers stale; reads,
+    /// verified sends, waits, and status streams all apply.
+    ///
+    /// The supervisor keeps ownership of prompt delivery and its own event feed — the
+    /// record's spec carries no prompt, and the existing `onStateChange` is chained,
+    /// not replaced.
+    @discardableResult
+    public func adopt(agentSession: AgentSession, spec: TerminalCreateSpec) throws -> TerminalSummary {
+        guard registry.record(forPaneKey: spec.paneKey) == nil else {
+            throw TerminalServiceError.invalidArgument(
+                "pane '\(spec.paneKey)' is already registered")
+        }
+        let record = TerminalRecord(handle: spec.handle, spec: spec,
+                                    engine: agentSession.engine,
+                                    session: agentSession.terminal,
+                                    agentSession: agentSession)
+        record.initialPromptStarted = true
+        registry.register(record)
+        let upstream = agentSession.onStateChange
+        agentSession.onStateChange = { [weak self, weak record] state in
+            upstream?(state)
+            guard let self, let record else { return }
+            self.stateChanged(record, state: state)
+        }
+        // Seed the tracker with the session's current state so an already-idle agent
+        // fast-paths `wait --for tui-idle` immediately after adoption.
+        record.tracker.note(agentSession.state)
+        return record.summary()
+    }
+
     public func close(handle: String) throws {
         let record = try registry.resolve(handle)
         if !record.exited {

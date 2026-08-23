@@ -517,7 +517,8 @@ public final class WorkspaceService {
         }
         let launched = try await launcher.launch(engineID: engineID, prompt: prompt,
                                                  worktree: worktree,
-                                                 title: workspace.displayName)
+                                                 title: workspace.displayName,
+                                                 worktreeId: workspace.id)
         try await launched.waitUntilReady(readinessTimeout)
         return launched.terminalHandle
     }

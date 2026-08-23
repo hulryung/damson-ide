@@ -278,7 +278,7 @@ private final class StubLauncher: AgentLaunching, @unchecked Sendable {
     init(handle: String) { self.handle = handle }
 
     func launch(engineID: String, prompt: String, worktree: Worktree,
-                title: String?) async throws -> LaunchedAgent {
+                title: String?, worktreeId: String?) async throws -> LaunchedAgent {
         lastEngine = engineID
         lastPrompt = prompt
         return LaunchedAgent(terminalHandle: handle) { _ in }

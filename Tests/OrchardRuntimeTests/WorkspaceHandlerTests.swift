@@ -172,7 +172,7 @@ final class WorkspaceHandlerTests: XCTestCase {
 
 private final class InstantLauncher: AgentLaunching, @unchecked Sendable {
     func launch(engineID: String, prompt: String, worktree: Worktree,
-                title: String?) async throws -> LaunchedAgent {
+                title: String?, worktreeId: String?) async throws -> LaunchedAgent {
         LaunchedAgent(terminalHandle: "term_instant") { _ in }
     }
 }

@@ -68,6 +68,11 @@ public enum OrchardCommands {
     public static let all: [CommandSpec] = {
         let json = flag("json", "Emit machine-readable JSON")
         let retry = flag("retry-request", "Idempotency request identifier", "id")
+        // Sender identity + proof, exactly as the dispatch preamble teaches workers
+        // (`send --from <handle> --dispatch-capability <secret> …`).
+        let from = flag("from", "Sender terminal handle", "handle")
+        let capability = flag("dispatch-capability", "Dispatch capability secret", "secret")
+        let run = flag("run", "Run identifier", "id")
         func command(_ name: String, _ summary: String, _ flags: [FlagSpec] = [],
                      positionals: [String] = []) -> CommandSpec {
             CommandSpec(name: name, summary: summary, usage: "orchard \(name) [options]",
@@ -78,21 +83,21 @@ public enum OrchardCommands {
             command("agent-context", "Serialize the complete command table"),
             command("guide", "Read an embedded version-matched guide", positionals: ["get", "topic"]),
             command("version", "Print the CLI version"),
-            command("run-create", "Create an orchestration run", [flag("objective", "Run objective", "text", required: true), retry]),
-            command("run-use", "Bind this terminal as run coordinator", [flag("id", "Run identifier", "id", required: true), flag("takeover-legacy", "Take over a legacy binding"), retry]),
-            command("run-current", "Show the current run"), command("run-list", "List runs"),
+            command("run-create", "Create an orchestration run", [flag("objective", "Run objective", "text", required: true), from, retry]),
+            command("run-use", "Bind this terminal as run coordinator", [flag("id", "Run identifier", "id", required: true), flag("takeover-legacy", "Take over a legacy binding"), from, retry]),
+            command("run-current", "Show the current run", [from]), command("run-list", "List runs"),
             command("run-show", "Show a run", [flag("id", "Run identifier", "id", required: true)]),
-            command("send", "Send an orchestration message", [flag("subject", "Subject", "text", required: true), flag("to", "Recipient", "address"), flag("body", "Body", "text"), flag("type", "Message type", "type"), flag("priority", "Priority", "priority"), flag("thread-id", "Thread identifier", "id"), flag("payload", "JSON payload", "json"), flag("task-id", "Task identifier", "id"), flag("dispatch-id", "Dispatch identifier", "id"), flag("outcome", "Worker outcome", "succeeded|failed"), flag("files-modified", "Comma-separated paths", "csv"), flag("report-path", "Report path", "path"), flag("phase", "Heartbeat phase", "phase"), retry]),
-            command("check", "Read or wait for coordinator delivery", [flag("terminal", "Terminal handle", "handle"), flag("run", "Run identifier", "id"), flag("ack", "Acknowledge delivery", "id"), flag("unread", "Unread only"), flag("peek", "Do not mark read"), flag("all", "All messages"), flag("types", "Wake message types", "csv"), flag("format", "Human format", "name"), flag("wait", "Long-poll"), flag("timeout-ms", "Timeout", "ms"), retry]),
-            command("reply", "Reply to a message", [flag("id", "Message identifier", "id", required: true), flag("body", "Reply body", "text", required: true), retry]),
-            command("ask", "Ask or resume a blocking question", [flag("question", "Question", "text"), flag("resume", "Question message id", "id"), flag("options", "Comma-separated options", "csv"), flag("timeout-ms", "Timeout", "ms"), retry]),
-            command("inbox", "List inbox messages", [flag("limit", "Maximum results", "n"), flag("full", "Include full bodies")]),
-            command("task-create", "Create a task", [flag("spec", "Task specification", "text", required: true), flag("task-title", "Task title", "text"), flag("display-name", "Display name", "text"), flag("deps", "Dependency JSON", "json"), flag("parent", "Parent task", "id"), retry]),
-            command("task-list", "List tasks", [flag("status", "Filter status", "status"), flag("ready", "Ready tasks only"), flag("brief", "Brief output")]),
+            command("send", "Send an orchestration message", [flag("subject", "Subject", "text", required: true), flag("to", "Recipient", "address"), flag("body", "Body", "text"), flag("type", "Message type", "type"), flag("priority", "Priority", "priority"), flag("thread-id", "Thread identifier", "id"), flag("payload", "JSON payload", "json"), flag("task-id", "Task identifier", "id"), flag("dispatch-id", "Dispatch identifier", "id"), flag("outcome", "Worker outcome", "succeeded|failed"), flag("files-modified", "Comma-separated paths", "csv"), flag("report-path", "Report path", "path"), flag("phase", "Heartbeat phase", "phase"), from, capability, run, retry]),
+            command("check", "Read or wait for coordinator delivery", [flag("terminal", "Terminal handle", "handle"), run, flag("ack", "Acknowledge delivery", "id"), flag("unread", "Unread only"), flag("peek", "Do not mark read"), flag("all", "All messages"), flag("types", "Wake message types", "csv"), flag("format", "Human format", "name"), flag("wait", "Long-poll"), flag("timeout-ms", "Timeout", "ms"), flag("limit", "Maximum results", "n"), retry]),
+            command("reply", "Reply to a message", [flag("id", "Message identifier", "id", required: true), flag("body", "Reply body", "text", required: true), from, retry]),
+            command("ask", "Ask or resume a blocking question", [flag("question", "Question", "text"), flag("resume", "Question message id", "id"), flag("options", "Comma-separated options", "csv"), flag("timeout-ms", "Timeout", "ms"), from, capability, retry]),
+            command("inbox", "List inbox messages", [flag("limit", "Maximum results", "n"), flag("full", "Include full bodies"), flag("terminal", "Terminal handle", "handle"), from, run]),
+            command("task-create", "Create a task", [flag("spec", "Task specification", "text", required: true), flag("task-title", "Task title", "text"), flag("display-name", "Display name", "text"), flag("deps", "Dependency JSON", "json"), flag("parent", "Parent task", "id"), from, run, retry]),
+            command("task-list", "List tasks", [flag("status", "Filter status", "status"), flag("ready", "Ready tasks only"), flag("brief", "Brief output"), from, run]),
             command("task-update", "Update a task", [flag("id", "Task identifier", "id", required: true), flag("status", "New status", "status", required: true), flag("result", "Result JSON", "json"), retry]),
-            command("dispatch", "Dispatch a task", [flag("task", "Task identifier", "id", required: true), flag("to", "Terminal handle", "handle", required: true), flag("inject", "Inject preamble"), flag("dry-run", "Preview only"), flag("return-preamble", "Return preamble"), retry]),
+            command("dispatch", "Dispatch a task", [flag("task", "Task identifier", "id", required: true), flag("to", "Terminal handle", "handle", required: true), flag("inject", "Inject preamble"), flag("dry-run", "Preview only"), flag("return-preamble", "Return preamble"), from, retry]),
             command("dispatch-show", "Show a dispatch", [flag("id", "Dispatch identifier", "id", required: true)]),
-            command("gate-create", "Create a decision gate", [flag("task", "Task identifier", "id", required: true), flag("question", "Question", "text", required: true), flag("options", "Options JSON", "json"), retry]),
+            command("gate-create", "Create a decision gate", [flag("task", "Task identifier", "id", required: true), flag("question", "Question", "text", required: true), flag("options", "Options JSON", "json"), from, retry]),
             command("gate-resolve", "Resolve a decision gate", [flag("id", "Gate identifier", "id", required: true), flag("resolution", "Resolution", "text", required: true), retry]),
             command("gate-list", "List decision gates", [flag("task", "Task identifier", "id"), flag("status", "Gate status", "status")]),
             command("worker-start", "Start a supervised worker", [flag("task", "Task identifier", "id", required: true), flag("on", "Environment", "environment"), flag("worktree", "Workspace placement", "selector"), flag("agent", "Agent type", "agent"), flag("terminal", "Existing terminal", "handle"), flag("model", "Model", "id"), flag("effort", "Reasoning effort", "level"), flag("name", "Worktree name", "name"), flag("repo", "Repository", "selector"), flag("base-branch", "Git base", "ref"), flag("setup", "Setup policy", "run|skip|inherit"), flag("retry-of", "Prior dispatch", "id"), retry]),
