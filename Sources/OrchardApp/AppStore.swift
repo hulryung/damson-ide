@@ -518,9 +518,11 @@ final class AppStore: ObservableObject {
             registerMetaKey(record, in: project)
             _ = meta.ensure(record.id, status: .inProgress)
             meta.setStatus(.inProgress, for: record.id)
+            let size = paneSpawnSize()
             let agent = try project.agents.spawnAgent(
                 engineID: engineID, prompt: prompt, in: record.worktree, title: name,
-                workspaceID: workspaceID(for: record, in: project))
+                workspaceID: workspaceID(for: record, in: project),
+                initialCols: size.cols, initialRows: size.rows)
             record.agentState = agent.state
             record.lastPrompt = prompt.isEmpty ? nil : prompt
             bindAgentTab(agent, key: .worktree(record.id))
@@ -534,12 +536,14 @@ final class AppStore: ObservableObject {
         guard AgentEngineRegistry.engine(id: engineID) != nil else {
             throw GitError("engine '\(engineID)' isn't registered in this build.")
         }
+        let size = paneSpawnSize()
         let agent = try project.agents.spawnAgent(
             engineID: engineID,
             prompt: record.lastPrompt ?? "",
             in: record.worktree,
             title: record.title,
-            workspaceID: workspaceID(for: record, in: project))
+            workspaceID: workspaceID(for: record, in: project),
+            initialCols: size.cols, initialRows: size.rows)
         record.agentState = agent.state
         bindAgentTab(agent, key: .worktree(record.id))
         select(record, in: project)
@@ -774,9 +778,30 @@ final class AppStore: ObservableObject {
         var config = settings.terminalConfig()
         config.cwd = cwd.path
         config.argv = DamsonConfig.defaultArgv()
-        let session = DamsonSession(config: config)
+        let size = paneSpawnSize()
+        let session = DamsonSession(config: config,
+                                    initialCols: size.cols, initialRows: size.rows)
         shells[tab.id] = session
         return session
+    }
+
+    /// The spawn geometry for a new PTY pane. Every terminal pane renders in the same
+    /// workbench chrome, so a session that is already attached carries the live answer
+    /// in its grid; only the very first terminal after launch falls back to the default.
+    /// Either way the view still resizes the session on attach — this only decides what
+    /// size the child sees at spawn, before the first SIGWINCH.
+    private func paneSpawnSize() -> (cols: Int, rows: Int) {
+        if let session = shells.values.first {
+            return (session.grid.cols, session.grid.rows)
+        }
+        for project in projects {
+            for agent in project.agents.agents {
+                if let session = (agent.terminal as? DamsonTerminalSession)?.session {
+                    return (session.grid.cols, session.grid.rows)
+                }
+            }
+        }
+        return (TerminalSpawnDefaults.cols, TerminalSpawnDefaults.rows)
     }
 
     func applyShellAppearance(_ config: DamsonConfig) {

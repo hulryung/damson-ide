@@ -14,6 +14,35 @@ public struct TerminalCreateSpec: Sendable {
     /// engines get it typed via the injection pipeline on first idle.
     public let prompt: String
     public let title: String?
+    /// PTY spawn geometry when the creator already knows the pane size (a visible app
+    /// pane, a respawn into a sized pane). nil means the factory falls back to
+    /// `TerminalSpawnDefaults` — never to the historical 80×24, which every real
+    /// consumer immediately reflowed away from.
+    public let initialCols: Int?
+    public let initialRows: Int?
+
+    public init(handle: String, paneKey: String, worktreeId: String?, cwd: String?,
+                engineID: String, prompt: String, title: String?,
+                initialCols: Int? = nil, initialRows: Int? = nil) {
+        self.handle = handle
+        self.paneKey = paneKey
+        self.worktreeId = worktreeId
+        self.cwd = cwd
+        self.engineID = engineID
+        self.prompt = prompt
+        self.title = title
+        self.initialCols = initialCols
+        self.initialRows = initialRows
+    }
+}
+
+/// Fallback PTY spawn geometry when no pane geometry is known yet (headless RPC
+/// creates, the first terminal after app launch). Roomy enough that agent TUIs lay
+/// out their real chrome on first paint; a view that attaches later still resizes
+/// the session to the actual pane.
+public enum TerminalSpawnDefaults {
+    public static let cols = 120
+    public static let rows = 34
 }
 
 /// How new PTYs come to exist — the seam between the registry (identity, lifecycle)

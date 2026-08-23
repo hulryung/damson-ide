@@ -71,7 +71,10 @@ public enum DamsonTerminalFactory {
                 env["ORCHARD_DATA_PATH"] = dataPath
             }
             config.env = env
-            return DamsonTerminalSession(config: config)
+            return DamsonTerminalSession(
+                config: config,
+                initialCols: spec.initialCols ?? TerminalSpawnDefaults.cols,
+                initialRows: spec.initialRows ?? TerminalSpawnDefaults.rows)
         }
     }
 }

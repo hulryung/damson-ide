@@ -88,19 +88,19 @@ public final class TerminalRecord {
                 switch event {
                 case .text(let s):
                     self.buffer.appendText(s)
-                    self.lastOutputAt = Date()
                 case .control(let byte):
                     self.buffer.appendControl(byte)
-                    self.lastOutputAt = Date()
                 case .osc:
                     break
                 }
             }
             .store(in: &cancellables)
-        // Repaint-only output (pure CSI) yields no text/control events but does touch
-        // the grid — count it as activity so previews/staleness read correctly.
-        session.gridChanged
-            .sink { [weak self] in self?.lastOutputAt = Date() }
+        // The raw byte stream is the activity clock: it fires for every output chunk,
+        // including repaint-only bursts (pure CSI) that yield no text/control events —
+        // so previews/staleness read correctly without piggybacking on `gridChanged`,
+        // which also fires for local mutations like a resize.
+        session.outputBytes
+            .sink { [weak self] _ in self?.lastOutputAt = Date() }
             .store(in: &cancellables)
     }
 

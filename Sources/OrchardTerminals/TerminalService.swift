@@ -37,10 +37,13 @@ public final class TerminalService {
 
     // MARK: - Create / list / close / rename
 
+    /// `initialCols`/`initialRows` let a caller that knows its pane geometry spawn the
+    /// PTY at that size; nil defers to the factory's default. Test factories ignore them.
     @discardableResult
     public func create(worktreeId: String? = nil, cwd: String? = nil,
                        engineID: String = "shell", prompt: String = "",
-                       title: String? = nil) throws -> TerminalSummary {
+                       title: String? = nil,
+                       initialCols: Int? = nil, initialRows: Int? = nil) throws -> TerminalSummary {
         guard let engine = AgentEngineRegistry.engine(id: engineID) else {
             throw TerminalServiceError.unknownEngine(engineID)
         }
@@ -51,7 +54,9 @@ public final class TerminalService {
             cwd: cwd,
             engineID: engineID,
             prompt: prompt,
-            title: title)
+            title: title,
+            initialCols: initialCols,
+            initialRows: initialRows)
         let record = try spawn(spec: spec, engine: engine)
         registry.register(record)
         record.tracker.lastPrompt = prompt
@@ -142,10 +147,14 @@ public final class TerminalService {
             throw TerminalServiceError.notFound(handle: paneKey)
         }
         let handle = TerminalRegistry.mintHandle()
+        // The pane kept its geometry — only the process is being replaced — so the new
+        // PTY spawns at the outgoing session's current grid size, not the create-time one.
+        let grid = record.session.gridSnapshot()
         let spec = TerminalCreateSpec(
             handle: handle, paneKey: record.paneKey, worktreeId: record.worktreeId,
             cwd: record.spec.cwd, engineID: record.engine.id, prompt: "",
-            title: record.title)
+            title: record.title,
+            initialCols: grid.cols, initialRows: grid.rows)
         // Spawn first: a factory failure must leave the current incarnation intact,
         // its handle still live.
         let session = try makeSession(spec: spec, engine: record.engine)

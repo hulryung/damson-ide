@@ -77,10 +77,13 @@ public final class AgentSupervisor {
     /// engine's first idle (for `.typeWhenIdle` engines) or via argv (`.launchArgument`).
     /// `workspaceID` is the RPC-facing worktree identity (`<repoId>::<path>`) when the
     /// caller knows it — it becomes the PTY's `ORCHARD_WORKTREE_ID`.
+    /// `initialCols`/`initialRows` size the PTY at spawn when the caller knows the pane
+    /// geometry the session will render into; nil falls back to `TerminalSpawnDefaults`.
     @discardableResult
     public func spawnAgent(engineID: String, prompt: String = "",
                            in worktree: Worktree?, title: String? = nil,
-                           workspaceID: String? = nil) throws -> AgentSession {
+                           workspaceID: String? = nil,
+                           initialCols: Int? = nil, initialRows: Int? = nil) throws -> AgentSession {
         guard let engine = AgentEngineRegistry.engine(id: engineID) else {
             throw GitError("unknown engine: \(engineID)")
         }
@@ -108,7 +111,10 @@ public final class AgentSupervisor {
             base: engine.env(base: config.env), handle: handle, paneKey: paneKey,
             workspaceID: workspaceID, hostContext: hostContext)
 
-        let terminal = DamsonTerminalSession(config: config)
+        let terminal = DamsonTerminalSession(
+            config: config,
+            initialCols: initialCols ?? TerminalSpawnDefaults.cols,
+            initialRows: initialRows ?? TerminalSpawnDefaults.rows)
         let agent = AgentSession(engine: engine, terminal: terminal, worktree: worktree, task: task)
         agent.onStateChange = { [weak self, weak agent] state in
             guard let self, let agent else { return }
