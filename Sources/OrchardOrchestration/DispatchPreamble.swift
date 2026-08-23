@@ -96,6 +96,17 @@ public enum DispatchPreamble {
 
         === CLI COMMANDS ===
 
+          # Your Orchard CLI is exactly this command, and it is also exported into
+          # this terminal as $ORCHARD_CLI_COMMAND:
+          #
+          #   \(cli)
+          #
+          # Run it verbatim, path and all. Do NOT shorten it to a bare `orchard`
+          # (your login shell has no PATH entry for it and the call dies with
+          # `command not found`), and do NOT substitute another orchestrator's CLI —
+          # a lifecycle call sent through anything else is rejected and your Dispatch
+          # never settles.
+
           # Report the terminal task outcome (REQUIRED exactly once).
           #
           # RULE: --body must be a 3-sentence executive summary (what you did,

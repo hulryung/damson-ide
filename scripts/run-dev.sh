@@ -21,6 +21,9 @@ echo "==> Orchard dev build @ $HASH"
 pkill -f "orchard/Orchard.app/Contents/MacOS/Orchard" 2>/dev/null || true
 pkill -f ".build/.*/release/OrchardApp" 2>/dev/null || true
 
-swift build -c release --product OrchardApp
+# The CLI is built too: the trampoline copies it into the materialized bundle so
+# workers get an absolute ORCHARD_CLI_COMMAND instead of a bare `orchard` their
+# login shell cannot resolve (T35).
+swift build -c release --product OrchardApp --product orchard
 echo "==> launching Orchard"
 exec "$REPO_ROOT/.build/release/OrchardApp"

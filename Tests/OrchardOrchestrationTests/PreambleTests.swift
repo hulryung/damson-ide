@@ -100,6 +100,44 @@ final class PreambleTests: XCTestCase {
         XCTAssertFalse(text.contains("orchard send "))
     }
 
+    /// T35 (dogfood-1 finding 2): the worker ran the preamble's commands literally,
+    /// got `command not found: orchard`, and stalled short of settlement. Every
+    /// lifecycle example must carry the runtime's absolute command, and the preamble
+    /// must say so rather than leaving the worker to notice.
+    func testAbsoluteCLICommandIsUsedEverywhereAndCalledOut() {
+        let absolute = "/Users/dkkang/dev/damson-ide/.build/release/orchard"
+        var custom = params()
+        custom.cliCommand = absolute
+        let text = DispatchPreamble.build(custom)
+
+        for verb in ["send", "check", "ask"] {
+            XCTAssertTrue(text.contains("\(absolute) \(verb) "),
+                          "\(verb) is not shown with the absolute command")
+        }
+        XCTAssertTrue(text.contains("Your Orchard CLI is exactly this command"))
+        XCTAssertTrue(text.contains("$ORCHARD_CLI_COMMAND"),
+                      "the preamble must name the env var carrying the same path")
+        XCTAssertTrue(text.contains("`command not found`"),
+                      "the preamble must say why a bare `orchard` fails")
+
+        // No runnable line may start with a bare `orchard` — that is the exact string
+        // the dogfood worker copied.
+        for line in text.split(separator: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            XCTAssertFalse(trimmed.hasPrefix("orchard "),
+                           "a bare orchard invocation survived: \(trimmed)")
+        }
+    }
+
+    /// The command string is inlined verbatim, spaces and all, so a path inside a
+    /// directory with a space still reads as one command to copy.
+    func testCLICommandIsInlinedVerbatim() {
+        var custom = params()
+        custom.cliCommand = "/Applications/My Tools/orchard"
+        let text = DispatchPreamble.build(custom)
+        XCTAssertTrue(text.contains("/Applications/My Tools/orchard send --from term_worker"))
+    }
+
     func testGuideAndPreambleShareWorkerDutiesSource() {
         let preamble = DispatchPreamble.build(params())
         XCTAssertTrue(preamble.contains(OrchestrationContract.workerDuties))

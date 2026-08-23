@@ -111,10 +111,14 @@ final class AppStore: ObservableObject {
         let dataDirectory = OrchardRuntimeHost.defaultDataDirectory()
         // The factory injects ORCHARD_* into service-created PTYs; supervisor-spawned
         // PTYs get the same identity via attach().
+        // T35: workers are told an absolute CLI path (the `orchard` binary shipped
+        // beside this app or installed on PATH), never a bare `orchard` their login
+        // shell cannot resolve.
+        let cliCommand = OrchardCLIPath.resolve()
         let factory = DamsonTerminalFactory.make(
             template: settings.terminalConfig(),
-            context: TerminalHostContext(cliCommand: "orchard", dataPath: dataDirectory.path))
-        let runtime = try? OrchardRuntimeHost(terminalFactory: factory)
+            context: TerminalHostContext(cliCommand: cliCommand, dataPath: dataDirectory.path))
+        let runtime = try? OrchardRuntimeHost(terminalFactory: factory, cliCommand: cliCommand)
         self.runtime = runtime
         self.browser = runtime.map { BrowserManager(service: $0.browserService) }
         let dataStore = runtime?.dataStore

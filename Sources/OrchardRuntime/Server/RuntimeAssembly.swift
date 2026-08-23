@@ -42,9 +42,13 @@ public final class OrchardRuntimeHost {
 
     private let fileManager: FileManager
 
+    /// `cliCommand` defaults to the resolved absolute path of this machine's
+    /// `orchard` binary (T35): it becomes `ORCHARD_CLI_COMMAND` in every worker PTY
+    /// and the command string the dispatch preamble tells workers to run, and a bare
+    /// `orchard` is not on a worker's PATH.
     public init(fileManager: FileManager = .default,
                 terminalFactory: @escaping TerminalSessionFactory,
-                cliCommand: String = "orchard", dataDirectory: URL? = nil,
+                cliCommand: String = OrchardCLIPath.resolve(), dataDirectory: URL? = nil,
                 mode: RuntimeMode = .app) throws {
         self.fileManager = fileManager
         self.cliCommand = cliCommand
@@ -171,7 +175,8 @@ public final class OrchardRuntimeHost {
         self.portService = portService
 
         var registry = CommandRegistry()
-        registry.register(StatusHandler(runtimeId: runtimeId, mode: mode))
+        registry.register(StatusHandler(runtimeId: runtimeId, mode: mode,
+                                        cliCommand: cliCommand))
         registry.register(OrchestrationCommandHandler(store: orchestration))
         // T7: the supervised-worker lifecycle verbs, driving the same orchestration
         // actor plus the live terminal/workspace seams.
@@ -210,7 +215,8 @@ public final class OrchardRuntimeHost {
         if let existing = socketServer { return existing.metadata }
         let server = try UnixSocketServer(registry: registry, fileManager: fileManager,
                                           runtimeId: runtimeId, authToken: authToken,
-                                          dataDirectory: dataDirectory, mode: mode)
+                                          dataDirectory: dataDirectory, mode: mode,
+                                          cliCommand: cliCommand)
         server.start()
         socketServer = server
         return server.metadata

@@ -48,12 +48,14 @@ public final class TerminalService {
         guard let engine = AgentEngineRegistry.engine(id: engineID) else {
             throw TerminalServiceError.unknownEngine(engineID)
         }
+        // Persist the canonical id, never the alias the caller typed: everything
+        // downstream (restoration, dashboards, `worker-show`) keys on `engine.id`.
         let spec = TerminalCreateSpec(
             handle: TerminalRegistry.mintHandle(),
             paneKey: TerminalRegistry.mintPaneKey(),
             worktreeId: worktreeId,
             cwd: cwd,
-            engineID: engineID,
+            engineID: engine.id,
             prompt: prompt,
             title: title,
             executionHostId: executionHostId,

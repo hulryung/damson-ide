@@ -205,29 +205,57 @@ extension LiveOrchestrationStore {
                 if let warning { receipt["warning"] = .string(warning) }
                 return .object(receipt)
             } catch {
-                throw self.settleFailedWorkerStart(
+                throw await self.settleFailedWorkerStart(
                     error: error, runID: run.id, taskID: taskID, dispatchID: dispatchID,
-                    failedStage: stage, setup: setup, launch: launch, effects: effects)
+                    failedStage: stage, setup: setup, launch: launch, effects: effects,
+                    runtime: runtime)
             }
         }
     }
 
     /// Persist the failure/unknown outcome and build the error envelope whose `data`
-    /// is the staged receipt. Resources already created stay listed as residuals.
+    /// is the staged receipt.
+    ///
+    /// T35 (dogfood-1 finding 1): a launch that dies after the worktree exists used to
+    /// hand the caller an orphan and a cleanup chore. Now the definitively-failed case
+    /// rolls back what it can prove is safe to roll back, and `residualResources` lists
+    /// only what actually survived — each entry carrying the exact command that removes
+    /// it. The dispatch row itself is always settled (`failed`, with the reason).
     private func settleFailedWorkerStart(
         error: Error, runID: String, taskID: String, dispatchID: String,
-        failedStage: String, setup: JSONValue, launch: JSONValue, effects: [JSONValue]
-    ) -> RPCServiceError {
+        failedStage: String, setup: JSONValue, launch: JSONValue, effects: [JSONValue],
+        runtime: WorkerRuntimeContext
+    ) async -> RPCServiceError {
         let reason = Self.describe(error)
-        let residuals = effects.compactMap { effect -> JSONValue? in
-            guard effect.field("action")?.stringValue == "created" else { return nil }
-            return .object([
+        let unknown = Self.isUnknownStartOutcome(error, stage: failedStage)
+        let created = effects.filter { $0.field("action")?.stringValue == "created" }
+        let rollback = unknown
+            ? []
+            : await rollBackFailedStart(created: created, runtime: runtime)
+        let rolledBackIDs = Set(rollback.compactMap { entry -> String? in
+            entry.field("action")?.stringValue == "removed"
+                ? entry.field("id")?.stringValue : nil
+        })
+        let residuals = created.compactMap { effect -> JSONValue? in
+            let id = effect.field("id")?.stringValue
+            guard let id, !rolledBackIDs.contains(id) else { return nil }
+            var residual: [String: JSONValue] = [
                 "kind": effect.field("kind") ?? .null,
-                "id": effect.field("id") ?? .null,
-            ])
+                "id": .string(id),
+            ]
+            if let cleanup = Self.cleanupCommand(kind: effect.field("kind")?.stringValue,
+                                                 id: id, cli: runtime.cliCommand) {
+                residual["cleanupCommand"] = .string(cleanup)
+            }
+            if let retained = rollback.first(where: {
+                $0.field("id")?.stringValue == id
+                    && $0.field("action")?.stringValue == "retained"
+            }), let why = retained.field("reason") {
+                residual["retainedReason"] = why
+            }
+            return .object(residual)
         }
         let residualsText = Self.encodeReceipt(.array(residuals))
-        let unknown = Self.isUnknownStartOutcome(error, stage: failedStage)
         let worker: WorkerDispatch?
         if unknown {
             worker = try? store.markWorkerStartUnknown(
@@ -248,18 +276,68 @@ extension LiveOrchestrationStore {
             "setup": setup,
             "launch": launch,
             "effects": .array(effects),
+            "rollback": .array(rollback),
             "residualResources": .array(residuals),
         ]
         if worker?.state == .startUnknown {
             receipt["nextCommands"] = .array([
-                .string("orchard worker-show --dispatch \(dispatchID) --json"),
-                .string("orchard worker-abandon --dispatch \(dispatchID) --json"),
+                .string("\(runtime.cliCommand) worker-show --dispatch \(dispatchID) --json"),
+                .string("\(runtime.cliCommand) worker-abandon --dispatch \(dispatchID) --json"),
             ])
         }
         return RPCServiceError(
             code: worker?.state == .startUnknown ? "worker_start_unknown" : "worker_start_failed",
             message: "worker-start failed at \(failedStage): \(reason)",
             data: .object(receipt))
+    }
+
+    /// Best-effort cleanup of a proven-failed launch's own effects.
+    ///
+    /// Only the worktree is rolled back, and only when this attempt created it AND no
+    /// terminal was created in it: a spawned agent pane is a live process whose cwd is
+    /// that directory, so deleting it under the process would be the unsafe kind of
+    /// automatic cleanup. The deletion itself is unforced — the workspace preflight
+    /// refuses anything with work in it, and that refusal becomes the residual's
+    /// `retainedReason`.
+    private func rollBackFailedStart(
+        created: [JSONValue], runtime: WorkerRuntimeContext
+    ) async -> [JSONValue] {
+        let createdTerminal = created.contains { $0.field("kind")?.stringValue == "terminal" }
+        var entries: [JSONValue] = []
+        for effect in created where effect.field("kind")?.stringValue == "worktree" {
+            guard let id = effect.field("id")?.stringValue else { continue }
+            guard !createdTerminal else {
+                entries.append(.object([
+                    "kind": .string("worktree"), "id": .string(id),
+                    "action": .string("retained"),
+                    "reason": .string("agent_terminal_created_in_worktree"),
+                ]))
+                continue
+            }
+            switch await runtime.rollbackWorktree(id) {
+            case .removed:
+                entries.append(.object([
+                    "kind": .string("worktree"), "id": .string(id),
+                    "action": .string("removed"),
+                ]))
+            case .retained(let reason):
+                entries.append(.object([
+                    "kind": .string("worktree"), "id": .string(id),
+                    "action": .string("retained"), "reason": .string(reason),
+                ]))
+            }
+        }
+        return entries
+    }
+
+    /// The exact command that removes one surviving residual. dogfood-1 had to
+    /// reconstruct this by hand from `worktree show`; the receipt now carries it.
+    static func cleanupCommand(kind: String?, id: String, cli: String) -> String? {
+        switch kind {
+        case "worktree": return "\(cli) worktree rm --worktree '\(id)' --json"
+        case "terminal": return "\(cli) terminal close --terminal \(id) --json"
+        default: return nil
+        }
     }
 
     /// Orca's outcome classifier: only an ambiguous acceptance or a lost-contact-style

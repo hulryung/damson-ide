@@ -55,6 +55,12 @@ extension LiveOrchestrationStore {
     /// Archived content when the release pipeline has frozen it (or the live terminal
     /// is gone), else bounded live terminal output — always with a `source` field so
     /// the caller knows which question was answered.
+    ///
+    /// T35 (dogfood-1 finding 3): `--source` is a contract, not a hint.
+    /// `--source transcript` returns a provider/pinned transcript or fails typed with
+    /// `transcript_unavailable` and a reason; `--source terminal` returns terminal
+    /// output or fails; only `--source auto` may substitute one for the other, and it
+    /// says so in `source` + `fallbackReason`.
     public func workerRead(_ p: [String: JSONValue],
                            runtime: WorkerRuntimeContext) async throws -> JSONValue {
         let dispatchID = try Self.requiredDispatch(p)
@@ -65,6 +71,7 @@ extension LiveOrchestrationStore {
         }
         let cursor = p.int("cursor")
         let limit = max(1, p.int("limit") ?? 200)
+        let raw = p["raw"]?.boolValue == true
         return try await mapped {
             guard let dispatch = try self.store.dispatchContext(dispatchID) else {
                 throw RPCServiceError(
@@ -84,7 +91,7 @@ extension LiveOrchestrationStore {
             if releaseCommitted {
                 return try self.readArchivedOutput(
                     dispatchID: dispatchID, workerState: workerState,
-                    source: source, cursor: cursor, limit: limit)
+                    source: source, cursor: cursor, limit: limit, raw: raw)
             }
             guard case .found(let summary, _) = await runtime.lookupTerminal(handle) else {
                 // The live pane is gone without a committed release; serve the pinned
@@ -92,12 +99,42 @@ extension LiveOrchestrationStore {
                 if try self.store.workerTerminalArchive(dispatchID: dispatchID) != nil {
                     return try self.readArchivedOutput(
                         dispatchID: dispatchID, workerState: workerState,
-                        source: source, cursor: cursor, limit: limit)
+                        source: source, cursor: cursor, limit: limit, raw: raw)
                 }
                 throw RPCServiceError(
                     code: "terminal_not_found",
                     message: "Worker terminal for Dispatch \(dispatchID) no longer resolves and no archive was preserved.")
             }
+
+            // A live worker has no pinned archive yet, so an explicit transcript
+            // request resolves the provider session on the spot — and says so if it
+            // cannot. `auto` deliberately does NOT: a coordinator polling a running
+            // worker wants the same bounded, cursor-paged shape every time, not a
+            // whole session document whenever hooks happen to have attested one.
+            // `--source transcript` is how a caller asks for the document.
+            if source == "transcript" {
+                switch await runtime.resolveProviderTranscript(
+                    summary.handle, WorkerRuntimeContext.transcriptPinByteLimit) {
+                case .resolved(let content, let path, let truncated):
+                    return .object([
+                        "dispatchId": .string(dispatchID),
+                        "source": .string("transcript"),
+                        "archived": .bool(false),
+                        "content": .string(content),
+                        "transcriptPath": .string(path),
+                        "truncated": .bool(truncated),
+                        "status": .object([
+                            "worker": .string(workerState),
+                            "terminal": .string(summary.connected ? "running" : "exited"),
+                        ]),
+                    ])
+                case .unavailable(let reason):
+                    throw Self.transcriptUnavailable(
+                        dispatchID: dispatchID, reason: reason, archived: false,
+                        cli: runtime.cliCommand)
+                }
+            }
+
             let page = try await runtime.readTerminal(summary.handle, cursor, limit)
             var result: [String: JSONValue] = [
                 "dispatchId": .string(dispatchID),
@@ -112,6 +149,8 @@ extension LiveOrchestrationStore {
                 ]),
             ]
             if source != "terminal" {
+                // Nothing has been pinned for this dispatch yet — that is the whole
+                // reason `auto` answered with terminal output.
                 result["fallbackReason"] = .string("provider_transcript_not_pinned")
             }
             if let next = page.nextCursor { result["nextCursor"] = .number(Double(next)) }
@@ -121,9 +160,30 @@ extension LiveOrchestrationStore {
         }
     }
 
+    /// The typed refusal a `--source transcript` request gets when no provider
+    /// transcript exists. It carries the reason and the read that WOULD answer, so a
+    /// caller never has to guess whether silence meant "no output" or "wrong source".
+    static func transcriptUnavailable(dispatchID: String, reason: String,
+                                      archived: Bool, cli: String) -> RPCServiceError {
+        RPCServiceError(
+            code: "transcript_unavailable",
+            message: "No provider transcript is available for Dispatch \(dispatchID) (\(reason)).",
+            data: .object([
+                "dispatchId": .string(dispatchID),
+                "requestedSource": .string("transcript"),
+                "reason": .string(reason),
+                "archived": .bool(archived),
+                "availableSource": .string("terminal"),
+                "nextCommands": .array([
+                    .string("\(cli) worker-read --dispatch \(dispatchID) --source terminal --json"),
+                    .string("\(cli) worker-read --dispatch \(dispatchID) --source auto --json"),
+                ]),
+            ]))
+    }
+
     private func readArchivedOutput(
         dispatchID: String, workerState: String,
-        source: String, cursor: Int?, limit: Int
+        source: String, cursor: Int?, limit: Int, raw: Bool
     ) throws -> JSONValue {
         guard let archive = try store.workerTerminalArchive(dispatchID: dispatchID) else {
             throw RPCServiceError(
@@ -152,13 +212,29 @@ extension LiveOrchestrationStore {
             ])
         case .terminalTail:
             let content = Self.decodeReceipt(archive.content)
-            let lines = content.field("lines")?.arrayValue?.compactMap(\.stringValue) ?? []
+            let fallbackReason = content.field("fallbackReason")?.stringValue
+                ?? "provider_transcript_unavailable"
+            // The release pinned a terminal tail, which means the provider transcript
+            // could not be resolved. A caller who asked for a transcript is told that
+            // in a typed error instead of being handed terminal text labelled
+            // `source: terminal` and left to notice.
+            if source == "transcript" {
+                throw Self.transcriptUnavailable(
+                    dispatchID: dispatchID, reason: fallbackReason, archived: true,
+                    cli: context.cliCommand)
+            }
+            // Cleaned text is the archive's readable face; `--raw` serves the
+            // untouched capture stored alongside it (T35, dogfood-1 finding 4).
+            let cleaned = content.field("lines")?.arrayValue?.compactMap(\.stringValue) ?? []
+            let rawLines = content.field("rawLines")?.arrayValue?.compactMap(\.stringValue)
+            let lines = raw ? (rawLines ?? cleaned) : cleaned
             let start = min(max(cursor ?? max(0, lines.count - limit), 0), lines.count)
             let end = min(start + limit, lines.count)
             var result: [String: JSONValue] = [
                 "dispatchId": .string(dispatchID),
                 "source": .string("terminal"),
                 "archived": .bool(true),
+                "raw": .bool(raw),
                 "lines": .array(lines[start..<end].map(JSONValue.string)),
                 "returnedLineCount": .number(Double(end - start)),
                 "startCursor": .number(Double(start)),
@@ -170,13 +246,17 @@ extension LiveOrchestrationStore {
                     "terminal": .string("archived"),
                 ]),
             ]
+            if let rawLines, !raw {
+                result["rawLineCount"] = .number(Double(rawLines.count))
+            }
+            if let chrome = content.field("chromeStripped") {
+                result["chromeStripped"] = chrome
+            }
             if let warnings = content.field("warnings"), warnings != .array([]) {
                 result["warnings"] = warnings
             }
-            if let fallbackReason = content.field("fallbackReason") {
-                result["fallbackReason"] = fallbackReason
-            } else if source != "terminal" {
-                result["fallbackReason"] = .string("provider_transcript_unavailable")
+            if source != "terminal" {
+                result["fallbackReason"] = .string(fallbackReason)
             }
             return .object(result)
         }
@@ -408,8 +488,29 @@ extension LiveOrchestrationStore {
                     warnings.append(.string(
                         "The live terminal buffer was empty at release; structured transcript output was unavailable."))
                 }
+                // T35 (dogfood-1 finding 4): a full-screen agent's tail is mostly
+                // repaint chrome. Store the readable text as `lines` and keep the
+                // untouched capture as `rawLines` — `worker-read --raw` serves it, so
+                // stripping is never a loss of evidence.
+                let cleaned = TerminalCaptureCleaner.clean(page.lines)
+                if cleaned.duplicateLines + cleaned.spinnerLines + cleaned.separatorLines > 0 {
+                    warnings.append(.string(
+                        "Readable text was reconstructed from a TUI repaint stream; "
+                            + "\(page.lines.count - cleaned.lines.count) of \(page.lines.count) "
+                            + "captured lines were chrome. Use --raw for the untouched capture."))
+                }
                 content = .object([
-                    "lines": .array(page.lines.map(JSONValue.string)),
+                    "lines": .array(cleaned.lines.map(JSONValue.string)),
+                    "rawLines": .array(page.lines.map(JSONValue.string)),
+                    "chromeStripped": .object([
+                        "capturedLineCount": .number(Double(page.lines.count)),
+                        "readableLineCount": .number(Double(cleaned.lines.count)),
+                        "separatorLines": .number(Double(cleaned.separatorLines)),
+                        "spinnerLines": .number(Double(cleaned.spinnerLines)),
+                        "duplicateLines": .number(Double(cleaned.duplicateLines)),
+                        "blankLines": .number(Double(cleaned.blankLines)),
+                        "escapeRemnantLines": .number(Double(cleaned.escapeRemnantLines)),
+                    ]),
                     "truncated": .bool(page.truncated || (page.oldestCursor ?? 0) > 0),
                     "terminalStatus": .string(page.status),
                     "fallbackReason": .string(fallbackReason),
@@ -658,14 +759,23 @@ extension LiveOrchestrationStore {
         case .transcriptPin:
             return .object(["source": .string("transcript"), "status": .string("captured")])
         case .terminalTail:
-            let lines = Self.decodeReceipt(archive.content).field("lines")?.arrayValue ?? []
-            let empty = lines.allSatisfy {
+            let content = Self.decodeReceipt(archive.content)
+            let cleaned = content.field("lines")?.arrayValue ?? []
+            // Emptiness is judged on the raw capture: a tail that was 100% TUI chrome
+            // has an empty readable face but is not an empty archive.
+            let raw = content.field("rawLines")?.arrayValue ?? cleaned
+            let empty = raw.allSatisfy {
                 ($0.stringValue ?? "").trimmingCharacters(in: .whitespaces).isEmpty
             }
-            return .object([
+            var summary: [String: JSONValue] = [
                 "source": .string("terminal"),
                 "status": .string(empty ? "empty" : "captured"),
-            ])
+                "readableLineCount": .number(Double(cleaned.count)),
+            ]
+            if content.field("rawLines") != nil {
+                summary["rawLineCount"] = .number(Double(raw.count))
+            }
+            return .object(summary)
         }
     }
 

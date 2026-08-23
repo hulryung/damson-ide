@@ -16,10 +16,14 @@ func serve(dataDirectory: URL?) -> Never {
     Task { @MainActor in
         do {
             let resolvedData = dataDirectory ?? OrchardRuntimeHost.defaultDataDirectory()
+            // The absolute path of this very binary — `serve` IS the CLI, so a
+            // worker PTY gets a command it can run without a PATH entry (T35).
+            let cliCommand = OrchardCLIPath.resolve()
             let terminalFactory = DamsonTerminalFactory.make(
-                context: TerminalHostContext(cliCommand: "orchard",
+                context: TerminalHostContext(cliCommand: cliCommand,
                                              dataPath: resolvedData.path))
             let host = try OrchardRuntimeHost(terminalFactory: terminalFactory,
+                                              cliCommand: cliCommand,
                                               dataDirectory: dataDirectory,
                                               mode: .headless)
             let metadata = try host.startSocketServer()

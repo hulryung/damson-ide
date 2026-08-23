@@ -15,6 +15,15 @@ public struct WorkerRuntimeContext: Sendable {
         case unavailable(reason: String)
     }
 
+    /// What a best-effort worktree rollback did after a failed worker-start.
+    public enum WorktreeRollback: Sendable, Equatable {
+        /// The worktree was deleted; nothing of it remains.
+        case removed
+        /// Deliberately left in place, with the reason a caller can act on
+        /// (`worktree_dirty`, `remote_unsupported`, `unknown_worktree`, …).
+        case retained(reason: String)
+    }
+
     public static let transcriptPinByteLimit = 2_000_000
     public var cliCommand: String
 
@@ -46,6 +55,11 @@ public struct WorkerRuntimeContext: Sendable {
     ) async -> ProviderTranscriptResolution
     /// Close the pane's PTY and unregister it.
     public var closeTerminal: @Sendable (_ handle: String) async throws -> Void
+    /// Roll back a worktree this worker-start created and then abandoned (T35).
+    /// The deletion is NEVER forced: the workspace layer's own preflight decides, so
+    /// an untouched fresh worktree disappears and anything with work in it is
+    /// retained with a typed reason for the receipt's residual list.
+    public var rollbackWorktree: @Sendable (_ worktreeID: String) async -> WorktreeRollback
 
     public init(
         cliCommand: String = "orchard",
@@ -57,7 +71,10 @@ public struct WorkerRuntimeContext: Sendable {
         injectPrompt: @escaping @Sendable (String, String) async throws -> TerminalSendResult,
         readTerminal: @escaping @Sendable (String, Int?, Int) async throws -> TerminalReadResult,
         resolveProviderTranscript: @escaping @Sendable (String, Int) async -> ProviderTranscriptResolution = { _, _ in .unavailable(reason: "provider_session_unavailable") },
-        closeTerminal: @escaping @Sendable (String) async throws -> Void
+        closeTerminal: @escaping @Sendable (String) async throws -> Void,
+        rollbackWorktree: @escaping @Sendable (String) async -> WorktreeRollback = { _ in
+            .retained(reason: "rollback_unsupported")
+        }
     ) {
         self.cliCommand = cliCommand
         self.createWorktree = createWorktree
@@ -69,6 +86,7 @@ public struct WorkerRuntimeContext: Sendable {
         self.readTerminal = readTerminal
         self.resolveProviderTranscript = resolveProviderTranscript
         self.closeTerminal = closeTerminal
+        self.rollbackWorktree = rollbackWorktree
     }
 
     /// The production wiring against the runtime host's services.
@@ -125,6 +143,25 @@ public struct WorkerRuntimeContext: Sendable {
             },
             closeTerminal: { handle in
                 try await terminals.close(handle: handle)
+            },
+            rollbackWorktree: { worktreeID in
+                do {
+                    // force: false — the workspace preflight is the safety rule. A
+                    // worktree with uncommitted work, an unpushed branch, or a live
+                    // process comes back `removed: false` and stays a residual.
+                    let result = try await workspaces.remove(selector: worktreeID, cwd: nil,
+                                                             force: false, runHooks: false)
+                    guard result.removed else {
+                        let detail = result.preflightWarnings.joined(separator: "; ")
+                        return .retained(reason: detail.isEmpty ? "worktree_dirty"
+                                                 : "worktree_dirty: \(detail)")
+                    }
+                    return .removed
+                } catch let error as WorkspaceError {
+                    return .retained(reason: error.code)
+                } catch {
+                    return .retained(reason: String(describing: error))
+                }
             })
     }
 

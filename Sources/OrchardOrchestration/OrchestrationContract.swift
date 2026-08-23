@@ -36,6 +36,13 @@ public enum OrchestrationContract {
     effects, and residual resources and must not be blindly retried. Required remote
     or launch-preference capabilities must be advertised before using those options.
 
+    `--agent` takes any engine id or alias `agent-context` enumerates on the flag
+    (`claude` is the `claude-code` engine). A definitively-failed start rolls back the
+    fresh worktree it created when that is provably safe — no terminal was spawned in
+    it and the workspace preflight agrees — and reports what it did under `rollback`.
+    Whatever survives is listed in `residualResources` with the exact `cleanupCommand`
+    that removes it; anything not listed there no longer exists.
+
     Wait with `check --wait --types worker_done,escalation,question`. A Delivery is a
     bounded FIFO batch and replays unchanged until acknowledged. Process every message,
     answer questions, and make the release/retain decision for each accepted completion
@@ -53,6 +60,18 @@ public enum OrchestrationContract {
     Task and Dispatch IDs. Connected-server placement, lifecycle settlement, transcript
     reads, and launch preferences must degrade to typed unsupported/fallback receipts
     when the runtime does not advertise their capabilities.
+
+    ## Reading worker output
+
+    `worker-read --source` is a contract, not a hint. `transcript` returns a provider
+    or pinned transcript, or fails with typed `transcript_unavailable` carrying the
+    reason and the read that would answer; `terminal` returns terminal output; only
+    `auto` may substitute one for the other, and it names `source` and
+    `fallbackReason` when it does; on a live worker `auto` always answers with
+    bounded, cursor-paged terminal output. A released terminal archive keeps two
+    faces: the
+    chrome-stripped readable text served by default (with a `chromeStripped` tally)
+    and the untouched capture behind `--raw`.
 
     ## Terminals
 
