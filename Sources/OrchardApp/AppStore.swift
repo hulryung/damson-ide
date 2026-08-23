@@ -47,6 +47,8 @@ final class AppStore: ObservableObject {
     @Published var unackedDoneAgentIDs: Set<UUID> = []
     /// Live `AgentStatusSnapshot` per agent, observation-only from the status stream.
     @Published private(set) var agentStatusByID: [UUID: AgentStatusSnapshot] = [:]
+    /// Last completed T20 port sweep (attributed listeners only).
+    @Published private(set) var portSnapshot = PortScanSnapshot.empty
 
     /// Currently focused tab group, so split/new-tab commands have a target.
     @Published var focusedGroupID: UUID?
@@ -66,6 +68,7 @@ final class AppStore: ObservableObject {
     /// Pre-T8 sidebar list. Imported once into the registry, then deleted.
     private let legacyWorkspacesKey = "orchard.workspaces"
     private var repoObserveTask: Task<Void, Never>?
+    private var portObserveTask: Task<Void, Never>?
     private var statusListenTasks: [UUID: Task<Void, Never>] = [:]
     private var notificationsAuthorized = false
 
@@ -300,6 +303,16 @@ final class AppStore: ObservableObject {
         migrateLegacyWorkspacesIfNeeded()
         applyRegistry(workspaceService.listRepos(), selectNewProjects: true)
         observeRepoRegistry()
+        observePorts()
+    }
+
+    func ports(for record: WorktreeRecord, in project: ProjectSession) -> [WorkspaceListeningPort] {
+        guard let id = workspaceIdentity(for: record, in: project) else { return [] }
+        return portSnapshot.ports(forWorktreeId: id)
+    }
+
+    func workspaceIdentity(for record: WorktreeRecord, in project: ProjectSession) -> String? {
+        project.repoID.map { record.worktree.workspaceId(repoId: $0) }
     }
 
     func addProjectViaPanel() {
@@ -368,6 +381,18 @@ final class AppStore: ObservableObject {
             for await repos in stream {
                 guard !Task.isCancelled else { break }
                 self?.applyRegistry(repos, selectNewProjects: false)
+            }
+        }
+    }
+
+    private func observePorts() {
+        portObserveTask?.cancel()
+        guard let service = runtime?.portService else { return }
+        portSnapshot = service.snapshot()
+        portObserveTask = Task { [weak self] in
+            for await snapshot in service.snapshots() {
+                guard !Task.isCancelled else { break }
+                self?.portSnapshot = snapshot
             }
         }
     }
@@ -474,6 +499,8 @@ final class AppStore: ObservableObject {
     func shutdownAll() {
         repoObserveTask?.cancel()
         repoObserveTask = nil
+        portObserveTask?.cancel()
+        portObserveTask = nil
         for task in statusListenTasks.values { task.cancel() }
         statusListenTasks.removeAll()
         agentStatusByID.removeAll()
@@ -491,7 +518,7 @@ final class AppStore: ObservableObject {
 
     /// The RPC-facing worktree identity for a record (`ORCHARD_WORKTREE_ID`).
     private func workspaceID(for record: WorktreeRecord, in project: ProjectSession) -> String? {
-        project.repoID.map { record.worktree.workspaceId(repoId: $0) }
+        workspaceIdentity(for: record, in: project)
     }
 
     // MARK: - Composer / delete

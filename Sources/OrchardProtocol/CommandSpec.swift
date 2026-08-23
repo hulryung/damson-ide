@@ -112,6 +112,29 @@ public enum OrchardCommands {
             command("worker-retain", "Retain worker resources", [flag("dispatch", "Dispatch identifier", "id", required: true), retry]),
             command("worker-list", "List supervised workers", [flag("terminal-state", "Terminal state filter", "state"), run]),
             command("repo", "Manage registered repositories", [flag("path", "Repository path", "path"), flag("repo", "Repository selector", "selector"), flag("display-name", "Display name", "text")], positionals: ["list|add|show"]),
+            command("worktree", "List worktrees or show agent/shell processes and listening ports", [
+                flag("repo", "Repository selector", "selector"),
+                flag("worktree", "Worktree selector", "selector"),
+                flag("limit", "Maximum results", "n"),
+                flag("name", "Worktree name", "name"),
+                flag("display-name", "Display name", "text"),
+                flag("base-branch", "Git base", "ref"),
+                flag("comment", "Comment", "text"),
+                flag("issue", "Linked issue", "text"),
+                flag("pr", "Linked pull request", "text"),
+                flag("workspace-status", "Board status", "status"),
+                flag("parent-worktree", "Parent worktree", "selector"),
+                flag("no-parent", "Do not nest under a parent"),
+                flag("force", "Force remove a dirty worktree"),
+                flag("cwd", "Working directory for resolution", "path"),
+                flag("pinned", "Pinned"),
+                flag("unread", "Unread"),
+                flag("archived", "Archived"),
+            ], positionals: ["list|show|current|create|set|rm|ps"]),
+            command("workspace-ports", "List listening TCP ports attributed to workspaces", [
+                flag("repo", "Repository selector", "selector"),
+                flag("worktree", "Worktree selector", "selector"),
+            ]),
             command("file", "Open, diff, search, or reveal git-changed workspace files", [
                 flag("path", "File path relative to the worktree (or absolute inside it)", "path"),
                 flag("worktree", "Worktree selector", "selector"),
@@ -154,7 +177,7 @@ public enum CommandGroup: String, Codable, CaseIterable, Sendable {
     case worker       // worker-start/show/read/stop/abandon/release/retain/list
     case gate         // gate-create/resolve/list
     case terminal     // terminal list/create/read/send/wait/split/close/rename
-    case worktree     // worktree list/show/current/create/set/rm
+    case worktree     // worktree list/show/current/create/set/rm/ps
     case repo         // repo list/add/show
     case file         // file open/diff/open-changed/search
     case browser      // browser goto/…/tab (wave 2)

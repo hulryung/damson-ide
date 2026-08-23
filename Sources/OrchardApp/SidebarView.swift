@@ -349,6 +349,7 @@ struct WorkspaceCard: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
             Spacer(minLength: 4)
+            WorkspacePortsChip(ports: store.ports(for: record, in: project))
             DiffStatBadge(stat: record.status.stat)
         }
         .padding(.leading, 20)

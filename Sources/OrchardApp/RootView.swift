@@ -6,33 +6,36 @@ struct RootView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
 
     var body: some View {
-        NavigationSplitView(columnVisibility: $columnVisibility) {
-            SidebarView()
-                .navigationSplitViewColumnWidth(
-                    min: Tokens.sidebarMinWidth,
-                    ideal: Tokens.sidebarIdealWidth,
-                    max: Tokens.sidebarMaxWidth)
-        } detail: {
-            WorkbenchView()
-                .fileExplorerSidebar()
-                .toolbar {
-                    ToolbarItem(placement: .navigation) {
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.2)) {
-                                columnVisibility = (columnVisibility == .detailOnly) ? .all : .detailOnly
+        VStack(spacing: 0) {
+            NavigationSplitView(columnVisibility: $columnVisibility) {
+                SidebarView()
+                    .navigationSplitViewColumnWidth(
+                        min: Tokens.sidebarMinWidth,
+                        ideal: Tokens.sidebarIdealWidth,
+                        max: Tokens.sidebarMaxWidth)
+            } detail: {
+                WorkbenchView()
+                    .fileExplorerSidebar()
+                    .toolbar {
+                        ToolbarItem(placement: .navigation) {
+                            Button {
+                                withAnimation(.easeInOut(duration: 0.2)) {
+                                    columnVisibility = (columnVisibility == .detailOnly) ? .all : .detailOnly
+                                }
+                            } label: {
+                                Image(systemName: "sidebar.left")
                             }
-                        } label: {
-                            Image(systemName: "sidebar.left")
+                            .help("Toggle sidebar")
                         }
-                        .help("Toggle sidebar")
-                    }
-                    ToolbarItem(placement: .primaryAction) {
-                        Button { store.requestNewWorktree() } label: {
-                            Label("New Worktree", systemImage: "plus")
+                        ToolbarItem(placement: .primaryAction) {
+                            Button { store.requestNewWorktree() } label: {
+                                Label("New Worktree", systemImage: "plus")
+                            }
+                            .help("New worktree (⌘N)")
                         }
-                        .help("New worktree (⌘N)")
                     }
-                }
+            }
+            StatusBarView()
         }
         .sheet(isPresented: composerPresented) {
             if let project = store.projects.first(where: { $0.id == store.composerProjectID }) {

@@ -30,6 +30,8 @@ public final class OrchardRuntimeHost {
     public nonisolated let browserService: BrowserService
     public nonisolated let automationService: AutomationService
     public nonisolated let automationScheduler: AutomationScheduler
+    /// T20: debounced listening-port sweep, attributed by process cwd containment.
+    public nonisolated let portService: PortService
 
     public nonisolated let registry: CommandRegistry
     /// In-process client of the same registry (the app's path; no socket involved).
@@ -142,6 +144,22 @@ public final class OrchardRuntimeHost {
         let automationScheduler = AutomationScheduler(service: automationService)
         self.automationScheduler = automationScheduler
 
+        let workspaceServiceForPorts = self.workspaceService
+        let portService = PortService(
+            workspaces: {
+                await MainActor.run {
+                    ((try? workspaceServiceForPorts.listWorkspaces()) ?? []).map { workspace in
+                        PortWorkspaceProbe(
+                            id: workspace.id, repoId: workspace.repoId,
+                            displayName: workspace.displayName.isEmpty
+                                ? workspace.path : workspace.displayName,
+                            path: workspace.path)
+                    }
+                }
+            },
+            interval: PortService.intervalFromEnvironment())
+        self.portService = portService
+
         var registry = CommandRegistry()
         registry.register(StatusHandler(runtimeId: runtimeId, mode: mode))
         registry.register(OrchestrationCommandHandler(store: orchestration))
@@ -159,9 +177,12 @@ public final class OrchardRuntimeHost {
                                              opens: fileOpenCenter))
         registry.register(BrowserCommandHandler(service: browserService))
         registry.register(AutomationCommandHandler(service: automationService))
+        registry.register(PortCommandHandler(
+            ports: portService, workspaces: workspaceService, terminals: terminalService))
         self.registry = registry
         self.inMemory = InMemoryRuntimeServer(registry: registry, runtimeId: runtimeId)
         automationScheduler.start()
+        portService.start()
     }
 
     /// Where the production runtime keeps its state; exposed so the app can build a
@@ -209,6 +230,7 @@ public final class OrchardRuntimeHost {
 
     public func shutdown() {
         automationScheduler.stop()
+        portService.stop()
         socketServer?.stop(fileManager: fileManager)
         socketServer = nil
     }
