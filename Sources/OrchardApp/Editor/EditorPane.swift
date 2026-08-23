@@ -10,7 +10,9 @@ struct EditorPane: View {
     let key: WorkbenchKey
 
     var body: some View {
-        if let path = tab.filePath, let root = store.workspaceRoot(for: key) {
+        if store.unsupportedReason(RemoteAffordance.editor, for: key) != nil {
+            RemoteUnsupportedView(affordance: .editor, hostId: store.executionHostId(for: key))
+        } else if let path = tab.filePath, let root = store.workspaceRoot(for: key) {
             EditorDocumentView(
                 controller: store.editorController(root: root, path: path),
                 tabID: tab.id,

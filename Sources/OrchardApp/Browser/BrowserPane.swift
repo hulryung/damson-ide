@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import WebKit
+import OrchardRuntime
 
 /// The `browser` workbench tab body: the per-workspace embedded browser
 /// (tab strip, URL bar, back/forward, loading state) over web views owned by
@@ -10,7 +11,9 @@ struct BrowserPane: View {
     let key: WorkbenchKey
 
     var body: some View {
-        if let manager = store.browser, let wsKey = store.browserWorkspaceKey(for: key) {
+        if store.unsupportedReason(RemoteAffordance.browser, for: key) != nil {
+            RemoteUnsupportedView(affordance: .browser, hostId: store.executionHostId(for: key))
+        } else if let manager = store.browser, let wsKey = store.browserWorkspaceKey(for: key) {
             WorkspaceBrowserView(manager: manager, controller: manager.controller(for: wsKey))
         } else {
             PlaceholderPane(symbol: "globe", title: "Browser",

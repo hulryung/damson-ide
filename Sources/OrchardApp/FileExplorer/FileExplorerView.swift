@@ -11,7 +11,11 @@ struct FileExplorerSidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if let record = store.selectedRecord {
+            if let key = store.selection,
+               store.unsupportedReason(RemoteAffordance.fileExplorer, for: key) != nil {
+                RemoteUnsupportedView(affordance: .fileExplorer,
+                                      hostId: store.executionHostId(for: key))
+            } else if let record = store.selectedRecord {
                 FileExplorerPane(
                     root: record.path,
                     changed: changedMap(record.status.stat),

@@ -42,6 +42,17 @@ enum TabKind: String, CaseIterable, Hashable, Identifiable {
         case .browser: return "globe"
         }
     }
+
+    /// Affordance the runtime types as `remote_unsupported` for this tab, if any.
+    /// Terminal is allowed: opening a remote worktree *is* opening its ssh pane.
+    var remoteAffordance: RemoteAffordance? {
+        switch self {
+        case .terminal: return nil
+        case .diff: return .diff
+        case .editor: return .editor
+        case .browser: return .browser
+        }
+    }
 }
 
 enum SplitAxis: String, Hashable {
@@ -118,10 +129,14 @@ indirect enum SplitNode: Identifiable, Hashable {
         }
     }
 
-    static func makeDefault() -> SplitNode {
-        let term = WorkbenchTab(kind: .terminal)
-        let diff = WorkbenchTab(kind: .diff)
-        return .group(TabGroup(tabs: [term, diff], selectedID: term.id))
+    static func makeDefault(executionHostId: String? = nil,
+                            includeLocalOnlyTabs: Bool = true) -> SplitNode {
+        let term = WorkbenchTab(kind: .terminal, executionHostId: executionHostId)
+        if includeLocalOnlyTabs {
+            let diff = WorkbenchTab(kind: .diff)
+            return .group(TabGroup(tabs: [term, diff], selectedID: term.id))
+        }
+        return .group(TabGroup(tabs: [term], selectedID: term.id))
     }
 
     mutating func mutateGroup(_ groupID: UUID, _ body: (inout TabGroup) -> Void) -> Bool {

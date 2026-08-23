@@ -85,6 +85,7 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
     }
 
     @MainActor @objc func newWorkspace(_ sender: Any?) { store.addProjectViaPanel() }
+    @MainActor @objc func openRemote(_ sender: Any?) { store.presentOpenRemote() }
     @MainActor @objc func newWorktree(_ sender: Any?) { store.requestNewWorktree() }
     @MainActor @objc func openJumpPalette(_ sender: Any?) { store.isJumpPaletteOpen = true }
     @MainActor @objc func showTerminalTab(_ sender: Any?) { store.selectKind(.terminal) }
@@ -184,6 +185,9 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
         nw.keyEquivalentModifierMask = [.command, .shift]
         nw.target = self
         fileMenu.addItem(nw)
+        let remote = NSMenuItem(title: "Open Remote…", action: #selector(openRemote(_:)), keyEquivalent: "")
+        remote.target = self
+        fileMenu.addItem(remote)
         fileMenu.addItem(.separator())
         let save = NSMenuItem(title: "Save", action: #selector(saveFocusedEditor(_:)), keyEquivalent: "s")
         save.target = self
