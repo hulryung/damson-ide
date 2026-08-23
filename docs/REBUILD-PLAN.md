@@ -256,6 +256,11 @@ Owns: `Sources/OrchardApp/**`.
 
 ### Wave 2+ backlog (separate run after merges)
 
+Unify the app sidebar's project list with the runtime repo registry: `orchard repo add`
+lands in orchard-data.json but the sidebar still reads its own UserDefaults list, so a
+CLI-added repo never appears in the UI (verified live 2026-08-23).
+
+
 File-manager service + right-sidebar explorer UI; WKWebView browser pane + automation
 verbs (snapshot with @e refs via injected JS, click/fill/screenshot/eval, per-workspace
 tabs); `worker-start` RPC verb end-to-end + worker archives; chat view-mode overlay;
