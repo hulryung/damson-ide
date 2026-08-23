@@ -197,15 +197,17 @@ final class OrchardSettings: ObservableObject {
 }
 
 /// One engine choice offered by the composer and menus — sourced from T3's engine
-/// registry so the pickers can never drift from what the terminal layer can launch
-/// (wave-2 seam close; the hardcoded picker enum below survives only to map legacy
-/// stored defaults onto registry ids).
+/// registry so the pickers can never drift from what the terminal layer can launch.
+/// Labels are the planner's alias-once form (`claude (claude-code)`), not the
+/// engine's marketing `displayName`, so the picker matches the ids agents type.
 struct EngineOption: Identifiable, Hashable {
     let id: String
     let displayName: String
 
     static var all: [EngineOption] {
-        AgentEngineRegistry.all.map { EngineOption(id: $0.id, displayName: $0.displayName) }
+        ComposerPlanning.engineListing(
+            engines: AgentEngineRegistry.all.map { (id: $0.id, aliases: $0.aliases) }
+        ).map { EngineOption(id: $0.id, displayName: $0.label) }
     }
 }
 

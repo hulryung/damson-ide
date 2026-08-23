@@ -762,26 +762,34 @@ final class AppStore: ObservableObject {
     }
 
     func compose(project: ProjectSession, name: String, prompt: String,
-                 engineID: String, baseRef: String?, count: Int) throws {
+                 engineID: String, baseRef: String?, count: Int,
+                 workspaceStatus: String = WorkspaceStatus.inProgress.rawValue) throws {
         if project.isRemote {
             throw GitError(RemoteWorkspacePolicy.unsupportedExplanation(
                 .composer, hostId: project.hostId)
                 ?? "agents cannot run on a remote host yet")
         }
+        if let error = ComposerPlanning.validationError(name: name, count: count) {
+            throw GitError(error)
+        }
         guard AgentEngineRegistry.engine(id: engineID) != nil else {
             throw GitError("engine '\(engineID)' isn't registered in this build.")
         }
+        // Plan names up front so cards get `-2`/`-3` titles, then spawn every
+        // agent immediately — v2 has no scheduler, so fan-out is just N creates.
+        let names = ComposerPlanning.fanOutNames(
+            name: name, count: count, taken: project.worktrees.takenNames)
         var first: WorktreeRecord?
-        for _ in 0..<max(1, count) {
+        for leaf in names {
             let record = try project.worktrees.createWorktree(
-                name: name, baseRef: baseRef, title: name)
+                name: leaf, baseRef: baseRef, title: leaf)
             project.worktrees.runSetupScriptIfEnabled(for: record)
             registerMetaKey(record, in: project)
-            _ = meta.ensure(record.id, status: .inProgress)
-            meta.setStatus(.inProgress, for: record.id)
+            _ = meta.ensure(record.id)
+            meta.setStatusID(workspaceStatus, for: record.id)
             let size = paneSpawnSize()
             let agent = try project.agents.spawnAgent(
-                engineID: engineID, prompt: prompt, in: record.worktree, title: name,
+                engineID: engineID, prompt: prompt, in: record.worktree, title: leaf,
                 workspaceID: workspaceID(for: record, in: project),
                 initialCols: size.cols, initialRows: size.rows)
             record.agentState = agent.state
@@ -793,7 +801,11 @@ final class AppStore: ObservableObject {
         if let first { select(first, in: project) }
     }
 
-    func startAgent(in record: WorktreeRecord, project: ProjectSession, engineID: String) throws {
+    /// Spawn into an existing worktree (agent-first). Prompt is optional — an
+    /// empty string leaves the engine waiting at its input box, matching ⌘N
+    /// with a blank prompt. Used by the card start/restart row.
+    func startAgent(in record: WorktreeRecord, project: ProjectSession,
+                    engineID: String, prompt: String? = nil) throws {
         if project.isRemote {
             throw GitError(RemoteWorkspacePolicy.unsupportedExplanation(
                 .agents, hostId: project.hostId)
@@ -802,15 +814,20 @@ final class AppStore: ObservableObject {
         guard AgentEngineRegistry.engine(id: engineID) != nil else {
             throw GitError("engine '\(engineID)' isn't registered in this build.")
         }
+        for agent in project.liveAgents(in: record.id) where agent.state.isTerminal {
+            project.agents.retire(agent)
+        }
+        let delivered = prompt ?? record.lastPrompt ?? ""
         let size = paneSpawnSize()
         let agent = try project.agents.spawnAgent(
             engineID: engineID,
-            prompt: record.lastPrompt ?? "",
+            prompt: delivered,
             in: record.worktree,
             title: record.title,
             workspaceID: workspaceID(for: record, in: project),
             initialCols: size.cols, initialRows: size.rows)
         record.agentState = agent.state
+        if !delivered.isEmpty { record.lastPrompt = delivered }
         bindAgentTab(agent, key: .worktree(record.id))
         select(record, in: project)
     }

@@ -1,7 +1,7 @@
 import SwiftUI
 import OrchardCore
 
-/// ⌘N — name, prompt, engine (claude|codex|grok|cursor|shell), base branch, fan-out.
+/// ⌘N — name, prompt, live-registry engine, base branch, fan-out, initial status.
 struct ComposerView: View {
     @ObservedObject var project: ProjectSession
     @EnvironmentObject var store: AppStore
@@ -12,14 +12,29 @@ struct ComposerView: View {
     @State private var engineID: String = ""
     @State private var baseRef = ""
     @State private var count = 1
+    @State private var workspaceStatus = WorkspaceStatus.inProgress.rawValue
     @State private var errorMessage: String?
     @FocusState private var nameFocused: Bool
 
-    private var branches: [String] { project.worktrees.availableBaseRefs() }
+    private var engines: [EngineOption] { EngineOption.all }
+
+    /// Repo default first (often `origin/main`, not a local branch), then locals.
+    private var branches: [String] {
+        ComposerPlanning.seedBaseRefs(
+            resolvedDefault: project.worktrees.baseRef,
+            localBranches: project.worktrees.availableBaseRefs())
+    }
+
+    private var plannedNames: [String] {
+        ComposerPlanning.fanOutNames(
+            name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? project.worktrees.suggestedName() : name,
+            count: max(count, 1),
+            taken: project.worktrees.takenNames)
+    }
 
     private var branchPreview: String {
-        let leaf = name.trimmingCharacters(in: .whitespaces).isEmpty
-            ? project.worktrees.suggestedName() : name
+        let leaf = plannedNames.first ?? project.worktrees.suggestedName()
         return WorktreeNaming.branchName(prefix: project.worktrees.branchPrefix, name: leaf)
     }
 
@@ -65,10 +80,11 @@ struct ComposerView: View {
                             .foregroundStyle(Tokens.textTertiary)
                     }
                     field("Engine") {
-                        // Options come from T3's engine registry, so every listed
-                        // engine is launchable by construction.
+                        // Live registry, one row per canonical id. Aliases appear
+                        // in the label once (`claude (claude-code)`), never as a
+                        // second choice that would drift from what spawn accepts.
                         Picker("", selection: $engineID) {
-                            ForEach(EngineOption.all) { item in
+                            ForEach(engines) { item in
                                 Text(item.displayName).tag(item.id)
                             }
                         }
@@ -78,12 +94,38 @@ struct ComposerView: View {
                     field("Base branch") {
                         Picker("", selection: $baseRef) {
                             ForEach(branches, id: \.self) { Text($0).tag($0) }
-                            if !branches.contains(baseRef) {
+                            if !baseRef.isEmpty, !branches.contains(baseRef) {
                                 Text(baseRef).tag(baseRef)
                             }
                         }
                         .labelsHidden()
                         .pickerStyle(.menu)
+                    }
+                    field("Status") {
+                        Picker("", selection: $workspaceStatus) {
+                            ForEach(store.statusVocabulary) { status in
+                                Text(status.label).tag(status.id)
+                            }
+                            if store.statusVocabulary.contains(where: { $0.id == workspaceStatus }) == false {
+                                Text(workspaceStatus).tag(workspaceStatus)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                    }
+                    field("Fan-out") {
+                        Stepper(value: $count, in: ComposerPlanning.fanOutRange) {
+                            Text(count == 1 ? "1 worktree" : "\(count) worktrees")
+                                .font(Tokens.fontMeta)
+                                .monospacedDigit()
+                        }
+                        .help("N independent worktrees, same prompt, all start now")
+                        if count > 1 {
+                            Text(plannedNames.joined(separator: ", "))
+                                .font(Tokens.fontMono)
+                                .foregroundStyle(Tokens.textTertiary)
+                                .lineLimit(2)
+                        }
                     }
                     if let errorMessage {
                         Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
@@ -96,13 +138,6 @@ struct ComposerView: View {
             }
             Divider()
             HStack(spacing: 10) {
-                Stepper(value: $count, in: 1...8) {
-                    Text(count == 1 ? "1 agent" : "\(count) agents")
-                        .font(Tokens.fontMeta)
-                        .monospacedDigit()
-                }
-                .fixedSize()
-                .help("Run this prompt in several independent worktrees at once")
                 Spacer()
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
@@ -119,6 +154,10 @@ struct ComposerView: View {
             name = project.worktrees.suggestedName()
             baseRef = project.worktrees.baseRef
             engineID = store.settings.resolvedDefaultEngineID
+            if store.statusVocabulary.contains(where: { $0.id == workspaceStatus }) == false {
+                workspaceStatus = store.statusVocabulary.first?.id
+                    ?? WorkspaceStatus.inProgress.rawValue
+            }
             nameFocused = true
         }
     }
@@ -135,8 +174,8 @@ struct ComposerView: View {
     private func create() {
         let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard WorktreeNaming.isValid(trimmedName) else {
-            errorMessage = "Give this worktree a name that contains at least one letter or number."
+        if let error = ComposerPlanning.validationError(name: trimmedName, count: count) {
+            errorMessage = error
             return
         }
         do {
@@ -146,7 +185,8 @@ struct ComposerView: View {
                 prompt: trimmedPrompt,
                 engineID: engineID,
                 baseRef: baseRef.isEmpty ? nil : baseRef,
-                count: count)
+                count: count,
+                workspaceStatus: workspaceStatus)
             dismiss()
         } catch {
             errorMessage = String(describing: error)
