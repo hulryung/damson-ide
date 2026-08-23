@@ -61,13 +61,16 @@ struct SidebarView: View {
             .menuStyle(.borderlessButton)
 
             Menu {
-                Button("All statuses") { store.filterStatus = nil }
+                Button("All statuses") { store.filterStatusID = nil }
                 Divider()
-                ForEach(WorkspaceStatus.allCases) { status in
-                    Button(status.label) { store.filterStatus = status }
+                ForEach(store.statusVocabulary) { status in
+                    Button(status.label) { store.filterStatusID = status.id }
                 }
             } label: {
-                filterChip(store.filterStatus?.label ?? "Status")
+                filterChip(
+                    store.filterStatusID.flatMap { id in
+                        store.statusVocabulary.first { $0.id == id }?.label
+                    } ?? "Status")
             }
             .menuStyle(.borderlessButton)
 
@@ -278,7 +281,7 @@ struct WorkspaceCard: View {
     var isSelected: Bool
     @State private var isHovering = false
 
-    private var status: WorkspaceStatus { store.meta.status(for: record.id) }
+    private var status: WorkspaceStatusAppearance { store.statusAppearance(for: record.id) }
     private var agents: [AgentSession] { project.liveAgents(in: record.id) }
 
     var body: some View {
@@ -306,7 +309,7 @@ struct WorkspaceCard: View {
     private var titleRow: some View {
         HStack(spacing: 6) {
             ZStack(alignment: .topLeading) {
-                WorkspaceStatusSlot(status: status)
+                WorkspaceStatusSlot(appearance: status)
                 if record.hasUnseenActivity {
                     Circle()
                         .fill(.orange)
@@ -354,8 +357,8 @@ struct WorkspaceCard: View {
     @ViewBuilder
     private var menu: some View {
         Menu("Set status") {
-            ForEach(WorkspaceStatus.allCases) { status in
-                Button(status.label) { store.meta.setStatus(status, for: record.id) }
+            ForEach(store.statusVocabulary) { status in
+                Button(status.label) { store.setWorkspaceStatus(status.id, for: record.id) }
             }
         }
         if store.ordering == .manual {
@@ -400,28 +403,41 @@ struct WorkspaceCard: View {
 }
 
 struct AgentInlineRow: View {
+    @EnvironmentObject var store: AppStore
     @ObservedObject var agent: AgentSession
+
+    private var dot: DashboardDotState { store.displayDotState(for: agent) }
 
     var body: some View {
         HStack(spacing: 5) {
-            Text(agent.state.glyph)
+            Text(DashboardProjection.glyph(for: dot))
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .foregroundStyle(agent.state.color)
+                .foregroundStyle(dot.color)
                 .frame(width: 12)
-            Text(agent.engine.displayName)
+            Text(store.agentTypeName(for: agent))
                 .font(Tokens.fontMeta)
                 .foregroundStyle(Tokens.textTertiary)
-            Text(agent.task.flatMap { $0.prompt.isEmpty ? nil : $0.prompt } ?? agent.state.label)
+            Text(store.detailLine(for: agent) ?? dotLabel)
                 .font(Tokens.fontMeta)
                 .foregroundStyle(Tokens.textSecondary)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 4)
-            ElapsedLabel(since: agent.startedAt)
+            ElapsedLabel(since: store.stateStartedAt(for: agent))
                 .font(.system(size: 9))
                 .foregroundStyle(Tokens.textTertiary)
         }
         .padding(.leading, 20)
         .padding(.vertical, 1)
+    }
+
+    private var dotLabel: String {
+        switch dot {
+        case .working: return "Working"
+        case .blocked: return "Needs approval"
+        case .waiting: return "Needs input"
+        case .done: return "Done"
+        case .idle: return "Idle"
+        }
     }
 }
