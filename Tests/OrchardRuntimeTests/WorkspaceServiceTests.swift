@@ -345,6 +345,81 @@ final class WorkspaceServiceTests: XCTestCase {
         XCTAssertEqual(firstAfter?.count, 1)
         XCTAssertEqual(secondAfter?.count, 1)
     }
+
+    // MARK: - Primary checkout projection (T15)
+
+    func testGitPrimaryCheckoutProjectsAsWorkspace() throws {
+        let repo = try makeRepo()
+        let service = makeService()
+        let record = try service.addRepo(path: repo, displayName: "Primary")
+        let listed = try service.listWorkspaces(repo: record.id)
+        XCTAssertEqual(listed.count, 1)
+        let ws = listed[0]
+        XCTAssertEqual(ws.id, "\(record.id)::\(repo.standardizedFileURL.path)")
+        XCTAssertEqual(ws.kind, .worktree)
+        XCTAssertEqual(ws.path, repo.standardizedFileURL.path)
+        XCTAssertEqual(ws.branch, "main")
+        XCTAssertFalse(ws.head.isEmpty)
+        XCTAssertEqual(ws.displayName, "Primary")
+
+        let byPath = try service.show(selector: "path:\(repo.path)")
+        XCTAssertEqual(byPath.id, ws.id)
+        let byName = try service.show(selector: "name:Primary")
+        XCTAssertEqual(byName.id, ws.id)
+        let active = try service.show(selector: "active", cwd: repo.appendingPathComponent("f.txt").path)
+        XCTAssertEqual(active.id, ws.id)
+        let current = try service.current(cwd: repo.path)
+        XCTAssertEqual(current.id, ws.id)
+    }
+
+    func testRepoChangesKeepsProjectedWorkspacesInSync() async throws {
+        let repo = try makeRepo()
+        let service = makeService()
+        let stream = service.repoChanges()
+        var iterator = stream.makeAsyncIterator()
+        _ = await iterator.next()
+        XCTAssertTrue(try service.listWorkspaces().isEmpty)
+
+        let record = try service.addRepo(path: repo)
+        _ = await iterator.next()
+        let listed = try service.listWorkspaces()
+        XCTAssertEqual(listed.map(\.id), ["\(record.id)::\(repo.standardizedFileURL.path)"])
+
+        _ = try service.removeRepo(record.id)
+        _ = await iterator.next()
+        XCTAssertTrue(try service.listWorkspaces().isEmpty)
+        XCTAssertThrowsError(try service.show(selector: "path:\(repo.path)")) { error in
+            XCTAssertEqual((error as? WorkspaceError)?.code, "unknown_worktree")
+        }
+    }
+
+    func testCannotRemovePrimaryCheckout() throws {
+        let repo = try makeRepo()
+        let service = makeService()
+        let record = try service.addRepo(path: repo)
+        let primary = try XCTUnwrap(try service.listWorkspaces(repo: record.id).first)
+        XCTAssertThrowsError(try service.remove(selector: primary.id)) { error in
+            XCTAssertEqual((error as? WorkspaceError)?.code, "invalid_argument")
+        }
+        XCTAssertEqual(try service.listWorkspaces(repo: record.id).count, 1)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repo.path))
+    }
+
+    func testCreatedWorktreeDoesNotHidePrimaryCheckout() async throws {
+        let repo = try makeRepo()
+        let service = makeService()
+        let record = try service.addRepo(path: repo)
+        let created = try await service.create(WorkspaceCreateRequest(repo: record.id, name: "apricot"))
+        let listed = try service.listWorkspaces(repo: record.id)
+        XCTAssertEqual(listed.count, 2)
+        XCTAssertEqual(Set(listed.map(\.id)), Set([
+            "\(record.id)::\(repo.standardizedFileURL.path)",
+            created.workspace.id,
+        ]))
+        let byPath = try service.show(selector: "path:\(repo.path)")
+        XCTAssertEqual(byPath.path, repo.standardizedFileURL.path)
+        XCTAssertNotEqual(byPath.id, created.workspace.id)
+    }
 }
 
 private final class StubLauncher: AgentLaunching, @unchecked Sendable {

@@ -77,7 +77,8 @@ final class WorkspaceHandlerTests: XCTestCase {
             id: "2", method: "worktree-list",
             params: .object(["repo": .string(repo.id)])))
         XCTAssertTrue(listed.ok, listed.error?.message ?? "")
-        XCTAssertEqual(listed.result?.objectValue?["totalCount"]?.intValue, 1)
+        // Primary checkout is always projected, plus the created worktree.
+        XCTAssertEqual(listed.result?.objectValue?["totalCount"]?.intValue, 2)
 
         let shown = await server.perform(RPCRequest(
             id: "3", method: "worktree-show",
@@ -112,9 +113,12 @@ final class WorkspaceHandlerTests: XCTestCase {
         XCTAssertTrue(rm.ok, rm.error?.message ?? "")
         XCTAssertEqual(rm.result?.objectValue?["removed"]?.boolValue, true)
 
-        let empty = await server.perform(RPCRequest(id: "7", method: "worktree-list",
-                                                    params: .object(["repo": .string(repo.id)])))
-        XCTAssertEqual(empty.result?.objectValue?["totalCount"]?.intValue, 0)
+        let remaining = await server.perform(RPCRequest(id: "7", method: "worktree-list",
+                                                        params: .object(["repo": .string(repo.id)])))
+        XCTAssertEqual(remaining.result?.objectValue?["totalCount"]?.intValue, 1)
+        let remainingId = remaining.result?.objectValue?["worktrees"]?.arrayValue?
+            .first?.objectValue?["id"]?.stringValue
+        XCTAssertEqual(remainingId, "\(repo.id)::\(URL(fileURLWithPath: repo.path).standardizedFileURL.path)")
     }
 
     func testCreateAgentFirstReturnsHandle() async throws {

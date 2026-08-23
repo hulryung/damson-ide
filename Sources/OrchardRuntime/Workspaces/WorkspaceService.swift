@@ -80,6 +80,8 @@ public final class WorkspaceService {
             inferredKind = isGitRepo(standardized) ? .git : .folder
         }
         if let existing = repo(path: standardized) {
+            // Re-add of a pre-T15 record still projects the primary checkout.
+            try ensurePrimaryWorkspace(for: existing)
             return existing
         }
         var record = RepoRecord(path: standardized.path, displayName: displayName,
@@ -91,10 +93,8 @@ public final class WorkspaceService {
             record.baseRef = baseRef
         }
         try store.modify { $0.repos.append(record) }
+        try ensurePrimaryWorkspace(for: record)
         publishReposChanged()
-        if inferredKind == .folder {
-            _ = try ensurePrimaryFolderWorkspace(for: record, name: record.displayName)
-        }
         return record
     }
 
@@ -332,6 +332,10 @@ public final class WorkspaceService {
     public func remove(selector: String, cwd: String? = nil,
                        force: Bool = false, runHooks: Bool = false) throws -> WorkspaceRemoveResult {
         let workspace = try resolveWorkspace(selector, cwd: cwd)
+        if isPrimaryCheckout(workspace) {
+            throw WorkspaceError("invalid_argument",
+                                 "cannot remove the repo primary checkout; close the project instead")
+        }
         switch workspace.kind {
         case .folder:
             try store.modify { data in
@@ -540,7 +544,7 @@ public final class WorkspaceService {
 
     private func ensurePrimaryFolderWorkspace(for repo: RepoRecord, name: String) throws -> FolderWorkspaceRecord {
         let data = store.load()
-        let id = WorktreeIdentity.make(repoId: repo.id, path: repo.path)
+        let id = primaryWorkspaceId(for: repo)
         if let existing = data.folderWorkspaces.first(where: { $0.id == id }) {
             return existing
         }
@@ -548,6 +552,41 @@ public final class WorkspaceService {
                                            folderPath: repo.path, name: name)
         try store.modify { $0.folderWorkspaces.append(record) }
         return record
+    }
+
+    /// Project the repo root as `repoId::path` so path:/name:/active selectors
+    /// resolve it without a runtime-created worktree (Orca's primary checkout).
+    private func ensurePrimaryWorkspace(for repo: RepoRecord) throws {
+        switch repo.kind {
+        case .folder:
+            _ = try ensurePrimaryFolderWorkspace(for: repo, name: repo.displayName)
+        case .git:
+            _ = try ensurePrimaryGitMeta(for: repo, existing: store.load().worktreeMeta)
+        }
+    }
+
+    @discardableResult
+    private func ensurePrimaryGitMeta(for repo: RepoRecord,
+                                      existing: [String: WorktreeMeta]) throws -> WorktreeMeta {
+        let id = primaryWorkspaceId(for: repo)
+        if let meta = existing[id] { return meta }
+        let meta = WorktreeMeta(instanceId: UUID().uuidString,
+                                displayName: repo.displayName,
+                                lastActivityAt: repo.addedAt,
+                                createdAt: repo.addedAt)
+        try store.modify { $0.worktreeMeta[id] = meta }
+        return meta
+    }
+
+    private func primaryWorkspaceId(for repo: RepoRecord) -> String {
+        WorktreeIdentity.make(
+            repoId: repo.id,
+            path: URL(fileURLWithPath: repo.path).standardizedFileURL.path)
+    }
+
+    private func isPrimaryCheckout(_ workspace: Workspace) -> Bool {
+        guard let repo = repo(id: workspace.repoId) else { return false }
+        return workspace.id.caseInsensitiveCompare(primaryWorkspaceId(for: repo)) == .orderedSame
     }
 
     // MARK: - Agent spawn
@@ -580,7 +619,11 @@ public final class WorkspaceService {
 
     private func gitWorkspaces(for repo: RepoRecord, data: OrchardData) throws -> [Workspace] {
         let service = try gitService(for: repo)
-        return service.worktrees.compactMap { record in
+        let primary = try primaryGitWorkspace(for: repo, service: service, data: data)
+        let primaryPath = URL(fileURLWithPath: primary.path).standardizedFileURL.path
+        let extra = service.worktrees.compactMap { record -> Workspace? in
+            let path = record.worktree.path.standardizedFileURL.path
+            if path == primaryPath { return nil }
             let id = record.worktree.workspaceId(repoId: repo.id)
             var meta = data.worktreeMeta[id] ?? .defaults(for: record.worktree)
             // Path reuse: git-config UUID is the instance. Stale meta (different
@@ -598,6 +641,25 @@ public final class WorkspaceService {
             return Workspace.from(worktree: record.worktree, repo: repo,
                                   meta: meta, head: head, lineage: lineage)
         }
+        return [primary] + extra
+    }
+
+    private func primaryGitWorkspace(for repo: RepoRecord, service: WorktreeService,
+                                     data: OrchardData) throws -> Workspace {
+        let meta = try ensurePrimaryGitMeta(for: repo, existing: data.worktreeMeta)
+        let path = URL(fileURLWithPath: repo.path)
+        let branch = service.currentBranchName ?? ""
+        let probe = Worktree(id: UUID(uuidString: meta.instanceId) ?? UUID(),
+                             baseRepo: path, path: path, branch: branch,
+                             baseRef: repo.baseRef, title: meta.displayName)
+        let head = service.manager.headCommit(probe)
+        let id = primaryWorkspaceId(for: repo)
+        var lineage = data.worktreeLineageById[id]
+        if let existing = lineage, existing.isStale(currentInstanceId: meta.instanceId) {
+            lineage = nil
+        }
+        return Workspace.fromPrimaryCheckout(repo: repo, meta: meta,
+                                             branch: branch, head: head, lineage: lineage)
     }
 
     private func folderWorkspaces(for repo: RepoRecord, data: OrchardData) -> [Workspace] {

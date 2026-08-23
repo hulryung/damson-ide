@@ -150,7 +150,8 @@ public final class OrchardRuntimeHost {
         registry.register(WorkerCommandHandler(
             store: orchestration,
             runtime: workerRuntime))
-        registry.register(TerminalCommandHandler(service: terminalService))
+        registry.register(TerminalCommandHandler(service: terminalService,
+                                                 workspaces: workspaceService))
         registry.register(WorkspaceCommandHandler(service: workspaceService))
         registry.register(RepoRegistryHandler(service: workspaceService))
         registry.register(FileCommandHandler(files: fileService,

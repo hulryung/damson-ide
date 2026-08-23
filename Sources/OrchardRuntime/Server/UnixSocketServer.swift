@@ -35,8 +35,11 @@ public final class UnixSocketServer: @unchecked Sendable {
         }
         RuntimeDiscovery.sweepStale(fileManager: fileManager, dataDirectory: resolvedData)
         let paths = try RuntimePaths.prepare(fileManager: fileManager, dataDirectory: resolvedData)
-        let socketURL = paths.run.appendingPathComponent("orchard-\(getpid()).sock")
-        guard socketURL.path.utf8.count < MemoryLayout.size(ofValue: sockaddr_un().sun_path) else {
+        // `prepare` already relocates `run/` under `$TMPDIR/orchard-<uid>/` when
+        // `data/run/orchard-<pid>.sock` would exceed sun_path; this guard is the
+        // last resort if even the fallback is too long.
+        let socketURL = paths.run.appendingPathComponent(RuntimePaths.socketName())
+        guard socketURL.path.utf8.count < RuntimePaths.unixSocketPathLimit else {
             throw UnixSocketServerError.pathTooLong
         }
         try? fileManager.removeItem(at: socketURL)
