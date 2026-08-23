@@ -35,8 +35,6 @@ enum Tokens {
     static let statusBarHeight: CGFloat = 26
     static let sidebarIdealWidth: CGFloat = 280
     static let sidebarMaxWidth: CGFloat = 500
-    /// Matches `StatusBarView` so the sidebar's New button sits above the inset.
-    static let statusBarInset: CGFloat = 28
 
     /// VS Code dark-theme git palette. Used ONLY for git status.
     enum Git {

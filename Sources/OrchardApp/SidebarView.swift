@@ -22,11 +22,6 @@ struct SidebarView: View {
         // safe-area inset stops at the AppKit column boundary).
         .padding(.bottom, Tokens.statusBarHeight)
         .background(Tokens.sidebar)
-        // NavigationSplitView's window-level status-bar inset does not reach
-        // the sidebar, so the New button was clipped. Reserve the same height.
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            Color.clear.frame(height: Tokens.statusBarInset)
-        }
     }
 
     private var navHeader: some View {
