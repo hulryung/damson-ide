@@ -436,11 +436,41 @@ with the preflight sheet); settings panes for the new subsystems (ports sweep in
 default browser profile, automations enable/disable). No new services — UI over
 existing APIs.
 
-### Wave 7+ backlog
+### Wave 7 (T27–T30, parallel; merge order T27 → T30 → T28 → T29)
 
-The `orchard` CLI has no `terminal` command group — the terminal-list/create/read/send/
-wait RPC verbs exist and work over the socket, but no CLI spec exposes them (found
-during the T23 restart-survival smoke, 2026-08-24; driven via raw RPC instead). Also:
+**T27 — `orchard terminal` CLI group.** Expose the existing terminal RPC verbs
+(list/create/read/send/wait/close/rename; split stays not_implemented) as a top-level
+`terminal` command with subcommand routing like repo/browser/file, full CommandSpec
+flags (worktree selector, --screen/--cursor/--limit, --enter/--interrupt, --for
+tui-idle|exit, --timeout-ms), human formatting for list/read, agent-context and the
+embedded guide updated. Found missing during the T23 smoke (RPC works; CLI absent).
+
+**T28 — Editor pane.** Make the workbench `editor` tab kind real: open a file in an
+editable monospaced NSTextView wrapper (line/column in a thin footer, dirty dot in the
+tab label, ⌘S saves via the file service's write path with git-status refresh, revert
+on external change prompt), reachable from the explorer double-click, the jump
+palette, and `file open-changed --mode edit`. Plain text first (no highlighting);
+binary/oversized files fall back to the preview notice.
+
+**T29 — SSH slice: design + host registry + remote terminal PoC.** Write
+docs/design/remote-hosts.md following orca's ssh-execution-boundary rules (verdicts
+live|unverifiable|exited; loss of contact is never death; ExecutionHostId on
+everything). Implement the foundation: `orchard host list|add|check` backed by a host
+registry in orchard-data.json (+~/.ssh/config name import), a BatchMode connectivity
+probe, and a proof-of-concept remote terminal: terminal create --host ssh:<name>
+spawns `ssh -tt <host>` in a local PTY with executionHostId stamped on the summary.
+Remote worktrees/agents stay out of scope this wave.
+
+**T30 — Terminal pane fit & feel.** Fix the half-clipped first row (grid is
+bottom-anchored; top-align when content is shorter than the viewport), snap pane
+content height to cell multiples where feasible so no partial rows render, and keep
+scroll position stable across pane resizes. Work through DamsonSurfaceView/Grid
+public API from the app container; damson-side changes only if additive and necessary
+(ask first).
+
+### Wave 8+ backlog
+
+Also:
 
 Project the repo primary checkout (and folder workspaces) into the runtime workspace
 registry as `repoId::path` the way Orca does — today `orchard file search --worktree
