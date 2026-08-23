@@ -91,6 +91,19 @@ func formatHuman(method: String, result: JSONValue?) -> String {
             }
         }
         return lines.joined(separator: "\n")
+    case "file-search":
+        let matches = object?["matches"]?.arrayValue ?? []
+        if matches.isEmpty { return "No matches." }
+        var lines = matches.map { item -> String in
+            let path = item.objectValue?["path"]?.stringValue ?? "?"
+            let line = item.objectValue?["line"]?.numberValue.map { Int($0) } ?? 0
+            let excerpt = item.objectValue?["excerpt"]?.stringValue ?? ""
+            return "\(path):\(line):\(excerpt)"
+        }
+        if object?["truncated"]?.boolValue == true {
+            lines.append("(truncated)")
+        }
+        return lines.joined(separator: "\n")
     default:
         return result.map(String.init(describing:)) ?? "ok"
     }
@@ -119,10 +132,14 @@ do {
         }
         if method == "file" {
             guard case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue else {
-                throw CLIError.usage("usage: orchard file open|diff|open-changed [path] [--worktree <selector>]")
+                throw CLIError.usage("usage: orchard file open|diff|open-changed|search [path|query] [--worktree <selector>]")
             }
             method = "file-\(subcommand)"
-            if values.count > 1, params["path"] == nil { params["path"] = values[1] }
+            if subcommand == "search" {
+                if values.count > 1, params["query"] == nil { params["query"] = values[1] }
+            } else if values.count > 1, params["path"] == nil {
+                params["path"] = values[1]
+            }
             if params["cwd"] == nil { params["cwd"] = .string(FileManager.default.currentDirectoryPath) }
         }
         let response = try callRuntime(method: method, params: .object(params))
