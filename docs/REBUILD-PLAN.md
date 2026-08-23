@@ -328,7 +328,49 @@ without manual refresh), and auto-reveal of the active file. Owns
 Sources/OrchardRuntime/Files/**, Sources/OrchardApp/FileExplorer/**, file CLI
 additions, Tests/OrchardRuntimeTests/File*.
 
-### Wave 4+ backlog
+### Wave 4 (T15–T18, parallel; merge order T15 → T16 → T18; T17 lands in ~/dev/damson)
+
+**T15 — Workspace projection & serve socket default (runtime).** Project every
+registered repo's primary checkout (and folder workspaces) into the runtime workspace
+registry as first-class workspaces keyed `repoId::path` (empty branch/head for folder
+roots), so worktree selectors (`path:`, `name:`, `active`) resolve them everywhere —
+`file search`, browser resolver, terminal create. Second fix: when the serve
+`--data-dir` would push the socket path past the 104-byte sun_path limit, default the
+socket into `$TMPDIR/orchard-<uid>/` while keeping data in the requested directory
+(metadata records the real socket path). Owns Sources/OrchardRuntime/Workspaces/**,
+Server/RuntimePaths*, tests.
+
+**T16 — Automations (runtime + CLI).** Scheduled prompts per orca-inventory §7: an
+automations store in orchard-data.json ({id, name, trigger hourly|daily|weekdays|weekly|
+5-field-cron, time, day, provider agent, prompt, target repo (fresh worktree per run) or
+workspace (reuse), bounded precheck command — exit 0 continues else records skipped},
+a scheduler in the runtime host that fires due automations while it runs (app or serve),
+run history with outcomes, and CLI `automations list|show|create|edit|remove|run|runs`.
+Firing a repo-target automation composes the existing worker-start path with the
+configured agent + prompt. Owns Sources/OrchardRuntime/Automations/** (new), CLI spec
+additions, tests (trigger math incl. cron parse, due-run selection, precheck skip).
+
+**T17 — damson-side fixes (in ~/dev/damson).** The authorized damson track, per
+docs/research/damson-surface.md gaps: (1) honor `--pane <id>` for every pane-addressed
+control command (send-text, send-keys, dump-grid, zoom, resize-pane, focus-pane,
+close-pane), not just pane-info — the wire plumbing exists, only dispatch ignores it;
+(2) add a multi-subscriber raw-output stream (`outputBytes` PassthroughSubject
+alongside the clobberable `onOutput`), non-breaking; (3) optional deferred/initial-size
+spawn for DamsonSession (init that takes cols/rows, or a lazy-spawn variant) without
+changing existing call sites. Update docs/CLAUDE-ORCHESTRATION.md §2 accordingly.
+Verification: damson's own `swift test` suite; all changes additive to the library
+contracts. Lands on a branch in ~/dev/damson; the damson-ide pin bump waits for a
+tagged damson release (user decision — tagging triggers the notarized release CI).
+
+**T18 — Live dashboard & status polish (app).** Wire the T5 dashboard skeleton to the
+real status stream: buckets attention|working|done|idle fed by AgentStatusEntry
+transitions (permission ⇒ attention), click-to-focus routes to the owning workspace
+tab, done cards stay highlighted until focused (existing unacked set), inline agent
+rows on workspace cards get the same live states, and the workspace-status slot
+supports the custom vocabulary from settings. Owns Sources/OrchardApp/** dashboard/
+sidebar files; additive status-stream reads only.
+
+### Wave 5+ backlog
 
 Project the repo primary checkout (and folder workspaces) into the runtime workspace
 registry as `repoId::path` the way Orca does — today `orchard file search --worktree
