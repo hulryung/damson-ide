@@ -101,6 +101,9 @@ public final class FileWatcher: @unchecked Sendable {
     private var running = false
     private let queue: DispatchQueue
     private let debounce: TimeInterval
+    /// Test seam: invoked after every snapshot reconcile, including no-op diffs
+    /// and `rootDeleted`. Tests wait on this instead of sleeping for FSEvents.
+    private var onReconciledHandler: (@Sendable (FileWatchBatch) -> Void)?
 
     public init(debounce: TimeInterval = 0.12) {
         self.debounce = debounce
@@ -109,19 +112,28 @@ public final class FileWatcher: @unchecked Sendable {
 
     deinit { stop() }
 
+    /// Test seam. Set before mutating the watched tree; cleared by the test
+    /// after the matching batch arrives.
+    public var onReconciled: (@Sendable (FileWatchBatch) -> Void)? {
+        get { lock.lock(); defer { lock.unlock() }; return onReconciledHandler }
+        set { lock.lock(); onReconciledHandler = newValue; lock.unlock() }
+    }
+
     public func events() -> AsyncStream<FileWatchBatch> {
-        AsyncStream { continuation in
-            let id = UUID()
-            lock.lock()
-            continuations[id] = continuation
-            lock.unlock()
-            continuation.onTermination = { [weak self] _ in
-                guard let self else { return }
-                self.lock.lock()
-                self.continuations[id] = nil
-                self.lock.unlock()
-            }
+        // Register immediately so `let stream = events()` cannot miss a batch
+        // that lands before the first `for await` (the live-test flake).
+        let id = UUID()
+        let (stream, continuation) = AsyncStream.makeStream(of: FileWatchBatch.self)
+        lock.lock()
+        continuations[id] = continuation
+        lock.unlock()
+        continuation.onTermination = { [weak self] _ in
+            guard let self else { return }
+            self.lock.lock()
+            self.continuations[id] = nil
+            self.lock.unlock()
         }
+        return stream
     }
 
     public func start(root: URL) throws {
@@ -231,7 +243,9 @@ public final class FileWatcher: @unchecked Sendable {
         var isDir: ObjCBool = false
         let exists = FileManager.default.fileExists(atPath: root.path, isDirectory: &isDir)
         if !exists || !isDir.boolValue {
-            emit(FileWatchBatch(rootDeleted: true))
+            let batch = FileWatchBatch(rootDeleted: true)
+            emit(batch)
+            notifyReconciled(batch)
             // Don't FSEventStreamStop from inside the callback's debounce work
             // if we're already on the watcher queue — schedule a clean stop.
             lock.lock()
@@ -245,7 +259,9 @@ public final class FileWatcher: @unchecked Sendable {
         do {
             current = try FileWatchReconciler.snapshot(root: root)
         } catch {
-            emit(FileWatchBatch(rootDeleted: true))
+            let batch = FileWatchBatch(rootDeleted: true)
+            emit(batch)
+            notifyReconciled(batch)
             lock.lock()
             running = false
             lock.unlock()
@@ -257,9 +273,18 @@ public final class FileWatcher: @unchecked Sendable {
         lock.lock()
         self.previous = current
         lock.unlock()
+        let batch = FileWatchBatch(changes: changes)
         if !changes.isEmpty {
-            emit(FileWatchBatch(changes: changes))
+            emit(batch)
         }
+        notifyReconciled(batch)
+    }
+
+    private func notifyReconciled(_ batch: FileWatchBatch) {
+        lock.lock()
+        let handler = onReconciledHandler
+        lock.unlock()
+        handler?(batch)
     }
 
     private func emit(_ batch: FileWatchBatch) {

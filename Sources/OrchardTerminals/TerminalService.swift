@@ -328,6 +328,11 @@ public final class TerminalService {
         }
     }
 
+    /// Number of parked `wait` continuations for this handle (test seam).
+    public func waiterCount(handle: String) throws -> Int {
+        try registry.resolve(handle).waiters.count
+    }
+
     private func waitResult(_ record: TerminalRecord, condition: TerminalWaitCondition,
                             satisfied: Bool, timedOut: Bool) -> TerminalWaitResult {
         TerminalWaitResult(

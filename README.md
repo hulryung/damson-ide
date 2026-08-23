@@ -167,8 +167,12 @@ Requires macOS 13+ and a Swift 5.9+ toolchain.
 ```sh
 swift build                 # resolves the Damson engine dependency + builds
 ./scripts/run-dev.sh        # build Orchard (release) and launch it
-swift test                  # DamsonOrchestrator unit tests
+swift test                  # unit tests
+./scripts/ci.sh             # merge gate: clean, debug build, tests, release build
 ```
+
+`scripts/ci.sh` is the merge gate: `swift package clean`, `swift build`,
+`swift test`, `swift build -c release`, failing fast at the first section.
 
 Orchard self-bundles into `~/Library/Caches/orchard/Orchard.app` on first launch
 (its own Dock identity, `app.damson.orchard`). `ORCHARD_NO_TRAMPOLINE=1` runs the

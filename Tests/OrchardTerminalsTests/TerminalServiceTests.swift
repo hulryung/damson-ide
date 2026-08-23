@@ -266,9 +266,12 @@ final class TerminalServiceTests: XCTestCase {
         try await waitUntil("prompt typed") { fake.writtenText.contains("do the task") }
         fake.emitOSC(["9999", "working"])
 
-        // Every later return to idle must NOT re-type the prompt.
+        // Every later return to idle must NOT re-type the prompt. Wait until the
+        // idle observation is applied, then assert — no guessed settle sleep.
         fake.emitOSC(["9999", "idle"])
-        try await Task.sleep(nanoseconds: 150_000_000)
+        try await waitUntil("returned to idle") {
+            (try? service.agentStatus(handle: created.handle).projection) == .idle
+        }
         let occurrences = fake.writtenText.components(separatedBy: "do the task").count - 1
         XCTAssertEqual(occurrences, 1)
     }
@@ -292,7 +295,9 @@ final class TerminalServiceTests: XCTestCase {
         let fake = session(created.handle)
         fake.emitOSC(["9999", "working"])
         async let pending = service.wait(handle: created.handle, for: .tuiIdle, timeout: 2)
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await waitUntil("tui-idle waiter parked") {
+            (try? service.waiterCount(handle: created.handle)) == 1
+        }
         fake.emitOSC(["9999", "idle"])
         let result = try await pending
         XCTAssertTrue(result.satisfied)
@@ -305,7 +310,9 @@ final class TerminalServiceTests: XCTestCase {
         fake.emitOSC(["9999", "working"])
         async let pending = service.wait(handle: created.handle, for: .tuiIdle,
                                          timeout: 0.3)
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await waitUntil("tui-idle waiter parked") {
+            (try? service.waiterCount(handle: created.handle)) == 1
+        }
         fake.emitOSC(["9999", "blocked"])   // permission ≠ idle
         let result = try await pending
         XCTAssertFalse(result.satisfied)
@@ -318,7 +325,9 @@ final class TerminalServiceTests: XCTestCase {
         let fake = session(created.handle)
         fake.emitOSC(["9999", "working"])
         async let pending = service.wait(handle: created.handle, for: .tuiIdle, timeout: 5)
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await waitUntil("tui-idle waiter parked") {
+            (try? service.waiterCount(handle: created.handle)) == 1
+        }
         fake.exit(code: 1)
         do {
             _ = try await pending
@@ -332,7 +341,9 @@ final class TerminalServiceTests: XCTestCase {
         let created = try service.create(engineID: "shell")
         let fake = session(created.handle)
         async let pending = service.wait(handle: created.handle, for: .exit, timeout: 2)
-        try await Task.sleep(nanoseconds: 50_000_000)
+        try await waitUntil("exit waiter parked") {
+            (try? service.waiterCount(handle: created.handle)) == 1
+        }
         fake.exit(code: 3)
         let result = try await pending
         XCTAssertTrue(result.satisfied)
