@@ -125,10 +125,12 @@ do {
         if parsed.json { let data = try JSONEncoder.pretty.encode(["topic": "orchestration", "content": orchestrationGuide]); FileHandle.standardOutput.write(data + Data("\n".utf8)) } else { print(orchestrationGuide) }
     default:
         var method = parsed.spec.name, params = parsed.params; params.removeValue(forKey: "json")
-        if method == "repo" || method == "browser", case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue {
+        if method == "repo" || method == "browser" || method == "automations", case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue {
             method = "\(method)-\(subcommand)"
             let rest = Array(values.dropFirst())
-            if !rest.isEmpty { params["_args"] = .array(rest) }
+            if method.hasPrefix("automations-") && !rest.isEmpty && params["id"] == nil {
+                params["id"] = rest[0]
+            } else if !rest.isEmpty { params["_args"] = .array(rest) }
         }
         if method == "file" {
             guard case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue else {
