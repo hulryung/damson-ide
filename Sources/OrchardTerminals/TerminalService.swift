@@ -56,6 +56,13 @@ public final class TerminalService {
         registry.list(worktreeId: worktreeId).map { $0.summary() }
     }
 
+    /// The current summary for one handle (additive read for the worker verbs: they
+    /// need `paneKey`/`incarnation`/`connected` in one lookup, with the registry's
+    /// typed stale/not-found split preserved).
+    public func summary(handle: String) throws -> TerminalSummary {
+        try registry.resolve(handle).summary()
+    }
+
     /// Adopt an externally spawned agent session (an `AgentSupervisor` PTY) under the
     /// identity that was injected into its environment. The pane then behaves like any
     /// service-created terminal: the handle resolves, remints, and answers stale; reads,

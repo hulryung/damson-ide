@@ -72,6 +72,13 @@ public final class OrchardRuntimeHost {
         var registry = CommandRegistry()
         registry.register(StatusHandler(runtimeId: runtimeId))
         registry.register(OrchestrationCommandHandler(store: orchestration))
+        // T7: the supervised-worker lifecycle verbs, driving the same orchestration
+        // actor plus the live terminal/workspace seams.
+        registry.register(WorkerCommandHandler(
+            store: orchestration,
+            runtime: .live(cliCommand: cliCommand,
+                           workspaces: workspaceService,
+                           terminals: terminalService)))
         registry.register(TerminalCommandHandler(service: terminalService))
         registry.register(WorkspaceCommandHandler(service: workspaceService))
         registry.register(RepoRegistryHandler(service: workspaceService))
