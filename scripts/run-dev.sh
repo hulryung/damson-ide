@@ -19,8 +19,8 @@ echo "==> Orchard dev build @ $HASH"
 
 # Kill a previous dev instance (its own bundle id, distinct from Damson.app).
 pkill -f "orchard/Orchard.app/Contents/MacOS/Orchard" 2>/dev/null || true
-pkill -f "\.build/.*/release/Orchard" 2>/dev/null || true
+pkill -f ".build/.*/release/OrchardApp" 2>/dev/null || true
 
-swift build -c release --product Orchard
+swift build -c release --product OrchardApp
 echo "==> launching Orchard"
-exec "$REPO_ROOT/.build/release/Orchard"
+exec "$REPO_ROOT/.build/release/OrchardApp"
