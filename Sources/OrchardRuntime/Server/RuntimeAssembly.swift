@@ -16,6 +16,7 @@ public final class OrchardRuntimeHost {
     public nonisolated let runtimeId: String
     public nonisolated let dataDirectory: URL
     public nonisolated let cliCommand: String
+    public nonisolated let mode: RuntimeMode
 
     public nonisolated let dataStore: OrchardDataStore
     public let terminalService: TerminalService
@@ -37,11 +38,13 @@ public final class OrchardRuntimeHost {
 
     public init(fileManager: FileManager = .default,
                 terminalFactory: @escaping TerminalSessionFactory,
-                cliCommand: String = "orchard") throws {
+                cliCommand: String = "orchard", dataDirectory: URL? = nil,
+                mode: RuntimeMode = .app) throws {
         self.fileManager = fileManager
         self.cliCommand = cliCommand
+        self.mode = mode
         self.runtimeId = "rt_" + UUID().uuidString.lowercased()
-        let paths = try RuntimePaths.prepare(fileManager: fileManager)
+        let paths = try RuntimePaths.prepare(fileManager: fileManager, dataDirectory: dataDirectory)
         self.dataDirectory = paths.data
 
         self.dataStore = OrchardDataStore(
@@ -84,7 +87,7 @@ public final class OrchardRuntimeHost {
         })
 
         var registry = CommandRegistry()
-        registry.register(StatusHandler(runtimeId: runtimeId))
+        registry.register(StatusHandler(runtimeId: runtimeId, mode: mode))
         registry.register(OrchestrationCommandHandler(store: orchestration))
         // T7: the supervised-worker lifecycle verbs, driving the same orchestration
         // actor plus the live terminal/workspace seams.
@@ -116,7 +119,8 @@ public final class OrchardRuntimeHost {
     public func startSocketServer(authToken: String = UUID().uuidString.replacingOccurrences(of: "-", with: "")) throws -> RuntimeMetadata {
         if let existing = socketServer { return existing.metadata }
         let server = try UnixSocketServer(registry: registry, fileManager: fileManager,
-                                          runtimeId: runtimeId, authToken: authToken)
+                                          runtimeId: runtimeId, authToken: authToken,
+                                          dataDirectory: dataDirectory, mode: mode)
         server.start()
         socketServer = server
         return server.metadata

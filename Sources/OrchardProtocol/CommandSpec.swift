@@ -80,6 +80,9 @@ public enum OrchardCommands {
         }
         return [
             command("status", "Show runtime status"),
+            command("serve", "Run the Orchard runtime without the app", [
+                flag("data-dir", "Runtime data directory", "path")
+            ]),
             command("agent-context", "Serialize the complete command table"),
             command("guide", "Read an embedded version-matched guide", positionals: ["get", "topic"]),
             command("version", "Print the CLI version"),

@@ -101,6 +101,9 @@ do {
     if args.isEmpty || args.first == "help" || args.first == "--help" { printUsage(); exit(0) }
     let parsed = try parse(args)
     switch parsed.spec.name {
+    case "serve":
+        let path = parsed.params["data-dir"]?.stringValue
+        serve(dataDirectory: path.map { URL(fileURLWithPath: $0).standardizedFileURL })
     case "agent-context":
         let data = try JSONEncoder.pretty.encode(AgentContextDocument(commands: OrchardCommands.all)); FileHandle.standardOutput.write(data + Data("\n".utf8))
     case "version": print(parsed.json ? "{\"version\":\"\(toolVersion)\"}" : "orchard \(toolVersion)")

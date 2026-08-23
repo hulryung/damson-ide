@@ -10,8 +10,9 @@ public enum RuntimePaths {
         return URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("Orchard", isDirectory: true)
     }
 
-    public static func prepare(fileManager: FileManager = .default) throws -> (data: URL, run: URL) {
-        let data = applicationSupport(fileManager: fileManager)
+    public static func prepare(fileManager: FileManager = .default,
+                               dataDirectory: URL? = nil) throws -> (data: URL, run: URL) {
+        let data = dataDirectory ?? applicationSupport(fileManager: fileManager)
         try? fileManager.createDirectory(at: data, withIntermediateDirectories: true,
                                          attributes: [.posixPermissions: 0o700])
         do {
@@ -30,23 +31,30 @@ public enum RuntimePaths {
         }
     }
 
-    public static func metadataURL(fileManager: FileManager = .default) -> URL {
-        applicationSupport(fileManager: fileManager).appendingPathComponent("orchard-runtime.json")
+    public static func metadataURL(fileManager: FileManager = .default,
+                                   dataDirectory: URL? = nil) -> URL {
+        (dataDirectory ?? applicationSupport(fileManager: fileManager))
+            .appendingPathComponent("orchard-runtime.json")
     }
 }
 
 public enum RuntimeDiscovery {
-    public static func load(fileManager: FileManager = .default) throws -> RuntimeMetadata {
+    public static func load(fileManager: FileManager = .default,
+                            dataDirectory: URL? = nil) throws -> RuntimeMetadata {
         try JSONDecoder.orchard.decode(RuntimeMetadata.self,
-                                       from: Data(contentsOf: RuntimePaths.metadataURL(fileManager: fileManager)))
+                                       from: Data(contentsOf: RuntimePaths.metadataURL(
+                                        fileManager: fileManager, dataDirectory: dataDirectory)))
     }
 
     /// Removes metadata/socket only when the recorded process is gone. Never unlinks a live runtime.
-    public static func sweepStale(fileManager: FileManager = .default) {
-        guard let metadata = try? load(fileManager: fileManager) else { return }
+    public static func sweepStale(fileManager: FileManager = .default,
+                                  dataDirectory: URL? = nil) {
+        guard let metadata = try? load(fileManager: fileManager,
+                                       dataDirectory: dataDirectory) else { return }
         if kill(metadata.pid, 0) == 0 || errno == EPERM { return }
         try? fileManager.removeItem(atPath: metadata.socketPath)
-        try? fileManager.removeItem(at: RuntimePaths.metadataURL(fileManager: fileManager))
+        try? fileManager.removeItem(at: RuntimePaths.metadataURL(
+            fileManager: fileManager, dataDirectory: dataDirectory))
     }
 }
 
