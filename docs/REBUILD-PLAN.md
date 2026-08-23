@@ -468,11 +468,42 @@ scroll position stable across pane resizes. Work through DamsonSurfaceView/Grid
 public API from the app container; damson-side changes only if additive and necessary
 (ask first).
 
-### Wave 8+ backlog
+### Wave 8 (T31–T34, parallel; merge order T31 → T33 → T32; T34 is report-only)
 
-Adopted/restored panes bypass T30's cell-snap/top-align fit (a keeper-adopted home
-shell still shows a half-clipped first row after relaunch, 2026-08-24) — apply the
-fit path on adoption too. Also:
+**T31 — Adoption fit & restore polish.** Keeper-adopted panes bypass T30's
+cell-snap/top-align fit (half-clipped first row after relaunch): route adopted panes
+through the same TerminalPaneHost fit path on attach, re-apply on the first
+grid-change after adoption, and audit the adoption path for other skipped setup
+(status seeding, sized respawn geometry). Verify with a real quit/relaunch cycle and
+screenshot; describe the visual result honestly.
+
+**T32 — SSH stage 2: remote worktrees.** Per docs/design/remote-hosts.md: repos can
+register with `--host ssh:<name>` (remote path probed over ssh), worktree
+list/create/rm run their git operations through a bounded ssh runner (BatchMode,
+timeouts, stderr surfaced; reuse GitRunner's hardening shape), remote worktrees
+project into the workspace registry with executionHostId stamped, and creating a
+terminal in a remote worktree opens `ssh -tt <host> cd <path> && exec $SHELL -l`.
+Remote agents/keeper stay out of scope; file service returns typed
+remote_unsupported for remote paths this wave.
+
+**T33 — Editor syntax highlighting.** Lightweight regex/state-machine highlighter
+(no external deps): Swift, JSON, YAML, Markdown, and shell first; token classes
+(keyword/string/comment/number/type) mapped to theme colors; incremental
+re-highlight of the edited line's neighborhood so typing stays smooth; large files
+degrade to plain text past a budget. Language picked by extension; unit-test the
+tokenizers.
+
+**T34 — Dogfood cycle (report-only).** Using ONLY the `orchard` CLI against the live
+app runtime: register this repo, run-create, task-create a trivial real task, start a
+claude agent in a fresh Orchard-managed worktree, supervise via `orchard check
+--wait` to a settled `worker_done`, verify the transcript/archive paths, then clean
+up (release, delete the worktree). Deliverable: docs/reports/dogfood-1.md recording
+every command, receipt, quirk, and bug found (bugs go to the backlog; do not fix
+code). No damson-ide source changes.
+
+### Wave 9+ backlog
+
+Also:
 
 Project the repo primary checkout (and folder workspaces) into the runtime workspace
 registry as `repoId::path` the way Orca does — today `orchard file search --worktree
