@@ -34,6 +34,10 @@ public final class OrchardRuntimeHost {
     public nonisolated let portService: PortService
     /// T29: the registered remote hosts behind `ssh:<name>` execution host ids.
     public nonisolated let hostRegistry: HostRegistry
+    /// T39: the local end of the Tier-1 hook channel, used by remote agent panes whose
+    /// hooks arrive through an SSH reverse tunnel. Binds lazily on first use, so a
+    /// runtime that never opens one holds no listening socket.
+    public nonisolated let hookChannel: HookServerChannel
 
     public nonisolated let registry: CommandRegistry
     /// In-process client of the same registry (the app's path; no socket involved).
@@ -63,6 +67,13 @@ public final class OrchardRuntimeHost {
         self.terminalService = terminalService
         self.workspaceService = WorkspaceService(store: dataStore)
         self.hostRegistry = HostRegistry(store: dataStore)
+        // The channel a remote agent pane's hooks come home through (T39). Handed to
+        // the terminal service so a pane created with `statusDetection: .hooks`
+        // subscribes its token, and to the terminal handler so the launch path can read
+        // the port before it writes the far side's config.
+        let hookChannel = HookServerChannel()
+        self.hookChannel = hookChannel
+        terminalService.hookChannel = hookChannel
         self.fileService = FileService()
         self.fileOpenCenter = FileOpenCenter()
 
@@ -185,7 +196,8 @@ public final class OrchardRuntimeHost {
             runtime: workerRuntime))
         registry.register(TerminalCommandHandler(service: terminalService,
                                                  workspaces: workspaceService,
-                                                 hosts: hostRegistry))
+                                                 hosts: hostRegistry,
+                                                 hookChannel: hookChannel))
         registry.register(HostCommandHandler(registry: hostRegistry))
         registry.register(WorkspaceCommandHandler(service: workspaceService))
         registry.register(RepoRegistryHandler(service: workspaceService))

@@ -346,6 +346,73 @@ final class WorkerVerbTests: XCTestCase {
         XCTAssertEqual(response.result?.field("launch")?.field("agent")?.stringValue, "claude")
     }
 
+    // MARK: - T39: supervised dispatch stops at the host boundary
+
+    /// A remote workspace has no `orchard` binary, so a worker there could not send
+    /// `worker_done`, heartbeat, or answer a blocking question — the duties a dispatch
+    /// *is*. The refusal is typed and lands before a dispatch row exists, so a
+    /// coordinator gets a clean "no", not a half-open dispatch it must abandon.
+    func testWorkerStartRefusesARemoteWorkspaceTypedAndCreatesNothing() async throws {
+        let taskID = try await makeTask()
+        await MainActor.run { [terminalHarness] in
+            terminalHarness!.workspaces["repo::/srv/wt/apricot"] = WorkerWorktreeReceipt(
+                id: "repo::/srv/wt/apricot", instanceId: UUID().uuidString,
+                path: "/srv/wt/apricot", displayName: "apricot", hostId: "ssh:build")
+        }
+        let response = await call("worker-start", [
+            "task": .string(taskID),
+            "agent": .string("claude-code"),
+            "worktree": .string("repo::/srv/wt/apricot"),
+        ])
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.error?.code, "remote_unsupported")
+        let message = try XCTUnwrap(response.error?.message)
+        // It names what is missing and what does work instead: a handoff-style remote
+        // agent pane, which is a real thing a coordinator can still use.
+        XCTAssertTrue(message.contains("build"), message)
+        XCTAssertTrue(message.contains("orchard CLI"), message)
+        XCTAssertTrue(message.contains("terminal create --worktree repo::/srv/wt/apricot"), message)
+        // Nothing was created — no worker dispatch row, no pane.
+        let workers = try await live.workerList([:])
+        XCTAssertEqual(workers.field("workers")?.arrayValue?.count ?? 0, 0)
+        let panes = await MainActor.run { [terminalHarness] in terminalHarness!.service.list() }
+        XCTAssertTrue(panes.isEmpty)
+    }
+
+    /// The same rule by the other door: adopting a remote agent pane as a supervised
+    /// worker would bind lifecycle authority to a process that cannot discharge it.
+    func testWorkerStartRefusesAnExistingRemoteAgentPane() async throws {
+        let taskID = try await makeTask()
+        let handle = try await MainActor.run { [terminalHarness] in
+            try terminalHarness!.service.create(
+                worktreeId: "repo::/srv/wt/apricot", cwd: nil, engineID: "claude-code",
+                prompt: "", title: "apricot", executionHostId: "ssh:build",
+                statusDetection: .hooks(tunnelPort: 47110)).handle
+        }
+        let response = await call("worker-start", [
+            "task": .string(taskID),
+            "terminal": .string(handle),
+        ])
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.error?.code, "remote_unsupported")
+        XCTAssertTrue(response.error?.message.contains("build") ?? false,
+                      response.error?.message ?? "")
+    }
+
+    /// The guard must not catch local work: a local workspace with the same shape
+    /// starts normally.
+    func testWorkerStartStillAcceptsALocalWorkspace() async throws {
+        let taskID = try await makeTask()
+        await MainActor.run { [terminalHarness] in
+            terminalHarness!.workspaces["repo::/wt/local"] = WorkerWorktreeReceipt(
+                id: "repo::/wt/local", instanceId: UUID().uuidString,
+                path: "/wt/local", displayName: "local", hostId: "local")
+        }
+        let response = try await startReadyWorker(
+            taskID: taskID, extra: ["worktree": .string("repo::/wt/local")])
+        XCTAssertTrue(response.ok, String(describing: response.error))
+    }
+
     func testUnknownEngineStillFailsTypedAtTerminalCreate() async throws {
         let taskID = try await makeTask()
         let response = await call("worker-start", [

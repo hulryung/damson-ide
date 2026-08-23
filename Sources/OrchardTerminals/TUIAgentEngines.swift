@@ -40,6 +40,8 @@ public struct CodexEngine: AgentEngine {
         ExecutableLocator.find("codex", extraCandidates: ["\(NSHomeDirectory())/.codex/bin/codex"])
     }
 
+    public var remoteLaunch: RemoteEngineLaunch? { RemoteEngineLaunch(command: "codex") }
+
     public func launchArgv(task: AgentTask, worktree: URL) -> [String] {
         [executablePath]
     }
@@ -57,6 +59,8 @@ public struct GrokEngine: AgentEngine {
     public var executablePath: String {
         ExecutableLocator.find("grok")
     }
+
+    public var remoteLaunch: RemoteEngineLaunch? { RemoteEngineLaunch(command: "grok") }
 
     public func launchArgv(task: AgentTask, worktree: URL) -> [String] {
         [executablePath]
@@ -76,6 +80,8 @@ public struct CursorAgentEngine: AgentEngine {
     public var executablePath: String {
         ExecutableLocator.find("cursor-agent")
     }
+
+    public var remoteLaunch: RemoteEngineLaunch? { RemoteEngineLaunch(command: "cursor-agent") }
 
     public func launchArgv(task: AgentTask, worktree: URL) -> [String] {
         [executablePath]

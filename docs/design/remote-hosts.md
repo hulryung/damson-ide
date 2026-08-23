@@ -1,10 +1,11 @@
 # Remote hosts (SSH execution boundary)
 
-Status: **stages 1–2 shipped** — T29 (wave 7): host registry, bounded connectivity probe,
+Status: **stages 1–3 shipped** — T29 (wave 7): host registry, bounded connectivity probe,
 remote shell panes. T32 (wave 8): remote repo registration, remote worktree
 list/create/rm over a bounded ssh runner, remote worktrees in the workspace registry,
-panes that open a login shell inside one. Remote agents (stage 3) and keeper interplay
-(stage 4) are staged below and deliberately out of scope.
+panes that open a login shell inside one. T39 (wave 10): remote agent panes with their
+hook channel carried over an SSH reverse tunnel, and supervised dispatch refused typed
+at the host boundary. Keeper interplay (stage 4) is staged below and out of scope.
 
 This document is the contract for every later remote feature. It exists before the
 features do because the expensive mistakes here are *semantic*, not mechanical: what a
@@ -51,8 +52,10 @@ read-only inspection — never fall back to local execution.**
 
 Implementation: `HostLivenessVerdict` / `HostLiveness` in
 `Sources/OrchardRuntime/Hosts/HostLiveness.swift`. Stage 1 produces `unverifiable` and
-`exited`; `live` gets its producer with stage 3's remote worker liveness, and is defined
-now so no stage invents a fourth word.
+`exited`; `live` still has no producer — stage 3 (T39) deliberately did not add one,
+because a remote agent pane's PTY is local and its agent state comes from hooks and
+fingerprints, neither of which is *the owning host confirming the process is running*.
+The word stays defined so no stage invents a fourth one.
 
 ### Applying rule 2 to a PTY that ends
 
@@ -180,8 +183,9 @@ Refusals, all typed, all before anything spawns:
 | --- | --- |
 | `--host ssh:<name>` for an unregistered name | `unknown_host` |
 | a host id that does not parse (`runtime:vm-1`, `ssh:`) | `invalid_argument` |
-| `--host ssh:<name> --engine <agent>` | `not_implemented` (stage 3) |
-| `--worktree <remote worktree> --engine <agent>` | `remote_unsupported` (stage 3) |
+| `--host ssh:<name> --engine <agent>` | `not_implemented` — a remote agent needs a remote *worktree* (that is where its hook config lives); `--host` alone names a connection |
+| `--worktree <remote worktree> --engine <agent>` | **works since T39** — see §6 stage 3 |
+| an engine with no `RemoteEngineLaunch` | `remote_unsupported` — Orchard does not know how to start that tool remotely; it never falls back to starting it here |
 | `--worktree <remote worktree> --host <a different host>` | `invalid_argument` |
 | the app's remote tab whose host was unregistered since | opens nothing, says so |
 
@@ -268,23 +272,75 @@ shape later stages inherit:
 - **Out of scope this wave, refused typed rather than approximated:** the file service
   answers `remote_unsupported` for a remote workspace (its paths resolve locally, and a
   same-named local directory answering for a remote one is worse than an error), and so
-  does any agent engine asked to run in remote files.
+  did any agent engine asked to run in remote files — which stage 3 below replaced with
+  a real remote launch.
 
 Still open for a later stage: a durable connection with a generation counter, so a
 reconnect cannot be mistaken for continuity; connection multiplexing (today each command
 is its own `ssh`, and a user who wants `ControlMaster` already has it in their config);
 and a real remote file backend.
 
-**Stage 3 — remote agents.** Refused today with `remote_unsupported` (a remote worktree
-asked for an agent engine) or `not_implemented` (`--host ssh:<name> --engine <agent>`,
-T29's pin). Agent engines assume a local filesystem for argv, config,
-hooks, and transcripts; a remote agent needs its hook endpoint reachable from the far
-side and its provider transcript resolvable across the boundary (T24's pins). Until then
-`--host ssh:<name> --engine <agent>` is refused rather than approximated — an
-approximation would launch the agent on *this* machine under a remote host's name.
-Dispatch authority must also carry the host: `process_incarnation` proves a pane on a
-host, and a worker that cannot be proven live is `unverifiable`, which auto-escalates for
-a human rather than being reaped.
+**Stage 3 — remote agents (T39, wave 10, done).** `terminal create --worktree <remote id>
+--engine <agent>` runs the agent CLI on the far side and watches it from here. What
+landed:
+
+- **The launch.** `ssh -tt [-R …] <dest> 'cd <wt> && unset <markers…> && exec <agent>'`.
+  The pane is an ordinary *local* PTY whose child is `ssh`, but its **engine is the
+  agent's**, so fingerprints, `wait --for tui-idle`, verified sends and the agent-state
+  projection all apply unchanged. `cd` happens on the far side (a remote path handed to
+  a local `chdir` finds a same-named local directory), `exec` so the remote child *is*
+  the agent and its exit status is the one `verdictForPTYEnd` reads, and the
+  inherited-session markers are unset *there* — `ssh` forwards no environment by
+  default, but a user's own `SendEnv`/`AcceptEnv` pair or the remote account's rc can
+  still set them, and an agent that believes it is a child session turns transcript
+  saving off.
+- **`RemoteEngineLaunch`, not `launchArgv`.** The local argv resolves an absolute path on
+  *this* machine (`~/.claude/local/claude`) because a GUI launch has a minimal PATH; that
+  path is meaningless on the far side. A remote launch names the command and lets the
+  remote login shell resolve it. An engine with no `remoteLaunch` is refused
+  `remote_unsupported` — never approximated by starting it here.
+- **Status over a reverse tunnel.** `-R <remote port>:127.0.0.1:<local hook port>` makes
+  the *remote* loopback reach Orchard's `HookServer`, so the hook config written on the
+  far side is byte-identical to a local agent's (`curl http://127.0.0.1:<port>/hook…`).
+  Nothing in it knows the agent is remote.
+- **The port is claimed before the agent starts**, because Claude Code reads
+  `.claude/settings.local.json` at startup and the file has to name the port. A bounded
+  walk of a fixed candidate range (`-o ExitOnForwardFailure=yes -R <p>:… true`, one
+  round trip each) comes first — those ports are outside the ephemeral range, so the
+  window between the claim and the pane's own `ssh` is unlikely to be lost — with
+  dynamic `-R 0:` allocation (port read from OpenSSH's `Allocated port N for remote
+  forward` line) as the fallback when the whole range is busy. A refused forward
+  (`remote port forwarding failed for listen port N`) means *try the next port*; a
+  transport failure stops the walk, because a host that cannot be reached will not
+  become reachable on the next port.
+- **The pane's own `ssh` carries no `ExitOnForwardFailure`.** Losing the port race must
+  degrade the *status*, never kill a working agent: that trade would give up the work to
+  keep the telemetry.
+- **Degradation is typed, not silent.** When the tunnel cannot be established, or the
+  config cannot be written, or the engine has no hook mechanism at all, the pane still
+  opens and its summary carries `statusDetection: {mode: "fingerprint-only",
+  limitation: "<one sentence>"}`. A pane with no channel never reports itself as
+  hook-attested — that would be the worst answer available, an authoritative-looking
+  `idle` nothing will ever confirm.
+- **A respawn keeps the invocation *and* the hook token.** The launch argv is carried on
+  the pane's create spec (not its prompt: for a `.typeWhenIdle` engine the prompt is what
+  gets typed *into* the agent), and the token is already written into a file on the far
+  side, so reminting either would reopen the pane as a different, statusless agent.
+
+**Supervised dispatch stops at the host boundary.** `worker-start` into a remote
+workspace — or `--terminal <remote agent pane>` — is refused typed `remote_unsupported`,
+before a dispatch row exists. The reason is not caution: the remote host has no `orchard`
+CLI, so a worker there *cannot* send `worker_done`, heartbeat, or answer a blocking
+question, which are the duties a dispatch is. Remote agent panes are therefore
+handoff-style: live status, no lifecycle. A coordinator waiting on a settlement that can
+never arrive is strictly worse than a refusal at the door.
+
+Still open here: the provider transcript is not resolvable across the boundary (T24's
+pins read `~/.claude/projects` on *this* machine), so `worker-read --source transcript`
+has nothing to resolve for a remote pane; and dispatch authority carrying the host
+(`process_incarnation` proving a pane *on a host*, with an unprovable worker escalating
+as `unverifiable` rather than being reaped) waits for the stage where a dispatch can
+legitimately live there at all.
 
 **Stage 4 — keeper interplay.** T23's keeper hands local PTY masters across an app
 restart. A remote pane's master is local too, so the mechanism transfers — but the

@@ -103,15 +103,29 @@ public struct SSHRunner: Sendable {
 
     /// The argv one remote command line runs as, exposed so tests (and `--json`
     /// receipts) can show exactly what would be executed.
-    public func argv(for commandLine: String) -> [String] {
+    public func argv(for commandLine: String, options: [String] = []) -> [String] {
         SSHCommand.commandArgv(for: host, command: commandLine,
-                               connectTimeoutSeconds: connectTimeoutSeconds)
+                               connectTimeoutSeconds: connectTimeoutSeconds,
+                               options: options)
     }
 
     /// Run a command line on the far side and classify what came back.
-    public func run(_ commandLine: String) async -> RemoteCommandOutcome {
-        let result = await runner.run(argv(for: commandLine), timeout: timeout)
+    public func run(_ commandLine: String, options: [String] = []) async -> RemoteCommandOutcome {
+        let result = await runner.run(argv(for: commandLine, options: options), timeout: timeout)
         return Self.classify(result, host: host)
+    }
+
+    /// One bounded ssh invocation, returned *before* the answered/unverifiable
+    /// classification.
+    ///
+    /// Exactly one caller needs this: the reverse-tunnel planner (T39). OpenSSH reports
+    /// a refused port forward on its own stderr with status 255, and `classify` folds
+    /// every 255 into `unverifiable` — correctly, since 255 usually means the transport
+    /// failed. But that fold erases the one detail the planner turns on: "that port is
+    /// taken, try the next" is not "the host is gone", and treating it as the latter
+    /// would abandon a perfectly reachable host after one busy port.
+    public func runRaw(_ commandLine: String, options: [String] = []) async -> HostCommandResult {
+        await runner.run(argv(for: commandLine, options: options), timeout: timeout)
     }
 
     /// Run `git -C <dir> <args…>` remotely. Every argument is shell-quoted because the

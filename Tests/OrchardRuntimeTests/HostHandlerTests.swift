@@ -145,11 +145,17 @@ final class HostHandlerTests: XCTestCase {
         XCTAssertTrue(specs.isEmpty)
     }
 
-    func testRemoteAgentsAreRefusedThisWave() async {
+    /// A remote agent needs a remote *worktree* — that is where its hook config lives
+    /// and what it works in. `--host ssh:<name>` alone names a connection, not a
+    /// workspace, so it stays refused even after T39 (which implements the
+    /// `--worktree <remote id> --engine <agent>` spelling).
+    func testARemoteAgentWithNoRemoteWorktreeIsStillRefused() async {
         _ = await call("host-add", ["import": .bool(true), "name": .string("build")])
         let created = await call("terminal-create", ["host": .string("ssh:build"),
                                                      "engine": .string("claude-code")])
         XCTAssertEqual(created.error?.code, "not_implemented")
+        XCTAssertTrue(created.error?.message.contains("--worktree") ?? false,
+                      created.error?.message ?? "")
         XCTAssertTrue(specs.isEmpty)
     }
 }

@@ -26,6 +26,13 @@ public final class TerminalService {
     /// The runtime assembly points this at worker-process-exit auto-escalation.
     public var onTerminalExit: ((TerminalExitEvent) -> Void)?
 
+    /// T39 additive seam: the local end of the Tier-1 hook channel. When installed,
+    /// panes created with `statusDetection: .hooks` subscribe their token to it, which
+    /// is how a *remote* agent's lifecycle POSTs — arriving through an SSH reverse
+    /// tunnel — reach the pane that owns them. nil (the default) is exactly today's
+    /// behaviour: service-created agent panes lean on fingerprints.
+    public var hookChannel: AgentHookChannel?
+
     public init(registry: TerminalRegistry = TerminalRegistry(),
                 factory: @escaping TerminalSessionFactory,
                 pipeline: SendPipelineConfig = SendPipelineConfig(),
@@ -44,7 +51,9 @@ public final class TerminalService {
     public func create(worktreeId: String? = nil, cwd: String? = nil,
                        engineID: String = "shell", prompt: String = "",
                        title: String? = nil, executionHostId: String = "local",
-                       initialCols: Int? = nil, initialRows: Int? = nil) throws -> TerminalSummary {
+                       initialCols: Int? = nil, initialRows: Int? = nil,
+                       launchArgv: [String]? = nil, hookToken: String? = nil,
+                       statusDetection: TerminalStatusDetection? = nil) throws -> TerminalSummary {
         guard let engine = AgentEngineRegistry.engine(id: engineID) else {
             throw TerminalServiceError.unknownEngine(engineID)
         }
@@ -60,11 +69,38 @@ public final class TerminalService {
             title: title,
             executionHostId: executionHostId,
             initialCols: initialCols,
-            initialRows: initialRows)
+            initialRows: initialRows,
+            launchArgv: launchArgv,
+            hookToken: hookToken,
+            statusDetection: statusDetection)
         let record = try spawn(spec: spec, engine: engine)
         registry.register(record)
         record.tracker.lastPrompt = prompt
+        attachHookChannel(record)
         return record.summary()
+    }
+
+    /// Route this pane's lifecycle hooks into its session, when a channel is installed
+    /// and the pane's config actually points at it.
+    ///
+    /// Only panes whose `statusDetection` says `hooks` subscribe: a pane that degraded
+    /// to fingerprints has no config on the far side POSTing anything, and registering
+    /// its token anyway would leave a listener that can only ever be fed by somebody
+    /// else's guess at the token.
+    private func attachHookChannel(_ record: TerminalRecord) {
+        guard let channel = hookChannel,
+              record.spec.statusDetection?.mode == .hooks else { return }
+        let session = record.agentSession
+        channel.register(token: session.hookToken) { [weak session] event, body in
+            Task { @MainActor in
+                guard let session else { return }
+                // Chat fields first: a Stop body carries last_assistant_message and must
+                // land on the tracker before the idle transition reads it.
+                session.applyHookFields(HookStatusFields.parse(json: body))
+                session.applyExternalSignal(
+                    session.engine.hookSignal(event: event, body: body))
+            }
+        }
     }
 
     public func list(worktreeId: String? = nil) -> [TerminalSummary] {
@@ -181,7 +217,13 @@ public final class TerminalService {
             handle: handle, paneKey: record.paneKey, worktreeId: record.worktreeId,
             cwd: record.spec.cwd, engineID: record.engine.id, prompt: respawnPrompt,
             title: record.title, executionHostId: record.spec.executionHostId,
-            initialCols: grid.cols, initialRows: grid.rows)
+            initialCols: grid.cols, initialRows: grid.rows,
+            // Same reason the prompt survives: a remote agent pane's argv IS the `ssh`
+            // invocation (tunnel included), and its hook token is already written into
+            // a config file on the far side. Reminting either would respawn the pane
+            // as a different, statusless agent.
+            launchArgv: record.spec.launchArgv, hookToken: record.spec.hookToken,
+            statusDetection: record.spec.statusDetection)
         // Spawn first: a factory failure must leave the current incarnation intact,
         // its handle still live.
         let session = try makeSession(spec: spec, engine: record.engine)
@@ -194,6 +236,10 @@ public final class TerminalService {
         record.adopt(handle: handle, session: session, agentSession: agentSession)
         registry.register(record)
         wireStateChanges(record)
+        // Re-subscribe: the pane kept its hook token (the far side's config still names
+        // it), but the session that token routed to has just been replaced. The stale
+        // handler holds a dead session weakly and would silently swallow every event.
+        attachHookChannel(record)
         return record.summary()
     }
 
@@ -535,7 +581,7 @@ public final class TerminalService {
                              engineID: engine.id,
                              baseRepoPath: "")
         return AgentSession(engine: engine, terminal: session, worktree: nil, task: task,
-                            detectorConfig: detectorConfig)
+                            detectorConfig: detectorConfig, hookToken: spec.hookToken)
     }
 
     /// Route every fused-state transition into the tracker, the status streams, the
@@ -605,6 +651,10 @@ public final class TerminalService {
     private func notifyExit(_ record: TerminalRecord, deliberate: Bool) {
         guard !record.exitNotified else { return }
         record.exitNotified = true
+        // Here rather than in `close`, so a pane whose child died on its own drops its
+        // hook subscription too. Nothing will POST for it again, and a token left
+        // routed is a listener only a guessed token could ever reach.
+        hookChannel?.unregister(token: record.agentSession.hookToken)
         onTerminalExit?(TerminalExitEvent(
             handle: record.handle,
             paneKey: record.paneKey,
