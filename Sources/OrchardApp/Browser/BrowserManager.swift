@@ -91,14 +91,17 @@ final class BrowserManager: ObservableObject {
 // MARK: - BrowserWebHost
 
 extension BrowserManager: BrowserWebHost {
-    func createPage(workspace: String, pageId: String) async throws {
+    func createPage(workspace: String, pageId: String, profile: BrowserProfile) async throws {
         let controller = controller(for: workspace)
-        let tab = BrowserTabModel(id: pageId)
+        let tab = BrowserTabModel(id: pageId, profile: profile)
         tab.onCommit = { [service] id, url in
             Task { await service.pageDidCommitNavigation(pageId: id, url: url) }
         }
         tab.onStateChange = { [service] id, state in
             Task { await service.pageDidUpdate(pageId: id, state: state) }
+        }
+        tab.onSubframeNavigate = { [service] id in
+            Task { await service.subframeDidNavigate(pageId: id) }
         }
         controller.tabs.append(tab)
         if controller.activeTabID == nil { controller.activeTabID = pageId }

@@ -90,6 +90,8 @@ public final class BrowserCommandHandler: CommandHandler, Sendable {
             ?? params.field("_args")?.arrayValue?.first?.stringValue
             ?? "list"
         switch action {
+        case "profile":
+            return try await tabProfile(params, workspace: workspace)
         case "list":
             let summary = await service.listTabs(workspace: workspace)
             return try JSONBridge.value(TabListResult(
@@ -107,7 +109,39 @@ public final class BrowserCommandHandler: CommandHandler, Sendable {
             return try await pageResult(service.switchTab(workspace: workspace, page: page))
         default:
             throw BrowserError("invalid_argument",
-                               "unknown tab action '\(action)' (list|create|close|switch)")
+                               "unknown tab action '\(action)' (list|create|close|switch|profile)")
+        }
+    }
+
+    /// `browser tab profile <verb>` — the CLI delivers the verb as the second
+    /// positional (`_args` = ["profile", "<verb>"]); defaults to `list`.
+    private func tabProfile(_ params: JSONValue, workspace: String) async throws -> JSONValue {
+        let action = params.field("_args")?.arrayValue?.dropFirst().first?.stringValue ?? "list"
+        switch action {
+        case "list":
+            let profiles = await service.listProfiles()
+            return try JSONBridge.value(ProfileListResult(profiles: profiles))
+        case "create":
+            guard let label = params.string("label"), !label.isEmpty else {
+                throw BrowserError("invalid_argument", "browser tab profile create requires --label")
+            }
+            let profile = try await service.createProfile(label: label)
+            return try JSONBridge.value(ProfileResult(workspace: nil, profile: profile))
+        case "set":
+            guard let selector = params.string("profile"), !selector.isEmpty else {
+                throw BrowserError("invalid_argument",
+                                   "browser tab profile set requires --profile <id|label>")
+            }
+            let bound = try await service.bindProfile(workspace: workspace, profile: selector)
+            return try JSONBridge.value(ProfileResult(workspace: bound.workspace,
+                                                      profile: bound.profile))
+        case "show":
+            let bound = await service.boundProfile(workspace: workspace)
+            return try JSONBridge.value(ProfileResult(workspace: bound.workspace,
+                                                      profile: bound.profile))
+        default:
+            throw BrowserError("invalid_argument",
+                               "unknown profile action '\(action)' (list|create|set|show)")
         }
     }
 
@@ -167,6 +201,15 @@ private struct TabListResult: Encodable {
     var workspace: String
     var activePageId: String?
     var tabs: [BrowserPage]
+}
+
+private struct ProfileListResult: Encodable {
+    var profiles: [BrowserProfile]
+}
+
+private struct ProfileResult: Encodable {
+    var workspace: String?
+    var profile: BrowserProfile
 }
 
 private struct ClosedResult: Encodable {

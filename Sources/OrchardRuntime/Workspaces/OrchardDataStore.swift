@@ -19,6 +19,11 @@ public struct OrchardData: Codable, Equatable, Sendable {
     public var workspaceStatusVocabulary: [WorkspaceStatusDefinition]
     public var automations: [Automation]
     public var automationRuns: [AutomationRun]
+    /// T21 browser session profiles: user-created isolated profiles (the built-in
+    /// default profile is synthesized, never stored) and each browser workspace's
+    /// profile binding, keyed by workspace key (worktree path).
+    public var browserProfiles: [BrowserProfile]
+    public var browserWorkspaceProfiles: [String: String]
 
     public init(schemaVersion: Int = 1,
                 repos: [RepoRecord] = [],
@@ -27,7 +32,9 @@ public struct OrchardData: Codable, Equatable, Sendable {
                 worktreeLineageById: [String: WorktreeLineage] = [:],
                 retiredWorktreeNamesByRepo: [String: RetiredNameRegistry] = [:],
                 workspaceStatusVocabulary: [WorkspaceStatusDefinition] = WorkspaceStatusDefinition.defaults,
-                automations: [Automation] = [], automationRuns: [AutomationRun] = []) {
+                automations: [Automation] = [], automationRuns: [AutomationRun] = [],
+                browserProfiles: [BrowserProfile] = [],
+                browserWorkspaceProfiles: [String: String] = [:]) {
         self.schemaVersion = schemaVersion
         self.repos = repos
         self.folderWorkspaces = folderWorkspaces
@@ -37,11 +44,14 @@ public struct OrchardData: Codable, Equatable, Sendable {
         self.workspaceStatusVocabulary = workspaceStatusVocabulary
         self.automations = automations
         self.automationRuns = automationRuns
+        self.browserProfiles = browserProfiles
+        self.browserWorkspaceProfiles = browserWorkspaceProfiles
     }
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, repos, folderWorkspaces, worktreeMeta, worktreeLineageById
         case retiredWorktreeNamesByRepo, workspaceStatusVocabulary, automations, automationRuns
+        case browserProfiles, browserWorkspaceProfiles
     }
 
     public init(from decoder: Decoder) throws {
@@ -55,6 +65,8 @@ public struct OrchardData: Codable, Equatable, Sendable {
         workspaceStatusVocabulary = try c.decodeIfPresent([WorkspaceStatusDefinition].self, forKey: .workspaceStatusVocabulary) ?? WorkspaceStatusDefinition.defaults
         automations = try c.decodeIfPresent([Automation].self, forKey: .automations) ?? []
         automationRuns = try c.decodeIfPresent([AutomationRun].self, forKey: .automationRuns) ?? []
+        browserProfiles = try c.decodeIfPresent([BrowserProfile].self, forKey: .browserProfiles) ?? []
+        browserWorkspaceProfiles = try c.decodeIfPresent([String: String].self, forKey: .browserWorkspaceProfiles) ?? [:]
     }
 
     public static let empty = OrchardData()

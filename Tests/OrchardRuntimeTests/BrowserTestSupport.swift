@@ -10,7 +10,7 @@ import XCTest
 final class FakeBrowserHost: BrowserWebHost, @unchecked Sendable {
     private let lock = NSLock()
 
-    private var _createdPages: [(workspace: String, pageId: String)] = []
+    private var _createdPages: [(workspace: String, pageId: String, profile: BrowserProfile)] = []
     private var _closedPages: [String] = []
     private var _shownPages: [String] = []
     private var _navigations: [(pageId: String, url: String)] = []
@@ -34,16 +34,16 @@ final class FakeBrowserHost: BrowserWebHost, @unchecked Sendable {
         ]}
         """
 
-    var createdPages: [(workspace: String, pageId: String)] { lock.withLock { _createdPages } }
+    var createdPages: [(workspace: String, pageId: String, profile: BrowserProfile)] { lock.withLock { _createdPages } }
     var closedPages: [String] { lock.withLock { _closedPages } }
     var shownPages: [String] { lock.withLock { _shownPages } }
     var navigations: [(pageId: String, url: String)] { lock.withLock { _navigations } }
     var historyCalls: [(pageId: String, op: String)] { lock.withLock { _historyCalls } }
     var evaluated: [(pageId: String, script: String)] { lock.withLock { _evaluated } }
 
-    func createPage(workspace: String, pageId: String) async throws {
+    func createPage(workspace: String, pageId: String, profile: BrowserProfile) async throws {
         if let createError { throw createError }
-        lock.withLock { _createdPages.append((workspace, pageId)) }
+        lock.withLock { _createdPages.append((workspace, pageId, profile)) }
     }
 
     func closePage(pageId: String) async {

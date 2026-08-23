@@ -41,6 +41,32 @@ public struct BrowserWorkspace: Codable, Equatable, Sendable {
     }
 }
 
+/// One browser session profile (T21, inventory §4): one profile ⇒ one
+/// `WKWebsiteDataStore`, so cookies/localStorage are partitioned per profile.
+/// `default` scope means the shared default store; `isolated` means a persistent
+/// store keyed by the profile id. Persisted in orchard-data.json; the built-in
+/// default profile is synthesized, never stored.
+public struct BrowserProfile: Codable, Equatable, Sendable, Identifiable {
+    public enum Scope: String, Codable, Sendable {
+        case `default`, isolated
+    }
+
+    public var id: String
+    public var label: String
+    public var scope: Scope
+
+    public init(id: String, label: String, scope: Scope) {
+        self.id = id
+        self.label = label
+        self.scope = scope
+    }
+
+    /// The always-present profile backed by the shared default data store.
+    /// Workspaces with no persisted binding use it.
+    public static let defaultProfile = BrowserProfile(id: "default", label: "Default",
+                                                      scope: .default)
+}
+
 /// Live web-view facts the host reports back to the service. Kept separate from
 /// `BrowserPage` so the host never mutates service state directly.
 public struct BrowserPageState: Codable, Equatable, Sendable {
@@ -79,18 +105,23 @@ public struct BrowserConsoleEntry: Codable, Equatable, Sendable {
 
 /// One interactive element surfaced by a snapshot: `@eN` in the outline. `index`
 /// addresses `window.__orchardRefs.els[index]` in the page; role/name are kept so
-/// stale-ref errors can say what the ref used to point at.
+/// stale-ref errors can say what the ref used to point at. `frame` is the owning
+/// frame's id from the walker ("" = main frame, "f1"… = same-origin subframes) —
+/// refs stay unique per page across frames because the counter spans the whole
+/// traversal.
 public struct BrowserSnapshotRef: Codable, Equatable, Sendable {
     public var ref: String
     public var index: Int
     public var role: String
     public var name: String
+    public var frame: String
 
-    public init(ref: String, index: Int, role: String, name: String) {
+    public init(ref: String, index: Int, role: String, name: String, frame: String = "") {
         self.ref = ref
         self.index = index
         self.role = role
         self.name = name
+        self.frame = frame
     }
 }
 
@@ -136,5 +167,14 @@ public struct BrowserError: Error, Equatable, Sendable {
 
     public static func unavailable() -> BrowserError {
         BrowserError("browser_unavailable", "no browser host attached; the Orchard app must be running")
+    }
+
+    public static func profileNotFound(_ selector: String) -> BrowserError {
+        BrowserError("browser_profile_not_found",
+                     "no browser profile '\(selector)'; see `browser tab profile list`")
+    }
+
+    public static func profileExists(_ label: String) -> BrowserError {
+        BrowserError("browser_profile_exists", "a browser profile labeled '\(label)' already exists")
     }
 }

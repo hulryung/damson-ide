@@ -122,8 +122,10 @@ public enum OrchardCommands {
                 flag("limit", "Maximum content-search matches", "n"),
             ], positionals: ["open|diff|open-changed|search", "path|query"]),
             // T10 embedded browser. Refs (@eN) come from the latest `snapshot` of a
-            // page and are invalidated by any navigation — re-snapshot, don't guess.
-            command("browser", "Drive a workspace's embedded browser", [flag("worktree", "Workspace selector", "selector", required: true), flag("page", "Browser tab id", "id"), flag("url", "Destination URL", "url"), flag("ref", "Snapshot element ref (@eN)", "ref"), flag("text", "Text for fill/type", "text"), flag("js", "JavaScript expression for eval", "expr"), flag("limit", "Maximum console entries", "n")], positionals: ["goto|back|forward|reload|snapshot|click|fill|type|screenshot|eval|console|tab"]),
+            // page and are invalidated by any navigation (top-level or subframe) —
+            // re-snapshot, don't guess. T21 session profiles: `tab profile
+            // list|create|set|show` partitions cookies/storage per profile.
+            command("browser", "Drive a workspace's embedded browser", [flag("worktree", "Workspace selector", "selector", required: true), flag("page", "Browser tab id", "id"), flag("url", "Destination URL", "url"), flag("ref", "Snapshot element ref (@eN)", "ref"), flag("text", "Text for fill/type", "text"), flag("js", "JavaScript expression for eval", "expr"), flag("limit", "Maximum console entries", "n"), flag("label", "Profile label for `tab profile create`", "text"), flag("profile", "Profile id or label for `tab profile set`", "id")], positionals: ["goto|back|forward|reload|snapshot|click|fill|type|screenshot|eval|console|tab", "tab: list|create|close|switch|profile", "profile: list|create|set|show"]),
             command("automations", "Manage scheduled prompts", [
                 flag("id", "Automation identifier", "id"),
                 flag("name", "Unique display name", "text"),

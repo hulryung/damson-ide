@@ -32,17 +32,27 @@ public enum BrowserScripts {
     }
 
     /// Walk the live DOM into a flat pre-order node list and register interactive
-    /// elements in `window.__orchardRefs = {epoch, els}` — the page-side half of
-    /// the `@eN` ref table. Interactive elements are emitted without recursing
-    /// (their accessible name already carries their text); structural roles keep
-    /// nesting; leaf text becomes `text` nodes. Returns JSON:
-    /// `{title, url, truncated, nodes:[{d, role, name, value, i}]}` where `i` is
-    /// the element's index in `els` (-1 for non-interactive).
+    /// elements in `window.__orchardRefs = {epoch, els, owners}` — the page-side
+    /// half of the `@eN` ref table. Interactive elements are emitted without
+    /// recursing (their accessible name already carries their text); structural
+    /// roles keep nesting; leaf text becomes `text` nodes.
+    ///
+    /// Frames (T21): same-origin child frames are walked inline — an `iframe`
+    /// boundary node, then the frame's content indented under it, all sharing the
+    /// page-wide element registry so `@eN` stays unique across frames. Each
+    /// registered element records its owning frame (`owners[i]` = {host, doc}) so
+    /// actions can detect a subframe that navigated out from under its refs.
+    /// Cross-origin frames (contentDocument unreachable) become opaque nodes
+    /// labeled with the frame's origin. Returns JSON:
+    /// `{title, url, truncated, nodes:[{d, role, name, value, i, f?, x?}]}` where
+    /// `i` is the element's index in `els` (-1 for non-interactive), `f` the
+    /// owning frame id ("f1"… ; absent = main frame), `x` marks cross-origin
+    /// frame nodes.
     static func snapshot(epoch: Int) -> String {
         """
         (function(){
-          var MAX_NODES = 800, MAX_TEXT = 120;
-          var els = [], nodes = [];
+          var MAX_NODES = 800, MAX_TEXT = 120, MAX_FRAMES = 20;
+          var els = [], owners = [], nodes = [], frameCount = 0;
           function trim(s){ return (s||'').replace(/\\s+/g,' ').trim().slice(0, MAX_TEXT); }
           function role(el){
             var r = el.getAttribute && el.getAttribute('role');
@@ -104,53 +114,85 @@ public enum BrowserScripts {
             return '';
           }
           function hidden(el){
-            if (!window.getComputedStyle) return false;
-            var s = window.getComputedStyle(el);
+            var w = el.ownerDocument && el.ownerDocument.defaultView;
+            if (!w || !w.getComputedStyle) return false;
+            var s = w.getComputedStyle(el);
             return s.display === 'none' || s.visibility === 'hidden';
           }
-          function walk(el, depth){
+          function push(node, fid){ if (fid) node.f = fid; nodes.push(node); }
+          function frameLabel(el){
+            return trim(el.getAttribute('title') || el.getAttribute('name') || el.getAttribute('id') || el.getAttribute('src') || '');
+          }
+          function frameOrigin(el){
+            try {
+              var s = el.getAttribute('src');
+              if (!s) return '';
+              var u = new URL(s, el.ownerDocument.baseURI || location.href);
+              return u.origin === 'null' ? '' : u.origin;
+            } catch (_) { return ''; }
+          }
+          function walkFrame(el, depth, fid){
+            var doc = null;
+            try { doc = el.contentDocument; } catch (_) { doc = null; }
+            if (doc && doc.body && frameCount < MAX_FRAMES) {
+              frameCount++;
+              var childId = 'f' + frameCount;
+              push({d: depth, role: 'iframe', name: frameLabel(el), value: '', i: -1}, childId);
+              walk(doc.body, depth + 1, childId, {host: el, doc: doc});
+              return;
+            }
+            push({d: depth, role: 'iframe', name: frameOrigin(el) || frameLabel(el) || '(frame)', value: '', i: -1, x: true}, fid);
+          }
+          function walk(el, depth, fid, owner){
             if (nodes.length >= MAX_NODES || el.nodeType !== 1) return;
             var t = el.tagName.toLowerCase();
             if (t === 'script' || t === 'style' || t === 'noscript' || t === 'template') return;
             if (hidden(el)) return;
+            if (t === 'iframe' || t === 'frame') { walkFrame(el, depth, fid); return; }
             var r = role(el);
             if (isInteractive(el)) {
-              var idx = els.length; els.push(el);
-              nodes.push({d: depth, role: r || 'generic', name: name(el), value: value(el), i: idx});
+              var idx = els.length; els.push(el); owners.push(owner);
+              push({d: depth, role: r || 'generic', name: name(el), value: value(el), i: idx}, fid);
               return;
             }
             if (r === 'heading' || r === 'image') {
-              nodes.push({d: depth, role: r, name: name(el), value: '', i: -1});
+              push({d: depth, role: r, name: name(el), value: '', i: -1}, fid);
               return;
             }
             var childDepth = depth;
             if (r) {
-              nodes.push({d: depth, role: r, name: trim(el.getAttribute('aria-label') || ''), value: '', i: -1});
+              push({d: depth, role: r, name: trim(el.getAttribute('aria-label') || ''), value: '', i: -1}, fid);
               childDepth = depth + 1;
             }
             if (!el.firstElementChild) {
               var txt = trim(el.innerText || el.textContent);
-              if (txt) nodes.push({d: childDepth, role: 'text', name: txt, value: '', i: -1});
+              if (txt) push({d: childDepth, role: 'text', name: txt, value: '', i: -1}, fid);
               return;
             }
-            for (var c = el.firstElementChild; c; c = c.nextElementSibling) walk(c, childDepth);
+            for (var c = el.firstElementChild; c; c = c.nextElementSibling) walk(c, childDepth, fid, owner);
           }
-          if (document.body) walk(document.body, 0);
-          window.__orchardRefs = { epoch: \(epoch), els: els };
+          if (document.body) walk(document.body, 0, '', {host: null, doc: document});
+          window.__orchardRefs = { epoch: \(epoch), els: els, owners: owners };
           return JSON.stringify({ title: document.title || '', url: location.href, truncated: nodes.length >= MAX_NODES, nodes: nodes });
         })()
         """
     }
 
     /// Guard shared by all ref actions: the page-side registry must exist and
-    /// match the snapshot's epoch (navigation wipes the JS world, a re-snapshot
-    /// bumps the epoch), and the element must still be attached.
+    /// match the snapshot's epoch (top-level navigation wipes the JS world, a
+    /// re-snapshot bumps the epoch), the element must still be attached, and —
+    /// for elements owned by a subframe — the frame must still show the document
+    /// the snapshot walked (a subframe navigation swaps `contentDocument`, so the
+    /// old document's elements would otherwise pass `isConnected` while being
+    /// invisible zombies).
     private static func refLookup(epoch: Int, index: Int) -> String {
         """
           var S = window.__orchardRefs;
           if (!S || S.epoch !== \(epoch)) return JSON.stringify({ok:false, error:'stale'});
           var el = S.els[\(index)];
           if (!el || !el.isConnected) return JSON.stringify({ok:false, error:'stale'});
+          var O = S.owners && S.owners[\(index)];
+          if (O && O.host && (!O.host.isConnected || O.host.contentDocument !== O.doc)) return JSON.stringify({ok:false, error:'stale'});
         """
     }
 
@@ -202,9 +244,16 @@ public enum BrowserScripts {
         if index >= 0 {
             acquire = refLookup(epoch: epoch, index: index) + "\n  el.focus();"
         } else {
+            // Chase focus through same-origin frames: when a subframe's input
+            // has focus, the top document's activeElement is the iframe itself.
             acquire = """
               var el = document.activeElement;
-              if (!el || el === document.body) return JSON.stringify({ok:false, error:'no focused element'});
+              while (el && (el.tagName === 'IFRAME' || el.tagName === 'FRAME')) {
+                var d = null; try { d = el.contentDocument; } catch (_) {}
+                if (!d || !d.activeElement) break;
+                el = d.activeElement;
+              }
+              if (!el || el === document.body || el.tagName === 'IFRAME' || el.tagName === 'FRAME' || el.tagName === 'BODY') return JSON.stringify({ok:false, error:'no focused element'});
             """
         }
         return """
