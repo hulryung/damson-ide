@@ -109,12 +109,15 @@ public enum OrchardCommands {
             command("worker-retain", "Retain worker resources", [flag("dispatch", "Dispatch identifier", "id", required: true), retry]),
             command("worker-list", "List supervised workers", [flag("terminal-state", "Terminal state filter", "state"), run]),
             command("repo", "Manage registered repositories", [flag("path", "Repository path", "path"), flag("repo", "Repository selector", "selector"), flag("display-name", "Display name", "text")], positionals: ["list|add|show"]),
-            command("file", "Open, diff, or reveal git-changed workspace files", [
+            command("file", "Open, diff, search, or reveal git-changed workspace files", [
                 flag("path", "File path relative to the worktree (or absolute inside it)", "path"),
                 flag("worktree", "Worktree selector", "selector"),
                 flag("staged", "Accepted for parity; diffs are always vs the fork point"),
                 flag("mode", "open-changed mode: edit, diff, or both (default diff)", "edit|diff|both"),
-            ], positionals: ["open|diff|open-changed", "path"]),
+                flag("include", "Content-search include glob (e.g. *.swift)", "glob"),
+                flag("exclude", "Content-search exclude glob", "glob"),
+                flag("limit", "Maximum content-search matches", "n"),
+            ], positionals: ["open|diff|open-changed|search", "path|query"]),
             // T10 embedded browser. Refs (@eN) come from the latest `snapshot` of a
             // page and are invalidated by any navigation — re-snapshot, don't guess.
             command("browser", "Drive a workspace's embedded browser", [flag("worktree", "Workspace selector", "selector", required: true), flag("page", "Browser tab id", "id"), flag("url", "Destination URL", "url"), flag("ref", "Snapshot element ref (@eN)", "ref"), flag("text", "Text for fill/type", "text"), flag("js", "JavaScript expression for eval", "expr"), flag("limit", "Maximum console entries", "n")], positionals: ["goto|back|forward|reload|snapshot|click|fill|type|screenshot|eval|console|tab"]),
@@ -137,7 +140,7 @@ public enum CommandGroup: String, Codable, CaseIterable, Sendable {
     case terminal     // terminal list/create/read/send/wait/split/close/rename
     case worktree     // worktree list/show/current/create/set/rm
     case repo         // repo list/add/show
-    case file         // file open/diff/open-changed (wave 2)
+    case file         // file open/diff/open-changed/search
     case browser      // browser goto/…/tab (wave 2)
     case guide        // agent-context, guide get <topic>
 }

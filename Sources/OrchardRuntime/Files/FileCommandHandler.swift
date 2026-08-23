@@ -85,10 +85,15 @@ public final class FileCommandHandler: CommandHandler, @unchecked Sendable {
             guard let query = params.str("query"), !query.isEmpty else {
                 throw FileServiceError.invalidArgument("file-search requires query")
             }
-            let result = try files.search(
-                root: target.root, query: query,
+            let options = FileContentSearchOptions(
+                include: globs(params, "include"),
+                exclude: globs(params, "exclude"),
+                caseSensitive: params.flag("caseSensitive") || params.flag("case-sensitive"),
                 showDotfiles: params.flag("showDotfiles") || params.flag("show-dotfiles"),
-                limit: params.int("limit") ?? FileService.defaultSearchLimit)
+                limit: params.int("limit") ?? FileService.defaultContentSearchLimit,
+                perFileLimit: params.int("perFileLimit") ?? params.int("per-file-limit")
+                    ?? FileService.defaultPerFileMatchLimit)
+            let result = try files.contentSearch(root: target.root, query: query, options: options)
             return try JSONBridge.value(result)
 
         case "file-open":
@@ -193,6 +198,22 @@ public final class FileCommandHandler: CommandHandler, @unchecked Sendable {
             throw FileServiceError.invalidArgument("missing file path")
         }
         return rel
+    }
+
+    /// Include/exclude globs. A JSON array is accepted as-is; a string is one glob
+    /// (not CSV — `*.{swift,md}` must not split on the comma).
+    private func globs(_ params: [String: JSONValue], _ key: String) -> [String] {
+        switch params[key] {
+        case .string(let s):
+            let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? [] : [trimmed]
+        case .array(let values):
+            return values.compactMap(\.stringValue)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        default:
+            return []
+        }
     }
 }
 

@@ -71,10 +71,13 @@ final class FileHandlerTests: XCTestCase {
         let stat = await call(server, "file-stat", wt.merging(["path": .string("src")]) { $1 })
         XCTAssertEqual(stat.result?.objectValue?["isDirectory"]?.boolValue, true)
 
-        let search = await call(server, "file-search", wt.merging(["query": .string("app")]) { $1 })
+        let search = await call(server, "file-search", wt.merging(["query": .string("hello")]) { $1 })
         XCTAssertTrue(search.ok, search.error?.message ?? "")
-        let hits = try XCTUnwrap(search.result?.objectValue?["files"]?.arrayValue)
-        XCTAssertEqual(hits.first?.objectValue?["relativePath"]?.stringValue, "src/app.swift")
+        let hits = try XCTUnwrap(search.result?.objectValue?["matches"]?.arrayValue)
+        XCTAssertEqual(hits.first?.objectValue?["path"]?.stringValue, "src/app.swift")
+        XCTAssertEqual(hits.first?.objectValue?["line"]?.intValue
+                       ?? hits.first?.objectValue?["line"]?.numberValue.map { Int($0) }, 1)
+        XCTAssertEqual(hits.first?.objectValue?["excerpt"]?.stringValue, "hello")
 
         let filtered = await call(server, "file-list", wt.merging(["query": .string("md")]) { $1 })
         let files = try XCTUnwrap(filtered.result?.objectValue?["files"]?.arrayValue)
@@ -203,6 +206,26 @@ final class FileHandlerTests: XCTestCase {
         _ = await task.result
         XCTAssertEqual(Set(received.map(\.relativePath)), Set(["keep.txt", "fresh.txt"]))
         XCTAssertTrue(received.allSatisfy { $0.mode == .diff })
+    }
+
+    func testContentSearchIncludeGlobOverRPC() async throws {
+        let (server, workspace, _) = try makeFolderWorkspace()
+        let response = await call(server, "file-search", [
+            "worktree": .string(workspace.id),
+            "query": .string("hello"),
+            "include": .string("*.swift"),
+        ])
+        XCTAssertTrue(response.ok, response.error?.message ?? "")
+        let hits = try XCTUnwrap(response.result?.objectValue?["matches"]?.arrayValue)
+        XCTAssertEqual(hits.count, 1)
+        XCTAssertEqual(hits.first?.objectValue?["path"]?.stringValue, "src/app.swift")
+
+        let missed = await call(server, "file-search", [
+            "worktree": .string(workspace.id),
+            "query": .string("hello"),
+            "include": .string("*.md"),
+        ])
+        XCTAssertEqual(missed.result?.objectValue?["matches"]?.arrayValue?.count, 0)
     }
 
     func testUnknownWorktreeIsTyped() async throws {

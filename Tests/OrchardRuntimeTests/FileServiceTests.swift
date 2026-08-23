@@ -244,4 +244,114 @@ final class FileServiceTests: XCTestCase {
             XCTAssertEqual((error as? FileServiceError)?.code, "invalid_argument")
         }
     }
+
+    // MARK: - Full-text content search
+
+    func testContentSearchFindsLineExcerptsCaseInsensitive() throws {
+        try write("Hello Orchard\nsecond line\n", to: "src/app.swift")
+        try write("nope\n", to: "README.md")
+        let result = try files.contentSearch(root: tmp, query: "orchard")
+        XCTAssertEqual(result.matches.count, 1)
+        XCTAssertEqual(result.matches[0].path, "src/app.swift")
+        XCTAssertEqual(result.matches[0].line, 1)
+        XCTAssertEqual(result.matches[0].excerpt, "Hello Orchard")
+        XCTAssertFalse(result.truncated)
+        XCTAssertFalse(result.matches[0].path.contains(".."))
+        XCTAssertFalse(result.matches[0].path.hasPrefix("/"))
+    }
+
+    func testContentSearchRespectsIncludeExcludeGlobs() throws {
+        try write("needle in swift\n", to: "src/app.swift")
+        try write("needle in notes\n", to: "docs/notes.md")
+        try write("needle in bin-shaped\n", to: "src/skip.txt")
+
+        let included = try files.contentSearch(
+            root: tmp, query: "needle",
+            options: FileContentSearchOptions(include: ["*.swift"]))
+        XCTAssertEqual(included.matches.map(\.path), ["src/app.swift"])
+
+        let nested = try files.contentSearch(
+            root: tmp, query: "needle",
+            options: FileContentSearchOptions(include: ["docs/*"]))
+        XCTAssertEqual(nested.matches.map(\.path), ["docs/notes.md"])
+
+        let excluded = try files.contentSearch(
+            root: tmp, query: "needle",
+            options: FileContentSearchOptions(exclude: ["*.txt"]))
+        XCTAssertEqual(Set(excluded.matches.map(\.path)), ["src/app.swift", "docs/notes.md"])
+    }
+
+    func testContentSearchSkipsBinaryAndRespectsBudgets() throws {
+        try write("visible secret\n", to: "plain.txt")
+        try writeData(Data("secret".utf8) + Data([0x00, 0x01]), to: "blob.bin")
+        // Image extension is skipped without a content read.
+        try write("secret in a png\n", to: "logo.png")
+
+        let skipped = try files.contentSearch(root: tmp, query: "secret")
+        XCTAssertEqual(skipped.matches.map(\.path), ["plain.txt"])
+
+        try write(String(repeating: "secret\n", count: 8), to: "many.txt")
+        let perFile = try files.contentSearch(
+            root: tmp, query: "secret",
+            options: FileContentSearchOptions(perFileLimit: 2))
+        XCTAssertEqual(perFile.matches.filter { $0.path == "many.txt" }.count, 2)
+        XCTAssertTrue(perFile.truncated)
+
+        let capped = try files.contentSearch(
+            root: tmp, query: "secret",
+            options: FileContentSearchOptions(limit: 1))
+        XCTAssertEqual(capped.matches.count, 1)
+        XCTAssertTrue(capped.truncated)
+
+        try write(String(repeating: "x", count: 64) + "secret", to: "big.txt")
+        let overFile = try files.contentSearch(
+            root: tmp, query: "secret",
+            options: FileContentSearchOptions(include: ["big.txt"], fileByteBudget: 16))
+        XCTAssertTrue(overFile.matches.isEmpty)
+
+        try write("secret-a\n", to: "a.txt")
+        try write("secret-b\n", to: "b.txt")
+        let overTotal = try files.contentSearch(
+            root: tmp, query: "secret",
+            options: FileContentSearchOptions(
+                include: ["a.txt", "b.txt"],
+                fileByteBudget: 100,
+                totalByteBudget: 12))
+        XCTAssertTrue(overTotal.truncated)
+        XCTAssertLessThan(overTotal.matches.count, 2)
+    }
+
+    func testContentSearchConfinesAndSkipsSymlinkEscape() throws {
+        try write("inside hit\n", to: "ok.txt")
+        let outsideDir = tmp.deletingLastPathComponent()
+            .appendingPathComponent("orchard-search-outside-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: outsideDir, withIntermediateDirectories: true)
+        let leak = outsideDir.appendingPathComponent("leak.txt")
+        try "inside hit\n".write(to: leak, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: outsideDir) }
+        try FileManager.default.createSymbolicLink(
+            at: tmp.appendingPathComponent("escape"), withDestinationURL: outsideDir)
+
+        let result = try files.contentSearch(root: tmp, query: "inside hit")
+        XCTAssertEqual(result.matches.map(\.path), ["ok.txt"])
+        XCTAssertFalse(result.matches.contains { $0.path.contains("..") })
+        XCTAssertThrowsError(try files.contentSearch(root: tmp, query: "  ")) { error in
+            XCTAssertEqual((error as? FileServiceError)?.code, "invalid_argument")
+        }
+    }
+
+    func testFileGlobPatterns() throws {
+        XCTAssertTrue(try FileGlob("*.swift").matches("App.swift"))
+        XCTAssertTrue(try FileGlob("*.swift").matches("src/App.swift"))
+        XCTAssertFalse(try FileGlob("*.swift").matches("App.swift.md"))
+        XCTAssertTrue(try FileGlob("src/*.swift").matches("src/App.swift"))
+        XCTAssertFalse(try FileGlob("src/*.swift").matches("src/nested/App.swift"))
+        XCTAssertTrue(try FileGlob("src/**/*.swift").matches("src/nested/App.swift"))
+        XCTAssertTrue(try FileGlob("**/notes.md").matches("docs/notes.md"))
+        XCTAssertTrue(try FileGlob("foo/?at").matches("foo/cat"))
+        XCTAssertFalse(try FileGlob("foo/?at").matches("foo/caat"))
+        XCTAssertThrowsError(try FileGlob("  ")) { error in
+            XCTAssertEqual((error as? FileServiceError)?.code, "invalid_argument")
+        }
+    }
 }

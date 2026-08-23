@@ -84,6 +84,94 @@ public struct FileSearchResult: Codable, Equatable, Sendable {
     }
 }
 
+/// One full-text match. `path` is worktree-relative; `line` is 1-indexed.
+public struct FileContentHit: Codable, Equatable, Sendable {
+    public var path: String
+    public var line: Int
+    public var excerpt: String
+
+    public init(path: String, line: Int, excerpt: String) {
+        self.path = path
+        self.line = line
+        self.excerpt = excerpt
+    }
+}
+
+public struct FileContentSearchResult: Codable, Equatable, Sendable {
+    public var matches: [FileContentHit]
+    public var totalCount: Int
+    public var truncated: Bool
+
+    public init(matches: [FileContentHit], totalCount: Int, truncated: Bool) {
+        self.matches = matches
+        self.totalCount = totalCount
+        self.truncated = truncated
+    }
+}
+
+/// Bounds and glob filters for `FileService.contentSearch`.
+public struct FileContentSearchOptions: Equatable, Sendable {
+    public var include: [String]
+    public var exclude: [String]
+    public var caseSensitive: Bool
+    public var showDotfiles: Bool
+    public var limit: Int
+    public var perFileLimit: Int
+    public var fileByteBudget: Int
+    public var totalByteBudget: Int
+    public var maxExcerptLength: Int
+
+    public init(include: [String] = [],
+                exclude: [String] = [],
+                caseSensitive: Bool = false,
+                showDotfiles: Bool = false,
+                limit: Int = FileService.defaultContentSearchLimit,
+                perFileLimit: Int = FileService.defaultPerFileMatchLimit,
+                fileByteBudget: Int = FileService.contentSearchFileByteBudget,
+                totalByteBudget: Int = FileService.contentSearchTotalByteBudget,
+                maxExcerptLength: Int = FileService.maxExcerptLength) {
+        self.include = include
+        self.exclude = exclude
+        self.caseSensitive = caseSensitive
+        self.showDotfiles = showDotfiles
+        self.limit = limit
+        self.perFileLimit = perFileLimit
+        self.fileByteBudget = fileByteBudget
+        self.totalByteBudget = totalByteBudget
+        self.maxExcerptLength = maxExcerptLength
+    }
+}
+
+public struct FileWatchChange: Equatable, Sendable {
+    public enum Kind: String, Codable, Sendable {
+        case created
+        case deleted
+        case renamed
+    }
+
+    public var kind: Kind
+    public var relativePath: String
+    /// Set for `.renamed`: the path before the rename.
+    public var previousRelativePath: String?
+
+    public init(kind: Kind, relativePath: String, previousRelativePath: String? = nil) {
+        self.kind = kind
+        self.relativePath = relativePath
+        self.previousRelativePath = previousRelativePath
+    }
+}
+
+public struct FileWatchBatch: Equatable, Sendable {
+    public var changes: [FileWatchChange]
+    /// The watched root itself vanished; the explorer should stop and surface an error.
+    public var rootDeleted: Bool
+
+    public init(changes: [FileWatchChange] = [], rootDeleted: Bool = false) {
+        self.changes = changes
+        self.rootDeleted = rootDeleted
+    }
+}
+
 /// Request posted when an agent asks the app to focus a file (`file open` /
 /// `file open-changed`). The explorer (or any other in-process client)
 /// subscribes; the CLI itself never waits on a UI.

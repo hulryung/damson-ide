@@ -4,9 +4,9 @@ import Foundation
 /// root; `..`, absolute paths, and symlink escapes are rejected before any IO
 /// beyond the confinement check itself.
 ///
-/// Listings are lazy (one directory at a time). Recursive name listing and
-/// filename search are bounded so a huge tree can't stall the RPC. Full-text
-/// search is out of scope (wave 3).
+/// Listings are lazy (one directory at a time). Recursive name listing,
+/// filename search, and full-text content search are bounded so a huge tree
+/// can't stall the RPC.
 public struct FileService: Sendable {
     /// Text preview cap. Matches Orca's mobile text read (`MOBILE_FILE_READ_MAX_BYTES`).
     public static let defaultTextBudget = 512 * 1024
@@ -18,6 +18,17 @@ public struct FileService: Sendable {
     public static let maxSearchLimit = 64
     public static let defaultListLimit = 2000
     public static let maxListLimit = 5000
+    /// Full-text match cap (Orca's renderer search is 2000; we default lower).
+    public static let defaultContentSearchLimit = 200
+    public static let maxContentSearchLimit = 2000
+    public static let defaultPerFileMatchLimit = 20
+    public static let maxPerFileMatchLimit = 100
+    /// Per-file read cap for content search (same as the text preview budget).
+    public static let contentSearchFileByteBudget = defaultTextBudget
+    /// Stop scanning once this many bytes have been read across files.
+    public static let contentSearchTotalByteBudget = 8 * 1024 * 1024
+    public static let maxExcerptLength = 200
+    public static let maxQueryBytes = 8 * 1024
 
     private static let imageMIME: [String: String] = [
         "png": "image/png",
@@ -177,6 +188,100 @@ public struct FileService: Sendable {
         return FileSearchResult(files: Array(hits), totalCount: total, truncated: total > cap)
     }
 
+    /// Bounded full-text search. Binary files (NUL sniff) and over-budget files
+    /// are skipped; include/exclude globs match worktree-relative paths.
+    /// Results never leave the root — the walker already refuses symlink escapes.
+    public func contentSearch(root: URL, query: String,
+                              options: FileContentSearchOptions = FileContentSearchOptions())
+        throws -> FileContentSearchResult {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            throw FileServiceError.invalidArgument("search requires a query")
+        }
+        if trimmed.utf8.count > Self.maxQueryBytes {
+            throw FileServiceError.invalidArgument("query exceeds 8 KB")
+        }
+        let cap = clamp(options.limit, lo: 1, hi: Self.maxContentSearchLimit)
+        let perFile = clamp(options.perFileLimit, lo: 1, hi: Self.maxPerFileMatchLimit)
+        let fileBudget = max(1, options.fileByteBudget)
+        let totalBudget = max(1, options.totalByteBudget)
+        let excerptCap = max(16, options.maxExcerptLength)
+        let include = try options.include.map(FileGlob.init)
+        let exclude = try options.exclude.map(FileGlob.init)
+        let compare: String.CompareOptions = options.caseSensitive ? [] : [.caseInsensitive]
+
+        var matches: [FileContentHit] = []
+        var scanned = 0
+        var truncated = false
+        try walk(root: root, showDotfiles: options.showDotfiles) { rel, _, isDir in
+            if truncated { return }
+            if isDir { return }
+            if !include.isEmpty && !FileGlob.any(include, matches: rel) { return }
+            if FileGlob.any(exclude, matches: rel) { return }
+            let kind = self.kind(of: rel)
+            if kind == "image" || kind == "binary" { return }
+
+            let url: URL
+            do {
+                url = try resolve(root: root, relativePath: rel)
+            } catch {
+                // Symlink escape, vanished file, etc. — skip this entry rather
+                // than aborting the whole search.
+                return
+            }
+            let size = Int((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]
+                as? NSNumber)?.int64Value ?? 0)
+            if size <= 0 || size > fileBudget { return }
+            if scanned + size > totalBudget {
+                truncated = true
+                return
+            }
+            let data: Data
+            do {
+                data = try Data(contentsOf: url, options: [.mappedIfSafe])
+            } catch {
+                return
+            }
+            if data.count > fileBudget || Self.containsNUL(data) { return }
+            scanned += data.count
+            let text = String(decoding: data, as: UTF8.self)
+
+            var lineNo = 0
+            var fileHits = 0
+            text.enumerateLines { line, stop in
+                lineNo += 1
+                guard line.range(of: trimmed, options: compare) != nil else { return }
+                if matches.count >= cap || fileHits >= perFile {
+                    truncated = true
+                    stop = true
+                    return
+                }
+                matches.append(FileContentHit(
+                    path: rel, line: lineNo,
+                    excerpt: Self.excerpt(line: line, query: trimmed, options: compare,
+                                          maxLength: excerptCap)))
+                fileHits += 1
+                if matches.count >= cap || fileHits >= perFile {
+                    // A later line or file may still match; the next iteration
+                    // (or the next file) sets truncated if so. Conservative:
+                    // hitting the cap is enough of a bound signal.
+                    if matches.count >= cap { truncated = true }
+                }
+            }
+        }
+        matches.sort { a, b in
+            let pathOrder = a.path.localizedStandardCompare(b.path)
+            if pathOrder != .orderedSame { return pathOrder == .orderedAscending }
+            return a.line < b.line
+        }
+        if matches.count > cap {
+            matches = Array(matches.prefix(cap))
+            truncated = true
+        }
+        return FileContentSearchResult(matches: matches, totalCount: matches.count,
+                                       truncated: truncated)
+    }
+
     /// Classify a path the way `file open` reports `kind`.
     public func kind(of relativePath: String) -> String {
         let ext = (relativePath as NSString).pathExtension.lowercased()
@@ -327,5 +432,28 @@ public struct FileService: Sendable {
     private static func containsNUL(_ data: Data) -> Bool {
         let window = data.prefix(binarySniffBytes)
         return window.contains(0)
+    }
+
+    /// Window the matching line around the first hit so a minified 2 MB line
+    /// can't blow the RPC payload.
+    static func excerpt(line: String, query: String, options: String.CompareOptions,
+                        maxLength: Int) -> String {
+        if line.count <= maxLength { return line }
+        guard let match = line.range(of: query, options: options) else {
+            return String(line.prefix(maxLength)) + "…"
+        }
+        let matchLen = line.distance(from: match.lowerBound, to: match.upperBound)
+        let remain = max(maxLength - matchLen, 0)
+        let leftBudget = remain / 2
+        let matchStart = line.distance(from: line.startIndex, to: match.lowerBound)
+        var windowStart = max(0, matchStart - leftBudget)
+        let windowEnd = min(line.count, windowStart + maxLength)
+        windowStart = max(0, windowEnd - maxLength)
+        let start = line.index(line.startIndex, offsetBy: windowStart)
+        let end = line.index(line.startIndex, offsetBy: windowEnd)
+        var snippet = String(line[start..<end])
+        if windowStart > 0 { snippet = "…" + snippet }
+        if windowEnd < line.count { snippet += "…" }
+        return snippet
     }
 }

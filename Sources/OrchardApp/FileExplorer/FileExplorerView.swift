@@ -7,6 +7,7 @@ import OrchardRuntime
 /// the rest of the chrome; the only hook is `View.fileExplorerSidebar()`.
 struct FileExplorerSidebar: View {
     @EnvironmentObject var store: AppStore
+    @State private var revealPath: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -14,14 +15,16 @@ struct FileExplorerSidebar: View {
                 FileExplorerPane(
                     root: record.path,
                     changed: changedMap(record.status.stat),
-                    identity: record.id.uuidString)
+                    identity: record.id.uuidString,
+                    revealPath: revealPath)
                     .id(record.id)
             } else if case .projectRoot(let id) = store.selection,
                       let project = store.projects.first(where: { $0.id == id }) {
                 FileExplorerPane(
                     root: project.repo,
                     changed: changedMap(project.checkoutStatus.stat),
-                    identity: project.id.uuidString)
+                    identity: project.id.uuidString,
+                    revealPath: revealPath)
                     .id(project.id)
             } else {
                 empty
@@ -60,6 +63,7 @@ struct FileExplorerSidebar: View {
             store.select(match.record, in: match.project)
         }
         store.selectKind(request.mode == .diff ? .diff : .editor)
+        revealPath = request.relativePath
     }
 
     private func matchingRecord(path: String) -> (project: ProjectSession, record: WorktreeRecord)? {
@@ -79,6 +83,7 @@ private struct FileExplorerPane: View {
     let root: URL
     let changed: [String: GitFileChange.Kind]
     let identity: String
+    let revealPath: String?
 
     @EnvironmentObject var store: AppStore
     @StateObject private var model = FileExplorerModel()
@@ -100,12 +105,18 @@ private struct FileExplorerPane: View {
                 hits
             }
         }
-        .onAppear { model.configure(root: root, files: store.runtime?.fileService ?? FileService()) }
-        .onChange(of: identity) { _ in
-            model.configure(root: root, files: store.runtime?.fileService ?? FileService())
+        .onAppear { configureAndReveal() }
+        .onChange(of: identity) { _ in configureAndReveal() }
+        .onChange(of: revealPath) { _ in
+            if let revealPath { model.reveal(revealPath) }
         }
         .onChange(of: model.showDotfiles) { _ in model.reload() }
         .onChange(of: model.filter) { _ in model.applyFilter() }
+    }
+
+    private func configureAndReveal() {
+        model.configure(root: root, files: store.runtime?.fileService ?? FileService())
+        if let revealPath { model.reveal(revealPath) }
     }
 
     private var header: some View {
@@ -147,14 +158,19 @@ private struct FileExplorerPane: View {
     }
 
     private var tree: some View {
-        ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-                ForEach(model.children[""] ?? []) { node in
-                    FileTreeRow(node: node, depth: 0, model: model, changed: changed,
-                                onActivate: activate, onReveal: reveal)
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) {
+                    ForEach(model.children[""] ?? []) { node in
+                        FileTreeRow(node: node, depth: 0, model: model, changed: changed,
+                                    onActivate: activate, onReveal: reveal)
+                    }
                 }
+                .padding(.vertical, 4)
             }
-            .padding(.vertical, 4)
+            .onChange(of: model.highlighted) { path in
+                if let path { proxy.scrollTo(path, anchor: .center) }
+            }
         }
     }
 
@@ -177,6 +193,7 @@ private struct FileExplorerPane: View {
     }
 
     private func activate(_ relativePath: String) {
+        model.highlighted = relativePath
         if changed[relativePath] != nil {
             store.selectKind(.diff)
         }
@@ -220,7 +237,9 @@ private struct FileTreeRow: View {
             .padding(.leading, CGFloat(depth) * 12 + 8)
             .padding(.trailing, 8)
             .padding(.vertical, 2)
+            .background(model.highlighted == node.relativePath ? Tokens.rowSelected : Color.clear)
             .contentShape(Rectangle())
+            .id(node.relativePath)
             .onTapGesture {
                 if node.isDirectory {
                     model.toggle(node)
@@ -294,14 +313,23 @@ private final class FileExplorerModel: ObservableObject {
     @Published var expanded: Set<String> = []
     @Published var hits: [FileSearchHit] = []
     @Published var error: String?
+    @Published var highlighted: String?
 
     private var root: URL?
     private var files = FileService()
+    private var watcher: FileWatcher?
+    private var watchTask: Task<Void, Never>?
+
+    deinit {
+        watchTask?.cancel()
+        watcher?.stop()
+    }
 
     func configure(root: URL, files: FileService) {
         self.root = root
         self.files = files
         reload()
+        startWatching()
     }
 
     func reload() {
@@ -337,6 +365,91 @@ private final class FileExplorerModel: ObservableObject {
         }
     }
 
+    /// Expand ancestors and highlight `relativePath` so an opened diff/file tab
+    /// is visible in the tree without a manual refresh.
+    func reveal(_ relativePath: String) {
+        let trimmed = relativePath.replacingOccurrences(of: "\\", with: "/")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard !trimmed.isEmpty else { return }
+        filter = ""
+        hits = []
+        load(parent: "")
+        var prefix = ""
+        let parts = trimmed.split(separator: "/").map(String.init)
+        for part in parts.dropLast() {
+            prefix = prefix.isEmpty ? part : prefix + "/" + part
+            load(parent: prefix)
+            expanded.insert(prefix)
+        }
+        highlighted = trimmed
+    }
+
+    private func startWatching() {
+        watchTask?.cancel()
+        watcher?.stop()
+        guard let root else { return }
+        let watcher = FileWatcher()
+        self.watcher = watcher
+        let stream = watcher.events()
+        watchTask = Task { [weak self] in
+            for await batch in stream {
+                if Task.isCancelled { break }
+                await MainActor.run { self?.applyWatch(batch) }
+            }
+        }
+        do {
+            try watcher.start(root: root)
+        } catch {
+            self.error = String(describing: error)
+        }
+    }
+
+    private func applyWatch(_ batch: FileWatchBatch) {
+        if batch.rootDeleted {
+            watcher?.stop()
+            children = [:]
+            expanded = []
+            highlighted = nil
+            error = "This folder was deleted"
+            return
+        }
+        let loaded = Array(children.keys)
+        for parent in loaded {
+            if parent.isEmpty {
+                load(parent: "")
+                continue
+            }
+            if directoryExists(parent) {
+                load(parent: parent)
+            } else {
+                children[parent] = nil
+                expanded.remove(parent)
+            }
+        }
+        if let highlighted, !pathExists(highlighted) {
+            self.highlighted = nil
+        }
+    }
+
+    private func directoryExists(_ relativePath: String) -> Bool {
+        guard let root else { return false }
+        do {
+            return try files.stat(root: root, relativePath: relativePath).isDirectory
+        } catch {
+            return false
+        }
+    }
+
+    private func pathExists(_ relativePath: String) -> Bool {
+        guard let root else { return false }
+        do {
+            _ = try files.stat(root: root, relativePath: relativePath)
+            return true
+        } catch {
+            return false
+        }
+    }
+
     private func load(parent: String) {
         guard let root else { return }
         do {
@@ -346,9 +459,15 @@ private final class FileExplorerModel: ObservableObject {
                 return FileNode(relativePath: rel, name: entry.name,
                                 isDirectory: entry.isDirectory, isSymlink: entry.isSymlink)
             }
-            error = nil
+            if parent.isEmpty { error = nil }
         } catch {
-            self.error = String(describing: error)
+            if parent.isEmpty {
+                self.error = String(describing: error)
+                children[parent] = []
+            } else {
+                children[parent] = nil
+                expanded.remove(parent)
+            }
         }
     }
 }
