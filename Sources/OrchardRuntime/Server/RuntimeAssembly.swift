@@ -20,6 +20,8 @@ public final class OrchardRuntimeHost {
     public nonisolated let dataStore: OrchardDataStore
     public let terminalService: TerminalService
     public let workspaceService: WorkspaceService
+    public nonisolated let fileService: FileService
+    public nonisolated let fileOpenCenter: FileOpenCenter
     public nonisolated let orchestration: LiveOrchestrationStore
     public nonisolated let waitCenter: MessageWaitCenter
 
@@ -44,6 +46,8 @@ public final class OrchardRuntimeHost {
         let terminalService = TerminalService(factory: terminalFactory)
         self.terminalService = terminalService
         self.workspaceService = WorkspaceService(store: dataStore)
+        self.fileService = FileService()
+        self.fileOpenCenter = FileOpenCenter()
 
         let waitCenter = MessageWaitCenter()
         self.waitCenter = waitCenter
@@ -75,6 +79,9 @@ public final class OrchardRuntimeHost {
         registry.register(TerminalCommandHandler(service: terminalService))
         registry.register(WorkspaceCommandHandler(service: workspaceService))
         registry.register(RepoRegistryHandler(service: workspaceService))
+        registry.register(FileCommandHandler(files: fileService,
+                                             workspaces: workspaceService,
+                                             opens: fileOpenCenter))
         self.registry = registry
         self.inMemory = InMemoryRuntimeServer(registry: registry, runtimeId: runtimeId)
     }

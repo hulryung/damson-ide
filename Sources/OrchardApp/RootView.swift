@@ -14,6 +14,7 @@ struct RootView: View {
                     max: Tokens.sidebarMaxWidth)
         } detail: {
             WorkbenchView()
+                .fileExplorerSidebar()
                 .toolbar {
                     ToolbarItem(placement: .navigation) {
                         Button {

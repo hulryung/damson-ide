@@ -67,6 +67,35 @@ Use `orchard agent-context --json` for the authoritative command table.
 
 func printUsage() { print("usage: orchard <command> [options]\n"); OrchardCommands.all.forEach { print("  \($0.name.padding(toLength: 18, withPad: " ", startingAt: 0)) \($0.summary)") } }
 
+func formatHuman(method: String, result: JSONValue?) -> String {
+    let object = result?.objectValue
+    switch method {
+    case "file-open":
+        let path = object?["relativePath"]?.stringValue ?? "file"
+        if object?["opened"]?.boolValue == true { return "Opened \(path)." }
+        return "Did not open \(path): \(object?["reason"]?.stringValue ?? object?["kind"]?.stringValue ?? "not opened")."
+    case "file-diff":
+        let diff = object?["diff"]?.stringValue ?? ""
+        return diff.isEmpty ? "No changes." : diff
+    case "file-open-changed":
+        let total = object?["totalChanged"]?.numberValue.map { Int($0) } ?? 0
+        if total == 0 { return "No changed files." }
+        let opened = object?["opened"]?.arrayValue?.count ?? 0
+        var lines = ["Opened \(opened) changed file targets."]
+        if let skipped = object?["skipped"]?.arrayValue, !skipped.isEmpty {
+            lines.append("Skipped \(skipped.count) changed file targets:")
+            for item in skipped {
+                let path = item.objectValue?["path"]?.stringValue ?? "?"
+                let reason = item.objectValue?["reason"]?.stringValue ?? "not opened"
+                lines.append("- \(path): \(reason)")
+            }
+        }
+        return lines.joined(separator: "\n")
+    default:
+        return result.map(String.init(describing:)) ?? "ok"
+    }
+}
+
 do {
     let args = Array(CommandLine.arguments.dropFirst())
     if args.isEmpty || args.first == "help" || args.first == "--help" { printUsage(); exit(0) }
@@ -81,9 +110,17 @@ do {
     default:
         var method = parsed.spec.name, params = parsed.params; params.removeValue(forKey: "json")
         if method == "repo", case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue { method = "repo-\(subcommand)" }
+        if method == "file" {
+            guard case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue else {
+                throw CLIError.usage("usage: orchard file open|diff|open-changed [path] [--worktree <selector>]")
+            }
+            method = "file-\(subcommand)"
+            if values.count > 1, params["path"] == nil { params["path"] = values[1] }
+            if params["cwd"] == nil { params["cwd"] = .string(FileManager.default.currentDirectoryPath) }
+        }
         let response = try callRuntime(method: method, params: .object(params))
         if parsed.json { let data = try JSONEncoder.pretty.encode(response); FileHandle.standardOutput.write(data + Data("\n".utf8)) }
-        else if response.ok { print(response.result.map(String.init(describing:)) ?? "ok") }
+        else if response.ok { print(formatHuman(method: method, result: response.result)) }
         else { throw CLIError.runtime("\(response.error?.code ?? "error"): \(response.error?.message ?? "unknown error")") }
     }
 } catch { FileHandle.standardError.write(Data("orchard: \(error)\n".utf8)); exit(64) }
