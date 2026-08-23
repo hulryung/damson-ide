@@ -233,8 +233,9 @@ struct TabGroupPane: View {
             case .editor:
                 PlaceholderPane(
                     symbol: "doc.text",
-                    title: "Editor",
-                    detail: "The file editor lands in wave 2.")
+                    title: store.pendingOpenPath.map { ($0 as NSString).lastPathComponent } ?? "Editor",
+                    detail: store.pendingOpenPath.map { "\($0) — the file editor lands in a later wave." }
+                        ?? "The file editor lands in a later wave.")
             case .browser:
                 BrowserPane(key: key)
             }

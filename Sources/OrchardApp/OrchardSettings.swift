@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import DamsonTerminal
 import OrchardCore
+import OrchardRuntime
 import OrchardTerminals
 
 /// User preferences, persisted in `UserDefaults`.
@@ -80,7 +81,32 @@ final class OrchardSettings: ObservableObject {
         }
     }
 
+    /// Seconds between T20 port sweeps. Applied live via `PortService.setInterval`.
+    @Published var portsSweepInterval: Double {
+        didSet {
+            defaults.set(portsSweepInterval, forKey: Keys.portsSweep)
+            onSubsystemSettingsChange?()
+        }
+    }
+
+    /// Browser profile id (or label) used for new unbound workspace tabs.
+    @Published var defaultBrowserProfileID: String {
+        didSet {
+            defaults.set(defaultBrowserProfileID, forKey: Keys.defaultBrowserProfile)
+            onSubsystemSettingsChange?()
+        }
+    }
+
+    /// Master switch for the automation scheduler. Off stops the in-process loop.
+    @Published var automationsEnabled: Bool {
+        didSet {
+            defaults.set(automationsEnabled, forKey: Keys.automationsEnabled)
+            onSubsystemSettingsChange?()
+        }
+    }
+
     var onTerminalConfigChange: (() -> Void)?
+    var onSubsystemSettingsChange: (() -> Void)?
 
     private let defaults = UserDefaults.standard
 
@@ -97,6 +123,9 @@ final class OrchardSettings: ObservableObject {
         static let theme = "orchard.theme"
         static let fontSize = "orchard.settings.fontSize"
         static let fontFamily = "orchard.settings.fontFamily"
+        static let portsSweep = "orchard.settings.portsSweepInterval"
+        static let defaultBrowserProfile = "orchard.settings.defaultBrowserProfile"
+        static let automationsEnabled = "orchard.settings.automationsEnabled"
     }
 
     init() {
@@ -120,6 +149,15 @@ final class OrchardSettings: ObservableObject {
             ?? DamsonTheme.presets.first?.name ?? fallback.theme.name
         fontSize = (d.object(forKey: Keys.fontSize) as? Double) ?? Double(fallback.fontSize)
         fontFamily = d.string(forKey: Keys.fontFamily) ?? fallback.fontFamily
+
+        if let stored = d.object(forKey: Keys.portsSweep) as? Double {
+            portsSweepInterval = PortService.clamp(stored)
+        } else {
+            portsSweepInterval = PortService.defaultInterval
+        }
+        defaultBrowserProfileID = d.string(forKey: Keys.defaultBrowserProfile)
+            ?? BrowserProfile.defaultProfile.id
+        automationsEnabled = (d.object(forKey: Keys.automationsEnabled) as? Bool) ?? true
     }
 
     var theme: DamsonTheme {

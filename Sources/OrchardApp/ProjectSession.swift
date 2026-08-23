@@ -146,10 +146,9 @@ final class ProjectSession: ObservableObject, Identifiable {
         case .agentStateChanged(_, let worktreeID, _):
             mirrorAgentState(for: worktreeID)
             objectWillChange.send()
-        case .agentNeedsAttention(_, let worktreeID, _):
-            if let worktreeID, let record = record(id: worktreeID) {
-                record.hasUnseenActivity = true
-            }
+        case .agentNeedsAttention:
+            // Unread is folded in AppStore (single source). Cards and the
+            // dashboard both read that state — do not set per-record flags here.
             objectWillChange.send()
         case .agentRetired(_, let worktreeID):
             mirrorAgentState(for: worktreeID)

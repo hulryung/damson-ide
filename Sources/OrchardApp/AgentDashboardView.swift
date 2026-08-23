@@ -94,7 +94,7 @@ struct DashboardCardView: View {
         store.displayDotState(for: card.agent)
     }
 
-    /// Done cards stay highlighted until the user focuses them (unacked set).
+    /// Done cards stay highlighted until the user focuses them (AppStore unread).
     private var highlighted: Bool { dot == .done }
 
     private var workspaceStatus: WorkspaceStatusAppearance? {

@@ -222,6 +222,12 @@ final class WorkspaceMetaStore: ObservableObject {
 
     func lastActivity(for id: UUID) -> Date { meta(for: id)?.lastActivityAt ?? .distantPast }
 
+    func isArchived(for id: UUID) -> Bool { meta(for: id)?.isArchived ?? false }
+
+    func setArchived(_ archived: Bool, for id: UUID) {
+        mutate(id) { $0.isArchived = archived }
+    }
+
     func touch(_ id: UUID) {
         mutate(id) { $0.lastActivityAt = Date() }
     }

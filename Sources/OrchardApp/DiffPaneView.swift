@@ -19,6 +19,7 @@ struct DiffPaneView: View {
     let isRefreshing: Bool
     let onRefresh: () async -> Void
 
+    @EnvironmentObject var store: AppStore
     @State private var selectedPath: String?
     @State private var diffText = ""
     @State private var isLoadingDiff = false
@@ -70,7 +71,12 @@ struct DiffPaneView: View {
                 selectFirst(in: newStat)
             }
         }
-        .onAppear { if selectedPath == nil { selectFirst(in: stat) } }
+        .onAppear {
+            if !applyPendingOpen() && selectedPath == nil { selectFirst(in: stat) }
+        }
+        .onChange(of: store.pendingOpenPath) { _ in
+            _ = applyPendingOpen()
+        }
     }
 
     @ViewBuilder
@@ -78,6 +84,15 @@ struct DiffPaneView: View {
         if isHovered && !commitFocused && !stat.isEmpty {
             HunkKeyCapture(onNext: { moveHunk(1) }, onPrev: { moveHunk(-1) })
         }
+    }
+
+    @discardableResult
+    private func applyPendingOpen() -> Bool {
+        guard let path = store.pendingOpenPath,
+              stat.files.contains(where: { $0.path == path }) else { return false }
+        selectedPath = path
+        Task { await loadDiff(for: path) }
+        return true
     }
 
     private func selectFirst(in stat: GitDiffStat) {

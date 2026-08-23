@@ -31,6 +31,8 @@ struct FileExplorerSidebar: View {
             }
         }
         .background(Tokens.sidebar)
+        // Detail column already receives the window status-bar inset; no extra
+        // bottom pad here (that would double-space against StatusBarView).
         .task { await listenForOpens() }
     }
 
@@ -62,6 +64,7 @@ struct FileExplorerSidebar: View {
         if let match = matchingRecord(path: request.worktreePath) {
             store.select(match.record, in: match.project)
         }
+        store.pendingOpenPath = request.relativePath
         store.selectKind(request.mode == .diff ? .diff : .editor)
         revealPath = request.relativePath
     }
@@ -194,9 +197,8 @@ private struct FileExplorerPane: View {
 
     private func activate(_ relativePath: String) {
         model.highlighted = relativePath
-        if changed[relativePath] != nil {
-            store.selectKind(.diff)
-        }
+        store.pendingOpenPath = relativePath
+        store.selectKind(changed[relativePath] != nil ? .diff : .editor)
     }
 
     private func reveal(_ relativePath: String) {
