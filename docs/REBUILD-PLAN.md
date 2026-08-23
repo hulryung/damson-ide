@@ -370,7 +370,37 @@ rows on workspace cards get the same live states, and the workspace-status slot
 supports the custom vocabulary from settings. Owns Sources/OrchardApp/** dashboard/
 sidebar files; additive status-stream reads only.
 
-### Wave 5+ backlog
+### Wave 5 (T19–T22, parallel; merge order T19 → T20 → T21 → T22)
+
+**T19 — Adopt damson @ 0483173 (terminals).** Pin damson by revision 0483173 (T17
+merge: pane-addressed control, `outputBytes` multi-subscriber stream, sized spawn) and
+adopt it: `DamsonTerminalSession`/factory spawn at the real initial pane size instead
+of eating the 80×24 reflow (thread cols/rows through the terminal service and app
+panes; default sensibly when unknown), and switch any raw-output consumers to the
+multi-subscriber `outputBytes` where it removes single-closure contention. No behavior
+change beyond spawn size; all tests stay green.
+
+**T20 — Ports & status surface (runtime + app).** Detect listening TCP ports per
+workspace (poll `lsof`-derived data for processes whose cwd/tree is inside the
+worktree; debounced), expose `workspace ports` over RPC + `orchard worktree ps`-style
+CLI listing, render a ports chip on workspace cards and a status-bar summary in the
+app. Detection must be best-effort and cheap (no per-output-event hooks; timer sweep).
+
+**T21 — Browser profiles & iframes (browser).** Session profiles: one profile ⇒ one
+`WKWebsiteDataStore` partition (default shared + named isolated profiles; per
+browser-workspace binding persisted in orchard-data.json; CLI `browser tab profile
+list|create|set|show`). Snapshot iframes: walk same-origin child frames inline into
+the outline (frame-scoped refs), mark cross-origin frames as opaque nodes. Refs still
+invalidate on navigation.
+
+**T22 — Review flow (app diff pane).** Grow the diff pane into the review flow v1
+anticipated: grouped changed-file list (staged-ness irrelevant — fork-point diff),
+hunk navigation (n/p), a commit box driving `GitService.commitAll` (finally used) with
+the diff refreshing after, and a push action using `GitService.push` with upstream
+状态 surfaced (ahead/no-upstream states from `unpushedCommits`). Keep it
+worktree-scoped and observation-honest: failures surface inline with git's own stderr.
+
+### Wave 6+ backlog
 
 Project the repo primary checkout (and folder workspaces) into the runtime workspace
 registry as `repoId::path` the way Orca does — today `orchard file search --worktree
