@@ -46,6 +46,9 @@ public struct TerminalCommandHandler: CommandHandler, @unchecked Sendable {
         } catch let error as HostRegistryError {
             return .failure(id: request.id, error: RPCError(
                 code: error.code, message: error.message))
+        } catch let error as RemoteHostError {
+            return .failure(id: request.id, error: RPCError(
+                code: error.code, message: error.message))
         } catch {
             return .failure(id: request.id, error: RPCError(
                 code: "internal_error", message: String(describing: error)))
@@ -68,7 +71,56 @@ public struct TerminalCommandHandler: CommandHandler, @unchecked Sendable {
             let resolved = try await resolvedWorktree(params)
             let engineID = params["engine"]?.stringValue ?? "shell"
             let prompt = params["prompt"]?.stringValue ?? ""
-            let host = try executionHost(params)
+            var host = try executionHost(params)
+            // T32: a pane opened in a remote worktree inherits that workspace's host.
+            // The host is taken from the workspace record rather than defaulted, so a
+            // pane can never end up local while claiming to be in remote files.
+            if let workspace = resolved, let stamp = workspace.hostId,
+               stamp != ExecutionHostId.local.rawValue {
+                // An unparseable stamp is refused, never read as local: that downgrade
+                // is exactly how a pane ends up local while claiming remote files
+                // (docs/design/remote-hosts.md §1, rule 1).
+                guard let workspaceHost = ExecutionHostId(rawValue: stamp) else {
+                    throw TerminalServiceError.invalidArgument(
+                        "worktree \(workspace.id) has an unusable execution host '\(stamp)'")
+                }
+                if host.isLocal {
+                    host = workspaceHost
+                } else if host != workspaceHost {
+                    throw TerminalServiceError.invalidArgument(
+                        "worktree \(workspace.id) lives on \(workspaceHost.rawValue), "
+                            + "not \(host.rawValue)")
+                }
+                // Agents on remote files are stage 3 (their argv, config, hooks and
+                // transcript all assume a local filesystem), so this refuses rather than
+                // launching one here under the remote host's name.
+                guard engineID == "shell" else {
+                    throw RemoteHostError.unsupported(
+                        "the '\(engineID)' agent cannot run on \(host.rawValue) yet; "
+                            + "open a remote shell in the worktree instead")
+                }
+                let record = try requireHosts().require(host: host)
+                guard let path = workspace.path, !path.isEmpty else {
+                    throw TerminalServiceError.invalidArgument(
+                        "worktree \(workspace.id) has no remote path to open")
+                }
+                // `cd` happens on the far side. The local PTY's own cwd is only where
+                // `ssh` is launched from and is deliberately left alone: a remote path
+                // handed to a local `chdir` either fails or — worse — finds a
+                // same-named local directory.
+                let remoteCommand = prompt.isEmpty
+                    ? SSHCommand.cdAndLoginShellCommand(directory: path)
+                    : "cd \(SSHCommand.shellQuote(path)) && \(prompt)"
+                let summary = try await service.create(
+                    worktreeId: workspace.id,
+                    cwd: nil,
+                    engineID: "shell",
+                    prompt: SSHCommand.remoteShellCommandLine(for: record, command: remoteCommand),
+                    title: params["title"]?.stringValue
+                        ?? (path.split(separator: "/").last.map(String.init) ?? record.name),
+                    executionHostId: host.rawValue)
+                return try encodeJSON(summary)
+            }
             if host.isLocal {
                 let summary = try await service.create(
                     worktreeId: resolved?.id,
@@ -174,17 +226,21 @@ public struct TerminalCommandHandler: CommandHandler, @unchecked Sendable {
         return handle
     }
 
-    private func resolvedWorktree(_ params: [String: JSONValue]) async throws -> (id: String, path: String?)? {
+    private func resolvedWorktree(_ params: [String: JSONValue]) async throws
+        -> (id: String, path: String?, hostId: String?)? {
         guard let selector = params["worktree"]?.stringValue, !selector.isEmpty else { return nil }
-        guard let workspaces else { return (selector, nil) }
+        guard let workspaces else { return (selector, nil, nil) }
         let cwd = params["cwd"]?.stringValue
         return try await MainActor.run {
             do {
                 let workspace = try workspaces.resolveWorkspace(selector, cwd: cwd)
-                return (workspace.id, workspace.path)
+                // The raw stamp travels, not a parsed-or-nil host: the create path has
+                // to be able to tell "local" from "unreadable", and only one of those
+                // may open a local shell.
+                return (workspace.id, workspace.path, workspace.hostId)
             } catch let error as WorkspaceError {
                 if Self.isStrictSelector(selector) { throw error }
-                return (selector, nil)
+                return (selector, nil, nil)
             }
         }
     }

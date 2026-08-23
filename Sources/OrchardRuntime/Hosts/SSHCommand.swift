@@ -59,6 +59,33 @@ public enum SSHCommand {
         return argv
     }
 
+    /// `ssh -o BatchMode=yes -o ConnectTimeout=<n> [-p <port>] <dest> <command>` — one
+    /// bounded, non-interactive remote command.
+    ///
+    /// Same `BatchMode` guarantee as the probe: OpenSSH fails instead of prompting, so a
+    /// remote git read can never park on a passphrase nobody is there to type. No `-t`:
+    /// this is a captured command, not a pane, and allocating a TTY would fold stderr
+    /// into stdout and echo the output back at us.
+    public static func commandArgv(for host: HostRecord, command: String,
+                                   connectTimeoutSeconds: Int = 5) -> [String] {
+        [binary,
+         "-o", "BatchMode=yes",
+         "-o", "ConnectTimeout=\(connectTimeoutSeconds)"]
+            + portArguments(for: host)
+            + [destination(for: host), command]
+    }
+
+    /// `cd '<dir>' && exec "${SHELL:-/bin/sh}" -l` — what a pane in a remote worktree
+    /// runs.
+    ///
+    /// `exec` rather than a nested shell so the pane's PTY child *is* the login shell:
+    /// an extra wrapper layer would swallow the exit status the liveness verdict reads.
+    /// `${SHELL:-/bin/sh}` because a host where `SHELL` is unset (some `sshd` setups)
+    /// would otherwise exec the empty string and the pane would die instantly.
+    public static func cdAndLoginShellCommand(directory: String) -> String {
+        "cd \(shellQuote(directory)) && exec \"${SHELL:-/bin/sh}\" -l"
+    }
+
     /// The remote-shell argv as one shell command line, for the launch paths that take
     /// a command string (the `shell` engine's prompt-as-command-line contract).
     public static func remoteShellCommandLine(for host: HostRecord, command: String? = nil) -> String {

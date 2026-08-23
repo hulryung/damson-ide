@@ -17,6 +17,12 @@ public final class WorkspaceService {
     /// Override the on-disk worktree root (tests). `nil` uses
     /// `WorktreeManager.defaultRoot(for:)` per repo.
     public var worktreesRoot: URL?
+    /// T32: how remote git facts are read. Every remote worktree operation goes through
+    /// this seam, so tests script `ssh` output instead of needing a host — the same
+    /// trick the T29 probe tests use.
+    public var hostCommandRunner: HostCommandRunner = ProcessHostCommandRunner()
+    /// Ceiling on one remote git command (see `SSHRunner.defaultTimeout`).
+    public var remoteCommandTimeout: TimeInterval = SSHRunner.defaultTimeout
 
     private var gitServices: [String: WorktreeService] = [:]
     private var repoChangeContinuations: [UUID: AsyncStream<[RepoRecord]>.Continuation] = [:]
@@ -120,6 +126,12 @@ public final class WorkspaceService {
             data.worktreeLineageById = data.worktreeLineageById.filter { key, _ in
                 !Self.worktreeKey(key, belongsToRepo: record.id)
             }
+            // Remote worktrees are Orchard's own record of what is on the host. Closing
+            // the project drops the record, exactly as it drops folder rows and meta;
+            // the worktrees themselves are left alone on the far side.
+            data.remoteWorktrees.removeAll {
+                $0.repoId.caseInsensitiveCompare(record.id) == .orderedSame
+            }
         }
         let cached = gitServices.keys.filter {
             $0.caseInsensitiveCompare(record.id) == .orderedSame
@@ -173,6 +185,13 @@ public final class WorkspaceService {
         }
         var out: [Workspace] = []
         for repo in repos {
+            // A remote repo's worktrees are the last-known set, never a live local git
+            // read: running `git -C <remote path>` here would either fail or — worse —
+            // succeed against a same-named local directory (T32).
+            if Self.isRemote(repo) {
+                out.append(contentsOf: storedRemoteWorkspaces(for: repo, data: data))
+                continue
+            }
             switch repo.kind {
             case .git:
                 out.append(contentsOf: try gitWorkspaces(for: repo, data: data))
@@ -192,7 +211,11 @@ public final class WorkspaceService {
     /// worktree is a longer prefix.
     public func current(cwd: String) throws -> Workspace {
         let standardized = URL(fileURLWithPath: cwd).standardizedFileURL.path
+        // `cwd` is a path on *this* machine, so only a local workspace can enclose it.
+        // A remote worktree whose path happens to read the same (`/Users/x/repo` on both
+        // sides) would otherwise capture `active`, and the next verb would run there.
         let matches = try listWorkspaces().filter { ws in
+            guard !Self.isRemote(ws) else { return false }
             let root = URL(fileURLWithPath: ws.path).standardizedFileURL.path
             return standardized == root || standardized.hasPrefix(root.hasSuffix("/") ? root : root + "/")
         }
@@ -220,14 +243,22 @@ public final class WorkspaceService {
 
         let created: Workspace
         let gitWorktree: Worktree?
-        switch repo.kind {
-        case .git:
-            let pair = try createGitWorktree(repo: repo, request: request)
-            created = pair.workspace
-            gitWorktree = pair.worktree
-        case .folder:
-            created = try createFolderWorkspace(repo: repo, request: request)
+        // A remote repo has no local checkout to fork from, so its worktree is created
+        // over the connection (T32). There is deliberately no local fallback: creating
+        // it here would put the branch on the wrong machine.
+        if Self.isRemote(repo) {
+            created = try await createRemoteWorktree(repo: repo, request: request)
             gitWorktree = nil
+        } else {
+            switch repo.kind {
+            case .git:
+                let pair = try createGitWorktree(repo: repo, request: request)
+                created = pair.workspace
+                gitWorktree = pair.worktree
+            case .folder:
+                created = try createFolderWorkspace(repo: repo, request: request)
+                gitWorktree = nil
+            }
         }
 
         let lineage = WorktreeLineage(
@@ -335,6 +366,14 @@ public final class WorkspaceService {
         if isPrimaryCheckout(workspace) {
             throw WorkspaceError("invalid_argument",
                                  "cannot remove the repo primary checkout; close the project instead")
+        }
+        // Removing a remote worktree needs a bounded round trip (preflight, then the
+        // delete), so it cannot happen on this synchronous path. Failing here is
+        // deliberate: silently doing nothing would read as a successful delete.
+        if Self.isRemote(workspace) {
+            throw WorkspaceError("remote_unsupported",
+                                 "remote worktrees are removed through removeRemoteWorktree; "
+                                     + "this path cannot reach \(workspace.hostId)")
         }
         switch workspace.kind {
         case .folder:
@@ -593,6 +632,15 @@ public final class WorkspaceService {
 
     private func spawnAgent(engineID: String, prompt: String,
                             workspace: Workspace, gitWorktree: Worktree?) async throws -> String {
+        // Stage 3, not this wave: an agent engine's argv, config, hooks and transcript
+        // all assume a local filesystem, so launching one "for" a remote workspace would
+        // run it on *this* machine under the remote host's name
+        // (docs/design/remote-hosts.md §6).
+        if Self.isRemote(workspace) {
+            throw WorkspaceError("remote_unsupported",
+                                 "agents cannot run on \(workspace.hostId) yet; "
+                                     + "open a remote shell in the worktree instead")
+        }
         guard let launcher = agentLauncher else {
             throw WorkspaceError("agent_unavailable",
                 "agent-first create requires an AgentLaunching seam (AgentSupervisor / T3 terminal service)")
@@ -772,6 +820,10 @@ public final class WorkspaceService {
     private func isGitRepo(_ url: URL) -> Bool {
         (try? WorktreeManager(root: url).detectBaseRepo(from: url)) != nil
     }
+
+    /// Republish after a remote repo add — T32's extension cannot reach the private
+    /// continuation table from another file.
+    func publishRemoteReposChanged() { publishReposChanged() }
 
     private func publishReposChanged() {
         let snapshot = listRepos()

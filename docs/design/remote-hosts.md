@@ -1,8 +1,10 @@
 # Remote hosts (SSH execution boundary)
 
-Status: **stage 1 shipped** (T29, wave 7) — host registry, bounded connectivity probe,
-remote shell panes. Remote worktrees, remote agents, and keeper interplay are staged
-below and deliberately out of scope for this wave.
+Status: **stages 1–2 shipped** — T29 (wave 7): host registry, bounded connectivity probe,
+remote shell panes. T32 (wave 8): remote repo registration, remote worktree
+list/create/rm over a bounded ssh runner, remote worktrees in the workspace registry,
+panes that open a login shell inside one. Remote agents (stage 3) and keeper interplay
+(stage 4) are staged below and deliberately out of scope.
 
 This document is the contract for every later remote feature. It exists before the
 features do because the expensive mistakes here are *semantic*, not mechanical: what a
@@ -147,7 +149,7 @@ contact, not evidence that anything on `<name>` stopped."* `auth-required` is ke
 distinct from `unreachable` because collapsing them sends a user to debug the network
 when the real problem is their key.
 
-## 4. Remote terminals (this wave's PoC)
+## 4. Remote terminals
 
 ```
 terminal-create --host ssh:<name> [--prompt "<remote command>"]     # RPC verb
@@ -179,6 +181,8 @@ Refusals, all typed, all before anything spawns:
 | `--host ssh:<name>` for an unregistered name | `unknown_host` |
 | a host id that does not parse (`runtime:vm-1`, `ssh:`) | `invalid_argument` |
 | `--host ssh:<name> --engine <agent>` | `not_implemented` (stage 3) |
+| `--worktree <remote worktree> --engine <agent>` | `remote_unsupported` (stage 3) |
+| `--worktree <remote worktree> --host <a different host>` | `invalid_argument` |
 | the app's remote tab whose host was unregistered since | opens nothing, says so |
 
 None of these degrade to a local shell. That is rule 2's corollary in code.
@@ -188,8 +192,12 @@ Two carried facts worth knowing:
 - **A respawn keeps its launch command for remote panes.** For an `ssh:` pane the shell
   engine's prompt *is* the `ssh` invocation; dropping it on respawn (which local panes
   do deliberately) would silently reopen the pane as a local shell.
-- **`--worktree` still resolves locally.** A remote pane has no local workspace, so
-  `cwd` is only where `ssh` is launched from. Remote worktrees are stage 2.
+- **`--worktree` decides the host when the workspace is remote.** A `--host ssh:<name>`
+  pane with no worktree has no workspace at all, so its `cwd` is only where `ssh` is
+  launched from. Since T32 a pane created in a *remote* worktree instead inherits that
+  workspace's stamped host and runs `cd <remote path> && exec "${SHELL:-/bin/sh}" -l` on
+  the far side; passing a `--host` that disagrees with the workspace's is a typed
+  refusal, not a reinterpretation.
 
 ## 5. Per-host partitioning
 
@@ -222,14 +230,54 @@ The rules the later stages must hold to:
 import, bounded probe, `terminal create --host ssh:<name>`, execution-host stamping on
 terminal summaries and tab labels, the verdict vocabulary and its user-facing copy.
 
-**Stage 2 — remote worktrees.** Git facts read over the connection instead of the local
-filesystem; `repoId::path` ids gain a host dimension; the file service learns a remote
-backend; `worktree create` on a host. Prerequisite: a durable connection with a
-generation counter, so a reconnect cannot be mistaken for continuity — every read must
-be able to answer `unverifiable` rather than an empty listing. An empty result from an
-unreachable host is the classic false `exited`.
+**Stage 2 — remote worktrees (T32, wave 8, done).** Git facts read over the connection
+instead of the local filesystem; remote worktrees carry `repoId::<remote path>` ids
+stamped with `executionHostId`; `worktree create|rm` on a host. What landed, and the
+shape later stages inherit:
 
-**Stage 3 — remote agents.** Agent engines assume a local filesystem for argv, config,
+- `repo add --path <remote path> --host ssh:<name>` — the path is probed
+  (`test -d <path>/.git`) over a bounded run *before* the record exists, so a repo record
+  is never a claim nobody checked. A host that does not answer registers nothing:
+  "we could not look" is neither "it is there" nor "it is missing".
+- `SSHRunner` — one bounded command per call, with `GitRunner`'s hardening (concurrent
+  stdout/stderr drain, overall deadline, TERM then KILL of the local `ssh`) plus the two
+  SSH-specific bounds (`BatchMode=yes`, `ConnectTimeout`). Its return type is
+  `RemoteCommandOutcome = answered(exitCode, stdout, stderr) | unverifiable(reason)`, so
+  there is no third shape where a caller gets less output and decides for itself what it
+  meant. Status 255 maps to `unverifiable`; every other status is the remote command's
+  own answer.
+- `RemoteWorktreeService` — list (porcelain over the wire), create (worktree base
+  resolved from the host's own `$HOME`, pinned SHA, `--no-track`, readable `-2`
+  suffixes), and delete with a preflight that counts uncommitted and unpushed work
+  *on the host*. Path guards mirror `WorktreeManager.assertRemovable` and additionally
+  require the target to sit inside the resolved base, because `git worktree remove
+  --force` deletes recursively on a machine nothing local can inspect afterwards.
+- **Refusal, not inference, on `unverifiable`.** A preflight that cannot be counted
+  refuses the delete even with `--force`. A create that cannot resolve the base refuses
+  rather than guessing an `rm -rf` target.
+- **The stored set is the answer when the host is silent.** Remote worktrees persist in
+  `orchard-data.json` (`remoteWorktrees`). A listing that cannot reach the host returns
+  the last-known set plus a warning; only a host that *answered* can retire a record. An
+  empty result from an unreachable host is the classic false `exited`, and here it would
+  silently delete the record of an agent's work.
+- `terminal create --worktree <remote id>` opens `ssh -tt <dest> 'cd <path> && exec
+  "${SHELL:-/bin/sh}" -l'`. The pane inherits the workspace's stamped host rather than
+  defaulting, the local PTY's own cwd is left alone (a remote path handed to a local
+  `chdir` either fails or finds a same-named local directory), and the tab carries the
+  host chip.
+- **Out of scope this wave, refused typed rather than approximated:** the file service
+  answers `remote_unsupported` for a remote workspace (its paths resolve locally, and a
+  same-named local directory answering for a remote one is worse than an error), and so
+  does any agent engine asked to run in remote files.
+
+Still open for a later stage: a durable connection with a generation counter, so a
+reconnect cannot be mistaken for continuity; connection multiplexing (today each command
+is its own `ssh`, and a user who wants `ControlMaster` already has it in their config);
+and a real remote file backend.
+
+**Stage 3 — remote agents.** Refused today with `remote_unsupported` (a remote worktree
+asked for an agent engine) or `not_implemented` (`--host ssh:<name> --engine <agent>`,
+T29's pin). Agent engines assume a local filesystem for argv, config,
 hooks, and transcripts; a remote agent needs its hook endpoint reachable from the far
 side and its provider transcript resolvable across the boundary (T24's pins). Until then
 `--host ssh:<name> --engine <agent>` is refused rather than approximated — an

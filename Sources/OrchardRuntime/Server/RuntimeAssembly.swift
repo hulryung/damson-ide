@@ -152,13 +152,19 @@ public final class OrchardRuntimeHost {
         let portService = PortService(
             workspaces: {
                 await MainActor.run {
-                    ((try? workspaceServiceForPorts.listWorkspaces()) ?? []).map { workspace in
-                        PortWorkspaceProbe(
-                            id: workspace.id, repoId: workspace.repoId,
-                            displayName: workspace.displayName.isEmpty
-                                ? workspace.path : workspace.displayName,
-                            path: workspace.path)
-                    }
+                    // Local workspaces only: port attribution matches a listening
+                    // process's cwd against a workspace path, and a remote path that
+                    // happened to match a local process's cwd would attribute another
+                    // machine's port to this one (T32).
+                    ((try? workspaceServiceForPorts.listWorkspaces()) ?? [])
+                        .filter { !WorkspaceService.isRemote($0) }
+                        .map { workspace in
+                            PortWorkspaceProbe(
+                                id: workspace.id, repoId: workspace.repoId,
+                                displayName: workspace.displayName.isEmpty
+                                    ? workspace.path : workspace.displayName,
+                                path: workspace.path)
+                        }
                 }
             },
             interval: PortService.intervalFromEnvironment())

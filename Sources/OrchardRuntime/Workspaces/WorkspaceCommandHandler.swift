@@ -56,11 +56,35 @@ public final class WorkspaceCommandHandler: CommandHandler, @unchecked Sendable 
 
     private func list(_ params: JSONValue) async throws -> JSONValue {
         let repo = params.string("repo")
+        let warning = await refreshRemoteScope(repo)
         let workspaces = try await service.listWorkspaces(repo: repo)
         let limited = applyLimit(workspaces, params: params)
         return try JSONBridge.value(ListResult(worktrees: limited.items,
                                                totalCount: limited.total,
-                                               truncated: limited.truncated))
+                                               truncated: limited.truncated,
+                                               warning: warning))
+    }
+
+    /// Re-read a remote repo's worktrees when the caller scoped the listing to one.
+    ///
+    /// Host-aware scope, per docs/design/remote-hosts.md §5 rule 4: an unscoped
+    /// `worktree list` does not go probing every registered host. When the host cannot
+    /// be reached the listing still returns — the last-known set, plus a warning saying
+    /// so — because degrading to read-only inspection is right and reporting an empty
+    /// list is the classic false `exited`.
+    private func refreshRemoteScope(_ selector: String?) async -> String? {
+        guard let selector,
+              let repo = try? await service.resolveRepo(selector),
+              WorkspaceService.isRemote(repo)
+        else { return nil }
+        do {
+            _ = try await service.refreshRemoteWorktrees(repo: repo)
+            return nil
+        } catch let error as WorkspaceError {
+            return "\(repo.hostId): \(error.message) Showing the last known worktrees."
+        } catch {
+            return "\(repo.hostId): \(error). Showing the last known worktrees."
+        }
     }
 
     private func show(_ params: JSONValue) async throws -> JSONValue {
@@ -129,11 +153,21 @@ public final class WorkspaceCommandHandler: CommandHandler, @unchecked Sendable 
 
     private func rm(_ params: JSONValue) async throws -> JSONValue {
         let selector = try requiredSelector(params)
-        let result = try await service.remove(
-            selector: selector,
-            cwd: params.string("cwd"),
-            force: params.bool("force") ?? false,
-            runHooks: params.bool("runHooks", "run-hooks") ?? false)
+        let cwd = params.string("cwd")
+        let force = params.bool("force") ?? false
+        let runHooks = params.bool("runHooks", "run-hooks") ?? false
+        let workspace = try await service.show(selector: selector, cwd: cwd)
+        // A remote delete needs its preflight counted on the host first, so it takes
+        // the async remote path. Failing to reach the host refuses the delete rather
+        // than guessing the worktree was clean (T32).
+        let result: WorkspaceRemoveResult
+        if WorkspaceService.isRemote(workspace) {
+            result = try await service.removeRemoteWorktree(workspace, force: force,
+                                                            runHooks: runHooks)
+        } else {
+            result = try await service.remove(
+                selector: selector, cwd: cwd, force: force, runHooks: runHooks)
+        }
         if !result.removed && !result.preflightWarnings.isEmpty {
             throw WorkspaceError(
                 "worktree_dirty",
@@ -163,6 +197,9 @@ private struct ListResult: Encodable {
     var worktrees: [Workspace]
     var totalCount: Int
     var truncated: Bool
+    /// Set when a remote repo's host could not be re-read: the rows are the last known
+    /// set, not a fresh answer.
+    var warning: String?
 }
 
 private struct ShowResult: Encodable {

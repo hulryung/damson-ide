@@ -124,10 +124,27 @@ public struct ProcessHostCommandRunner: HostCommandRunner {
             }
         }
         DispatchQueue.global().asyncAfter(deadline: .now() + max(0, timeout), execute: watchdog)
-        // Drain before waiting: a probe that fills a 64 KB pipe buffer would otherwise
-        // deadlock against its own unread output.
-        let stdout = (try? outPipe.fileHandleForReading.readToEnd()) ?? Data()
-        let stderr = (try? errPipe.fileHandleForReading.readToEnd()) ?? Data()
+
+        // Both pipes are drained *concurrently*, the way `GitRunner.capture` does it.
+        // Reading them in sequence deadlocks the moment either 64 KB buffer fills while
+        // nothing is reading the other — which a probe never does, but a remote
+        // `git worktree list` on a busy repo (stdout) beside a git advice banner
+        // (stderr) certainly can.
+        var outData = Data(), errData = Data()
+        let group = DispatchGroup()
+        let lock = NSLock()
+        for (pipe, isStdout) in [(outPipe, true), (errPipe, false)] {
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                lock.lock()
+                if isStdout { outData = data } else { errData = data }
+                lock.unlock()
+                group.leave()
+            }
+        }
+        group.wait()
+        let stdout = outData, stderr = errData
         process.waitUntilExit()
         watchdog.cancel()
         let timedOut = deadline.didFire
