@@ -49,5 +49,11 @@ func serve(dataDirectory: URL?) -> Never {
             exit(69)
         }
     }
-    dispatchMain()
+    // Agent readiness uses Foundation timers. `dispatchMain()` services the GCD
+    // queue but not the main RunLoop, so a headless shell could never advance from
+    // `.starting` and worker-start always timed out. The run loop also drains the
+    // main dispatch queue, including the signal sources above.
+    while true {
+        RunLoop.main.run()
+    }
 }
