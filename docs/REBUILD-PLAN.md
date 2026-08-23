@@ -400,7 +400,43 @@ the diff refreshing after, and a push action using `GitService.push` with upstre
 state surfaced (ahead/no-upstream states from `unpushedCommits`). Keep it
 worktree-scoped and observation-honest: failures surface inline with git's own stderr.
 
-### Wave 6+ backlog
+### Wave 6 (T23–T26, parallel; merge order T23 → T24 → T25 → T26)
+
+**T23 — PTY restart survival (keeper adoption).** Adopt damson's keeper stack (public
+since the 0483173 pin: `releasePTYForHandoff`, `PTYHost.adopt`,
+`stateRestorationPreamble`, `KeeperProtocol`, the `damson-keeper` binary) so live agent
+and shell PTYs survive an Orchard app restart: manage a per-generation keeper process,
+hand off PTY masters on clean quit, persist per-pane restoration records (paneKey,
+argv, cwd, scrollback preamble) in the session state, adopt on next boot back into the
+terminal registry under the same paneKey with a bumped incarnation, and re-establish
+agent status detection. Deliberate scope limits from damson's own docs: a dead child
+closes its pane rather than respawning, and Claude panes do not auto-resume
+conversations (`/resume` stays human). Crash-quit (no handoff) degrades to today's
+behavior.
+
+**T24 — Transcript pins & real guide (control plane).** worker-release archives are
+terminal-tail-only; add provider transcript pinning: the hook payload's provider
+session id (Claude) resolves to the transcript file, and release pins its content (or
+bounded tail) into worker_terminal_archives as kind transcript_pin, with worker-read
+preferring it. Second: replace the 6-line embedded `orchard guide get orchestration`
+stub with the real version-matched contract (coordinator loop, worker duties,
+delivery/ack semantics, worker-start receipts, capability rules) generated from one
+source shared with the dispatch preamble so they cannot drift.
+
+**T25 — Test stabilization & CI script.** Fix the FileWatcher flake (event
+debounce/race under full-suite load), audit other timing-sensitive tests (scripted
+waits, status-stream tests) for real synchronization instead of sleeps, and add
+`scripts/ci.sh` = clean build + full test + release build, the exact merge-gate this
+project uses.
+
+**T26 — App polish pass.** Jump palette covers files (quickOpen paths) and commands;
+unread markers propagate from agent activity to cards and dashboard consistently;
+workspace card context menu (set status, archive/unarchive, reveal in Finder, delete
+with the preflight sheet); settings panes for the new subsystems (ports sweep interval,
+default browser profile, automations enable/disable). No new services — UI over
+existing APIs.
+
+### Wave 7+ backlog
 
 Project the repo primary checkout (and folder workspaces) into the runtime workspace
 registry as `repoId::path` the way Orca does — today `orchard file search --worktree
