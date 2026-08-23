@@ -309,6 +309,9 @@ struct WorkspaceCard: View {
 
     private var status: WorkspaceStatusAppearance { store.statusAppearance(for: record.id) }
     private var agents: [AgentSession] { project.liveAgents(in: record.id) }
+    /// Finished/errored sessions still sit in the supervisor until dismissed;
+    /// the start/restart row is for when nothing is actually running.
+    private var hasLiveAgent: Bool { agents.contains { !$0.state.isTerminal } }
     private var unseen: Bool { store.isUnread(workspace: record.id) }
     private var archived: Bool { store.meta.isArchived(for: record.id) }
 
@@ -318,6 +321,9 @@ struct WorkspaceCard: View {
             metaRow
             ForEach(agents) { agent in
                 AgentInlineRow(agent: agent)
+            }
+            if !hasLiveAgent, !project.isRemote {
+                StartAgentRow(project: project, record: record)
             }
         }
         .padding(.horizontal, 10)
@@ -404,8 +410,8 @@ struct WorkspaceCard: View {
             }
         }
         Divider()
-        if agents.isEmpty {
-            Menu("Start agent") {
+        if !hasLiveAgent {
+            Menu(record.lastPrompt == nil ? "Start agent" : "Restart agent") {
                 ForEach(EngineOption.all) { engine in
                     Button(engine.displayName) {
                         _ = try? store.startAgent(in: record, project: project, engineID: engine.id)
@@ -450,6 +456,77 @@ struct WorkspaceCard: View {
         .help(project.isRemote
               ? "Remote worktrees are removed through the orchard CLI; this path cannot reach \(RemoteWorkspacePolicy.hostLabel(project.hostId))."
               : "")
+    }
+}
+
+/// Visible start/restart affordance when nothing is running in this worktree.
+/// Spawns agent-first into the *existing* checkout via `AgentSupervisor`;
+/// prompt is optional (last prompt is reused on restart, or the engine waits).
+struct StartAgentRow: View {
+    @EnvironmentObject var store: AppStore
+    @ObservedObject var project: ProjectSession
+    @ObservedObject var record: WorktreeRecord
+    @State private var errorMessage: String?
+
+    private var isRestart: Bool {
+        record.lastPrompt != nil
+            || project.liveAgents(in: record.id).contains { $0.state.isTerminal }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 5) {
+                Button { start(engineID: store.settings.resolvedDefaultEngineID) } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: isRestart ? "arrow.clockwise" : "play.fill")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundStyle(Color.accentColor)
+                            .frame(width: 12)
+                        Text(isRestart ? "Restart agent" : "Start agent")
+                            .font(Tokens.fontMeta)
+                            .foregroundStyle(Tokens.textSecondary)
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(project.isRemote)
+                Spacer(minLength: 4)
+                Menu {
+                    ForEach(EngineOption.all) { engine in
+                        Button(engine.displayName) { start(engineID: engine.id) }
+                    }
+                } label: {
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 7, weight: .bold))
+                        .foregroundStyle(Tokens.textTertiary)
+                        .padding(.horizontal, 2)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .disabled(project.isRemote)
+            }
+            .help(project.isRemote
+                  ? (RemoteWorkspacePolicy.unsupportedExplanation(.agents, hostId: project.hostId) ?? "")
+                  : (isRestart
+                     ? "Spawn a new agent in this worktree. The last prompt is sent again if one was saved."
+                     : "Spawn an agent in this worktree. Prompt is optional — empty waits at the input box."))
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(Tokens.fontMeta)
+                    .foregroundStyle(.red)
+                    .padding(.leading, 17)
+            }
+        }
+        .padding(.leading, 20)
+        .padding(.vertical, 1)
+    }
+
+    private func start(engineID: String) {
+        errorMessage = nil
+        do {
+            try store.startAgent(in: record, project: project, engineID: engineID)
+        } catch {
+            errorMessage = String(describing: error)
+        }
     }
 }
 

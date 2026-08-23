@@ -39,6 +39,21 @@ final class EngineRegistryTests: XCTestCase {
         XCTAssertNil(AgentEngineRegistry.engine(id: "clod"))
     }
 
+    /// Composer picker: one row per live engine, alias shown once in the label.
+    func testComposerListingUsesLiveRegistryAndShowsAliasOnce() {
+        let items = ComposerPlanning.engineListing(
+            engines: AgentEngineRegistry.all.map { (id: $0.id, aliases: $0.aliases) })
+        XCTAssertEqual(items.map(\.id), AgentEngineRegistry.all.map(\.id))
+        XCTAssertEqual(Set(items.map(\.id)).count, items.count)
+        XCTAssertEqual(items.first { $0.id == "claude-code" }?.label, "claude (claude-code)")
+        XCTAssertEqual(items.first { $0.id == "cursor-agent" }?.label, "cursor (cursor-agent)")
+        XCTAssertEqual(items.first { $0.id == "codex" }?.label, "codex")
+        XCTAssertEqual(items.first { $0.id == "shell" }?.label, "shell")
+        for item in items {
+            XCTAssertNotNil(AgentEngineRegistry.engine(id: item.id), item.id)
+        }
+    }
+
     /// The list `agent-context` publishes: canonical ids first, then aliases, with no
     /// duplicates and every entry actually resolvable.
     func testAcceptedIdentifiersAreTheResolvableSpellings() {
