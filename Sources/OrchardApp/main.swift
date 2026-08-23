@@ -3,10 +3,16 @@ import SwiftUI
 import DamsonTerminal
 import OrchardCore
 import OrchardRuntime
+import OrchardTerminals
 
 // Orchard v2 app shell (T5). The target/product is `OrchardApp` because a bare
 // `Orchard` product collides with the `orchard` CLI on a case-insensitive
 // filesystem; OrchardTrampoline still materializes the user-visible Orchard.app.
+
+// T23: when this binary was exec'd as a per-generation keeper copy
+// (`__orchard-keeper <generation>`), it becomes the PTY-holding daemon and never
+// reaches any AppKit/trampoline setup. Must run before everything else.
+KeeperDaemon.runIfInvoked()
 
 OrchardTrampoline.relaunchInAppBundleIfNeeded()
 
@@ -29,7 +35,12 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
 
             let store = AppStore(settings: OrchardSettings())
             self.store = store
+            // T23: consume any keeper restoration state before projects open (hook
+            // ports rebind at supervisor start), then adopt the surviving PTYs once
+            // the projects and the terminal registry are up.
+            KeeperRestart.prepareBoot(store: store)
             store.restore()
+            KeeperRestart.completeBoot(store: store)
             store.focusMainWindow = { [weak self] in
                 self?.window?.makeKeyAndOrderFront(nil)
                 NSApp.activate(ignoringOtherApps: true)
@@ -65,7 +76,12 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 
     func applicationWillTerminate(_ notification: Notification) {
-        MainActor.assumeIsolated { store?.shutdownAll() }
+        MainActor.assumeIsolated {
+            // T23: hand live PTYs to the keeper BEFORE shutdown terminates anything.
+            // Released sessions' terminate() no-ops, so shutdownAll stays unchanged.
+            if let store { KeeperRestart.handOffAtQuit(store: store) }
+            store?.shutdownAll()
+        }
     }
 
     @MainActor @objc func newWorkspace(_ sender: Any?) { store.addProjectViaPanel() }

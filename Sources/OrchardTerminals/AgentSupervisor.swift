@@ -52,10 +52,20 @@ public final class AgentSupervisor {
         self.eventSink = sink
     }
 
+    /// T23: the loopback hook-server port (0 when the server failed to bind), recorded
+    /// in keeper restoration state so the next app generation can rebind it.
+    public var hookPort: UInt16 { hookServer.port }
+
+    /// T23: ask `start()` to bind this port if it's free. Keeper restoration sets it
+    /// to the previous generation's port so surviving CLIs' already-installed hook
+    /// configs (old port + token) keep landing here; a busy port silently falls back
+    /// to a kernel-assigned one and those agents lean on fingerprints.
+    public var preferredHookPort: UInt16?
+
     /// Bring up the hook server (best-effort — agents just fall back to fingerprints if
     /// it can't bind) and route each event to its agent by token, on the main actor.
     public func start() {
-        _ = hookServer.start()
+        _ = hookServer.start(preferredPort: preferredHookPort)
         hookServer.onEvent = { [weak self] event in
             Task { @MainActor in
                 guard let self,
@@ -160,6 +170,47 @@ public final class AgentSupervisor {
             env["ORCHARD_DATA_PATH"] = dataPath
         }
         return env
+    }
+
+    // MARK: - Restart survival (T23 keeper adoption)
+
+    /// Register an agent session around a terminal that survived an app restart —
+    /// the PTY already exists (reclaimed from the keeper), so nothing is spawned.
+    ///
+    /// Status detection re-attaches here: the restored `hookToken` routes the
+    /// surviving CLI's lifecycle POSTs back to this session, the worktree's hook
+    /// config is refreshed for the current server port (identical file when the
+    /// port rebind succeeded), and fingerprints resume from the live grid the moment
+    /// the adopted session paints. The initial task prompt is marked delivered — it
+    /// belonged to the pane's first incarnation, and a restored Claude pane
+    /// deliberately does NOT resume its conversation (`/resume` stays human).
+    @discardableResult
+    public func adoptRestoredAgent(engineID: String, terminal: TerminalSession,
+                                   worktree: Worktree?, title: String?,
+                                   hookToken: String?) throws -> AgentSession {
+        guard let engine = AgentEngineRegistry.engine(id: engineID) else {
+            throw GitError("unknown engine: \(engineID)")
+        }
+        let task = AgentTask(title: title ?? worktree?.title ?? engine.displayName,
+                             prompt: "",
+                             engineID: engineID,
+                             baseRepoPath: worktree?.baseRepo.path ?? "")
+        let agent = AgentSession(engine: engine, terminal: terminal, worktree: worktree,
+                                 task: task, hookToken: hookToken)
+        agent.notePromptDelivered()
+        agent.onStateChange = { [weak self, weak agent] state in
+            guard let self, let agent else { return }
+            self.agentStateChanged(agent, state: state)
+        }
+        if let worktree, let events = engine.hookEvents, hookServer.port != 0 {
+            manager.ensureExcluded(".claude/settings.local.json", in: worktree.path)
+            HookInstaller.install(worktree: worktree.path, port: hookServer.port,
+                                  token: agent.hookToken, events: events)
+        }
+        agents.append(agent)
+        eventSink.yield(.agentSpawned(agentID: agent.id, worktreeID: worktree?.id,
+                                      engineID: engineID))
+        return agent
     }
 
     // MARK: - Agent state reactions
