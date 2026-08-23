@@ -438,6 +438,10 @@ existing APIs.
 
 ### Wave 7+ backlog
 
+The `orchard` CLI has no `terminal` command group — the terminal-list/create/read/send/
+wait RPC verbs exist and work over the socket, but no CLI spec exposes them (found
+during the T23 restart-survival smoke, 2026-08-24; driven via raw RPC instead). Also:
+
 Project the repo primary checkout (and folder workspaces) into the runtime workspace
 registry as `repoId::path` the way Orca does — today `orchard file search --worktree
 path:<repo>` fails with unknown_worktree until a worktree is created through the
