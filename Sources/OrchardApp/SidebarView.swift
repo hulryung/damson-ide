@@ -369,11 +369,10 @@ struct WorkspaceCard: View {
         Divider()
         if agents.isEmpty {
             Menu("Start agent") {
-                ForEach(ComposerEngine.allCases) { engine in
+                ForEach(EngineOption.all) { engine in
                     Button(engine.displayName) {
-                        _ = try? store.startAgent(in: record, project: project, engine: engine)
+                        _ = try? store.startAgent(in: record, project: project, engineID: engine.id)
                     }
-                    .disabled(!engine.isRegistered)
                 }
             }
         } else {

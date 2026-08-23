@@ -14,6 +14,9 @@ final class ProjectSession: ObservableObject, Identifiable {
     let name: String
     let worktrees: WorktreeService
     let agents: AgentSupervisor
+    /// T4 repo-registry id for this repo, set when the runtime host registers it.
+    /// Worktree identities (`<repoId>::<path>`) hang off it.
+    var repoID: String?
 
     /// Snapshot of `worktrees.worktrees` so SwiftUI sees list mutations. Individual
     /// records still publish their own git/agent fields.

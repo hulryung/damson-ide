@@ -27,9 +27,11 @@ struct GeneralSettingsTab: View {
     var body: some View {
         Form {
             Section {
-                Picker("Default agent", selection: $settings.defaultEngineID) {
-                    ForEach(ComposerEngine.allCases) { engine in
-                        Text(engine.displayName).tag(engine.rawValue)
+                Picker("Default agent", selection: Binding(
+                    get: { settings.resolvedDefaultEngineID },
+                    set: { settings.defaultEngineID = $0 })) {
+                    ForEach(EngineOption.all) { engine in
+                        Text(engine.displayName).tag(engine.id)
                     }
                 }
                 .help("Pre-selected in the new-worktree composer")

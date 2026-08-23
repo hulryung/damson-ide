@@ -18,6 +18,14 @@ final class OrchardSettings: ObservableObject {
         didSet { defaults.set(defaultEngineID, forKey: Keys.defaultEngine) }
     }
 
+    /// `defaultEngineID` normalized to a registry id: values written by wave-2 builds
+    /// pass through; pre-wave-2 picker names ("claude", "codex", …) map via the legacy
+    /// `ComposerEngine` table.
+    var resolvedDefaultEngineID: String {
+        if AgentEngineRegistry.engine(id: defaultEngineID) != nil { return defaultEngineID }
+        return ComposerEngine.from(storedDefault: defaultEngineID).resolvedEngineID
+    }
+
     /// Display-only remnant of v1's concurrency cap. Not wired into any dispatcher.
     @Published var maxConcurrency: Int {
         didSet { defaults.set(maxConcurrency, forKey: Keys.maxConcurrency) }
@@ -150,8 +158,21 @@ final class OrchardSettings: ObservableObject {
     }
 }
 
-/// Composer engine picker. IDs match the T5 brief; `resolvedEngineID` maps onto
-/// whatever `AgentEngineRegistry` currently knows (T3 fills the rest).
+/// One engine choice offered by the composer and menus — sourced from T3's engine
+/// registry so the pickers can never drift from what the terminal layer can launch
+/// (wave-2 seam close; the hardcoded picker enum below survives only to map legacy
+/// stored defaults onto registry ids).
+struct EngineOption: Identifiable, Hashable {
+    let id: String
+    let displayName: String
+
+    static var all: [EngineOption] {
+        AgentEngineRegistry.all.map { EngineOption(id: $0.id, displayName: $0.displayName) }
+    }
+}
+
+/// Legacy composer vocabulary. Only `from(storedDefault:)`/`resolvedEngineID` remain
+/// in use, translating pre-wave-2 stored defaults ("claude", "codex", …) to registry ids.
 enum ComposerEngine: String, CaseIterable, Identifiable {
     case claude, codex, grok, cursor, shell
 

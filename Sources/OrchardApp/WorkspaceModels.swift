@@ -1,5 +1,6 @@
 import Foundation
 import OrchardCore
+import OrchardRuntime
 
 /// Sidebar card ordering (inventory §6).
 enum CardOrdering: String, CaseIterable, Identifiable {
@@ -149,52 +150,60 @@ indirect enum SplitNode: Identifiable, Hashable {
     }
 }
 
-/// User-authored card meta. T4 will own this in `orchard-data.json`; until that
-/// lands the app keeps a sidecar so status / sort / recency survive relaunch.
-struct WorkspaceCardMeta: Codable, Equatable {
-    var statusID: String
-    var sortOrder: Int
-    var lastActivityAt: Date
-}
-
+/// User-authored card meta, persisted in T4's `orchard-data.json`
+/// (`OrchardDataStore.worktreeMeta`) — the wave-2 seam close that retires the
+/// pre-integration `orchard-ui-meta.json` sidecar. Records are keyed by worktree
+/// id (`<repoId>::<path>`) once the owning repo is registered; until then a
+/// synthetic `app::<uuid>` key holds the meta and `register` migrates it.
 @MainActor
 final class WorkspaceMetaStore: ObservableObject {
-    @Published private var items: [UUID: WorkspaceCardMeta] = [:]
-    private let url: URL
-    private var nextSort = 0
+    private let store: OrchardDataStore
+    /// Record UUID (git-config instance id) → worktree id key in the data store.
+    private var keys: [UUID: String] = [:]
 
-    init() {
-        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support")
-        let dir = root.appendingPathComponent("Orchard", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        url = dir.appendingPathComponent("orchard-ui-meta.json")
-        load()
+    init(store: OrchardDataStore) {
+        self.store = store
+    }
+
+    private func key(for id: UUID) -> String {
+        keys[id] ?? "app::\(id.uuidString.lowercased())"
+    }
+
+    private func meta(for id: UUID) -> WorktreeMeta? {
+        store.load().worktreeMeta[key(for: id)]
+    }
+
+    /// Bind a record to its real worktree id, migrating any meta stored under the
+    /// synthetic key while the repo id was still unknown.
+    func register(_ id: UUID, key newKey: String) {
+        let oldKey = key(for: id)
+        keys[id] = newKey
+        guard oldKey != newKey else { return }
+        try? store.modify { data in
+            if let moved = data.worktreeMeta.removeValue(forKey: oldKey),
+               data.worktreeMeta[newKey] == nil {
+                data.worktreeMeta[newKey] = moved
+            }
+        }
+        objectWillChange.send()
     }
 
     func status(for id: UUID) -> WorkspaceStatus {
-        if let raw = items[id]?.statusID, let status = WorkspaceStatus(rawValue: raw) {
-            return status
-        }
-        return .todo
+        guard let raw = meta(for: id)?.workspaceStatus,
+              let status = WorkspaceStatus(rawValue: raw) else { return .todo }
+        return status
     }
 
     func setStatus(_ status: WorkspaceStatus, for id: UUID) {
-        var meta = ensure(id)
-        meta.statusID = status.rawValue
-        items[id] = meta
-        persist()
+        mutate(id) { $0.workspaceStatus = status.rawValue }
     }
 
-    func sortOrder(for id: UUID) -> Int { items[id]?.sortOrder ?? 0 }
+    func sortOrder(for id: UUID) -> Int { meta(for: id)?.sortOrder ?? 0 }
 
-    func lastActivity(for id: UUID) -> Date { items[id]?.lastActivityAt ?? .distantPast }
+    func lastActivity(for id: UUID) -> Date { meta(for: id)?.lastActivityAt ?? .distantPast }
 
     func touch(_ id: UUID) {
-        var meta = ensure(id)
-        meta.lastActivityAt = Date()
-        items[id] = meta
-        persist()
+        mutate(id) { $0.lastActivityAt = Date() }
     }
 
     func move(_ id: UUID, delta: Int, among ids: [UUID]) {
@@ -204,55 +213,42 @@ final class WorkspaceMetaStore: ObservableObject {
         var ordered = ids
         ordered.swapAt(index, target)
         for (sort, item) in ordered.enumerated() {
-            var meta = ensure(item)
-            meta.sortOrder = sort
-            items[item] = meta
+            mutate(item, touchActivity: false) { $0.sortOrder = sort }
         }
-        persist()
         objectWillChange.send()
     }
 
-    func ensure(_ id: UUID, status: WorkspaceStatus = .todo) -> WorkspaceCardMeta {
-        if let existing = items[id] { return existing }
-        let meta = WorkspaceCardMeta(statusID: status.rawValue, sortOrder: nextSort, lastActivityAt: Date())
-        nextSort += 1
-        items[id] = meta
-        persist()
-        return meta
+    @discardableResult
+    func ensure(_ id: UUID, status: WorkspaceStatus = .todo) -> WorktreeMeta {
+        if let existing = meta(for: id) { return existing }
+        let data = store.load()
+        let nextSort = (data.worktreeMeta.values.map(\.sortOrder).max() ?? -1) + 1
+        var created = WorktreeMeta(instanceId: id.uuidString, displayName: "")
+        created.workspaceStatus = status.rawValue
+        created.sortOrder = nextSort
+        let storageKey = key(for: id)
+        try? store.modify { $0.worktreeMeta[storageKey] = created }
+        objectWillChange.send()
+        return created
     }
 
     func remove(_ id: UUID) {
-        items[id] = nil
-        persist()
+        let storageKey = key(for: id)
+        try? store.modify { $0.worktreeMeta.removeValue(forKey: storageKey) }
+        keys[id] = nil
+        objectWillChange.send()
     }
 
-    private struct FilePayload: Codable {
-        var items: [String: WorkspaceCardMeta]
-    }
-
-    private func load() {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard let data = try? Data(contentsOf: url),
-              let payload = try? decoder.decode(FilePayload.self, from: data)
-        else { return }
-        var decoded: [UUID: WorkspaceCardMeta] = [:]
-        var maxSort = 0
-        for (key, value) in payload.items {
-            guard let id = UUID(uuidString: key) else { continue }
-            decoded[id] = value
-            maxSort = max(maxSort, value.sortOrder)
+    private func mutate(_ id: UUID, touchActivity: Bool = true,
+                        _ body: (inout WorktreeMeta) -> Void) {
+        let storageKey = key(for: id)
+        try? store.modify { data in
+            var meta = data.worktreeMeta[storageKey]
+                ?? WorktreeMeta(instanceId: id.uuidString, displayName: "")
+            body(&meta)
+            if touchActivity { meta.lastActivityAt = Date() }
+            data.worktreeMeta[storageKey] = meta
         }
-        items = decoded
-        nextSort = maxSort + 1
-    }
-
-    private func persist() {
-        let payload = FilePayload(items: Dictionary(uniqueKeysWithValues: items.map { ($0.key.uuidString, $0.value) }))
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        guard let data = try? encoder.encode(payload) else { return }
-        try? data.write(to: url, options: .atomic)
+        objectWillChange.send()
     }
 }

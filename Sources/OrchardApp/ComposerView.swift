@@ -9,7 +9,7 @@ struct ComposerView: View {
 
     @State private var name = ""
     @State private var prompt = ""
-    @State private var engine: ComposerEngine = .claude
+    @State private var engineID: String = ""
     @State private var baseRef = ""
     @State private var count = 1
     @State private var errorMessage: String?
@@ -65,10 +65,11 @@ struct ComposerView: View {
                             .foregroundStyle(Tokens.textTertiary)
                     }
                     field("Engine") {
-                        Picker("", selection: $engine) {
-                            ForEach(ComposerEngine.allCases) { item in
-                                Text(item.isRegistered ? item.displayName : "\(item.displayName) (unavailable)")
-                                    .tag(item)
+                        // Options come from T3's engine registry, so every listed
+                        // engine is launchable by construction.
+                        Picker("", selection: $engineID) {
+                            ForEach(EngineOption.all) { item in
+                                Text(item.displayName).tag(item.id)
                             }
                         }
                         .labelsHidden()
@@ -117,7 +118,7 @@ struct ComposerView: View {
         .onAppear {
             name = project.worktrees.suggestedName()
             baseRef = project.worktrees.baseRef
-            engine = ComposerEngine.from(storedDefault: store.settings.defaultEngineID)
+            engineID = store.settings.resolvedDefaultEngineID
             nameFocused = true
         }
     }
@@ -143,7 +144,7 @@ struct ComposerView: View {
                 project: project,
                 name: trimmedName,
                 prompt: trimmedPrompt,
-                engine: engine,
+                engineID: engineID,
                 baseRef: baseRef.isEmpty ? nil : baseRef,
                 count: count)
             dismiss()
