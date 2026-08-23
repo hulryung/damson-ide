@@ -11,7 +11,7 @@ enum CLIError: Error, CustomStringConvertible {
 }
 
 func parse(_ arguments: [String]) throws -> ParsedCommand {
-    guard let name = arguments.first, let spec = OrchardCommands.all.first(where: { $0.name == name || $0.aliases.contains(name) }) else { throw CLIError.usage("unknown or missing command") }
+    guard let name = arguments.first, let spec = OrchardCommands.all.first(where: { $0.name == name || $0.aliases.contains(name) }) else { throw CLIError.usage("unknown or missing command; run 'orchard --help' for available commands") }
     var params: [String: JSONValue] = [:], positionals: [JSONValue] = []; var index = 1
     while index < arguments.count {
         let argument = arguments[index]
@@ -102,6 +102,8 @@ func formatHuman(method: String, result: JSONValue?) -> String {
         return formatHostAdd(result)
     case "host-check":
         return formatHostCheck(result)
+    case "worktree-list":
+        return OrchardHumanFormatter.worktreeList(result)
     case "worktree-ps":
         return formatWorktreePs(result)
     case "workspace-ports":
@@ -248,7 +250,13 @@ func formatWorkspacePorts(_ result: JSONValue?) -> String {
 
 do {
     let args = Array(CommandLine.arguments.dropFirst())
-    if args.isEmpty || args.first == "help" || args.first == "--help" { printUsage(); exit(0) }
+    if args.isEmpty || args.first == "help" || args.first == "--help" || args.first == "-h" { printUsage(); exit(0) }
+    if let command = args.first,
+       let spec = OrchardCommands.all.first(where: { $0.name == command || $0.aliases.contains(command) }),
+       args.dropFirst().contains(where: { $0 == "--help" || $0 == "-h" }) {
+        print(CommandHelpRenderer.render(spec))
+        exit(0)
+    }
     let parsed = try parse(args)
     switch parsed.spec.name {
     case "serve":
@@ -258,10 +266,12 @@ do {
         let data = try JSONEncoder.pretty.encode(AgentContextDocument(commands: OrchardCommands.all)); FileHandle.standardOutput.write(data + Data("\n".utf8))
     case "version": print(parsed.json ? "{\"version\":\"\(toolVersion)\"}" : "orchard \(toolVersion)")
     case "guide":
-        guard case let .array(values)? = parsed.params["_args"], let verb = values.first?.stringValue else { throw CLIError.usage("usage: orchard guide list | orchard guide get orchestration [--json]") }
-        if verb == "list", values.count == 1 {
+        let values: [JSONValue]
+        if case let .array(parsedValues)? = parsed.params["_args"] { values = parsedValues } else { values = [] }
+        let verb = values.first?.stringValue ?? "list"
+        if verb == "list", values.isEmpty || values.count == 1 {
             if parsed.json { let data = try JSONEncoder.pretty.encode(["topics": OrchestrationContract.topics]); FileHandle.standardOutput.write(data + Data("\n".utf8)) }
-            else { OrchestrationContract.topics.forEach { print($0) } }
+            else { print(GuideTopicFormatter.render(OrchestrationContract.topics)) }
         } else if verb == "get", values.count == 2, values[1].stringValue == "orchestration" {
             if parsed.json { let data = try JSONEncoder.pretty.encode(["topic": "orchestration", "content": OrchestrationContract.coordinatorGuide]); FileHandle.standardOutput.write(data + Data("\n".utf8)) } else { print(OrchestrationContract.coordinatorGuide) }
         } else { throw CLIError.usage("usage: orchard guide list | orchard guide get orchestration [--json]") }

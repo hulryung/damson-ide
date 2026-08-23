@@ -84,7 +84,11 @@ public enum OrchardCommands {
                 flag("data-dir", "Runtime data directory", "path")
             ]),
             command("agent-context", "Serialize the complete command table"),
-            command("guide", "Read an embedded version-matched guide", positionals: ["get", "topic"]),
+            CommandSpec(name: "guide", summary: "Read an embedded version-matched guide",
+                        usage: "orchard guide [list | get <topic>] [--json]",
+                        flags: [json], positionalArgs: ["list | get <topic>"],
+                        examples: ["orchard guide", "orchard guide get orchestration"],
+                        notes: ["With no arguments, lists the available topics."]),
             command("version", "Print the CLI version"),
             command("run-create", "Create an orchestration run", [flag("objective", "Run objective", "text", required: true), from, retry]),
             command("run-use", "Bind this terminal as run coordinator", [flag("id", "Run identifier", "id", required: true), flag("takeover-legacy", "Take over a legacy binding"), from, retry]),
