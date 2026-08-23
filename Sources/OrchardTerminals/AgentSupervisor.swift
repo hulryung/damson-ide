@@ -34,6 +34,16 @@ public final class AgentSupervisor {
     /// the agent's own `git status`.
     private let manager: WorktreeManager
 
+    /// ORCHARD_* discovery facts injected into every spawned PTY, so an agent inside
+    /// it can find the runtime CLI and data dir (docs/REBUILD-PLAN.md control plane).
+    public var hostContext = TerminalHostContext()
+
+    /// Invoked after each spawn with the identity that was injected into the child's
+    /// environment. The runtime host uses this to adopt the PTY into T3's terminal
+    /// registry, making `ORCHARD_TERMINAL_HANDLE` a real (resolvable, remintable)
+    /// handle instead of a provisional one.
+    public var onSpawnRegistration: ((AgentSession, TerminalCreateSpec) -> Void)?
+
     public init(configTemplate: DamsonConfig = DamsonConfig(), worktreeManager: WorktreeManager) {
         self.configTemplate = configTemplate
         self.manager = worktreeManager
@@ -62,9 +72,12 @@ public final class AgentSupervisor {
     /// Start an engine process inside `worktree` (or a bare directory when nil) and
     /// register the session. A non-empty `prompt` is delivered exactly once, on the
     /// engine's first idle (for `.typeWhenIdle` engines) or via argv (`.launchArgument`).
+    /// `workspaceID` is the RPC-facing worktree identity (`<repoId>::<path>`) when the
+    /// caller knows it — it becomes the PTY's `ORCHARD_WORKTREE_ID`.
     @discardableResult
     public func spawnAgent(engineID: String, prompt: String = "",
-                           in worktree: Worktree?, title: String? = nil) throws -> AgentSession {
+                           in worktree: Worktree?, title: String? = nil,
+                           workspaceID: String? = nil) throws -> AgentSession {
         guard let engine = AgentEngineRegistry.engine(id: engineID) else {
             throw GitError("unknown engine: \(engineID)")
         }
@@ -83,7 +96,14 @@ public final class AgentSupervisor {
         // another agent's session, that session's markers, which silently change how the
         // child behaves (Claude Code disables transcript saving when it thinks it's a
         // subprocess).
-        config.env = engine.env(base: config.env)
+        // Identity before spawn: env can only be injected at fork time, and the pane
+        // key must outlive handle remints, so both are minted here and the terminal
+        // registry adopts them (rather than minting its own) via onSpawnRegistration.
+        let handle = TerminalRegistry.mintHandle()
+        let paneKey = TerminalRegistry.mintPaneKey()
+        config.env = Self.spawnEnvironment(
+            base: engine.env(base: config.env), handle: handle, paneKey: paneKey,
+            workspaceID: workspaceID, hostContext: hostContext)
 
         let terminal = DamsonTerminalSession(config: config)
         let agent = AgentSession(engine: engine, terminal: terminal, worktree: worktree, task: task)
@@ -101,10 +121,36 @@ public final class AgentSupervisor {
                                   token: agent.hookToken, events: events)
         }
 
+        agent.terminalHandle = handle
+        agent.paneKey = paneKey
         agents.append(agent)
+        onSpawnRegistration?(agent, TerminalCreateSpec(
+            handle: handle, paneKey: paneKey, worktreeId: workspaceID,
+            cwd: config.cwd, engineID: engineID, prompt: "", title: task.title))
         eventSink.yield(.agentSpawned(agentID: agent.id, worktreeID: worktree?.id,
                                       engineID: engineID))
         return agent
+    }
+
+    /// The ORCHARD_* identity/discovery overlay for one spawned PTY — the same
+    /// vocabulary `DamsonTerminalFactory` injects for service-created terminals, so
+    /// the two spawn paths cannot drift.
+    static func spawnEnvironment(base: [String: String], handle: String, paneKey: String,
+                                 workspaceID: String?,
+                                 hostContext: TerminalHostContext) -> [String: String] {
+        var env = base
+        env["ORCHARD_TERMINAL_HANDLE"] = handle
+        env["ORCHARD_PANE_KEY"] = paneKey
+        if let workspaceID {
+            env["ORCHARD_WORKTREE_ID"] = workspaceID
+        }
+        if let cli = hostContext.cliCommand {
+            env["ORCHARD_CLI_COMMAND"] = cli
+        }
+        if let dataPath = hostContext.dataPath {
+            env["ORCHARD_DATA_PATH"] = dataPath
+        }
+        return env
     }
 
     // MARK: - Agent state reactions

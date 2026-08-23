@@ -27,6 +27,12 @@ public final class AgentSession: ObservableObject, Identifiable {
     /// `HookServer` can route the agent CLI's lifecycle events back to this session.
     public let hookToken = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
 
+    /// Terminal identity minted at spawn and injected into the PTY env
+    /// (`ORCHARD_TERMINAL_HANDLE` / `ORCHARD_PANE_KEY`). Set by `AgentSupervisor`;
+    /// nil for sessions constructed outside a managed host (tests, previews).
+    public internal(set) var terminalHandle: String?
+    public internal(set) var paneKey: String?
+
     private let detector: ReadinessDetector
     private var cancellables = Set<AnyCancellable>()
     private var tick: Timer?
