@@ -7,6 +7,10 @@ import OrchardTerminals
 
 /// One opened repo: the in-process worktree + agent services, plus a merged
 /// `OrchardEvent` feed. Views observe this object; they do not hold engine state.
+///
+/// Project identity comes from the runtime repo registry (`RepoRecord` path +
+/// id). `id` stays a per-process SwiftUI identity; worktree restore and agent
+/// lifecycle are unchanged.
 @MainActor
 final class ProjectSession: ObservableObject, Identifiable {
     let id = UUID()
@@ -14,8 +18,7 @@ final class ProjectSession: ObservableObject, Identifiable {
     let name: String
     let worktrees: WorktreeService
     let agents: AgentSupervisor
-    /// T4 repo-registry id for this repo, set when the runtime host registers it.
-    /// Worktree identities (`<repoId>::<path>`) hang off it.
+    /// Registry id for this repo. Worktree identities (`<repoId>::<path>`) hang off it.
     var repoID: String?
 
     /// Snapshot of `worktrees.worktrees` so SwiftUI sees list mutations. Individual
@@ -27,9 +30,15 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// unread dots, and notifications without views subscribing themselves.
     var onEvent: ((ProjectSession, OrchardEvent) -> Void)?
 
-    init(repo: URL, settings: OrchardSettings) throws {
+    init(repo: URL, settings: OrchardSettings, repoID: String? = nil,
+         displayName: String? = nil) throws {
         self.repo = repo
-        self.name = repo.lastPathComponent
+        self.repoID = repoID
+        if let displayName, !displayName.isEmpty {
+            self.name = displayName
+        } else {
+            self.name = repo.lastPathComponent
+        }
         let service = WorktreeService(baseRepo: repo, worktreesRoot: settings.worktreeRoot(for: repo))
         self.worktrees = service
         self.agents = AgentSupervisor(

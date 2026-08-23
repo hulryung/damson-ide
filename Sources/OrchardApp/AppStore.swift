@@ -16,12 +16,18 @@ import OrchardTerminals
 /// `WorktreeService` / `AgentSupervisor` directly and observes their
 /// `AsyncStream<OrchardEvent>`. Views must not spawn PTYs or keep engine
 /// sessions of their own — shells live here, keyed by tab id.
+///
+/// Sidebar project membership is the runtime repo registry (`orchard-data.json`),
+/// not UserDefaults. Open Project and `orchard repo add` both write that
+/// registry; the store observes `WorkspaceService.repoChanges()`.
 @MainActor
 final class AppStore: ObservableObject {
     let settings: OrchardSettings
     let meta: WorkspaceMetaStore
     /// The in-process runtime (nil only if its data directory is unusable).
     let runtime: OrchardRuntimeHost?
+    /// Same instance the CLI `repo-add` handler mutates when the host is live.
+    let workspaceService: WorkspaceService
 
     @Published var projects: [ProjectSession] = []
     @Published var selectedProjectID: UUID?
@@ -49,7 +55,9 @@ final class AppStore: ObservableObject {
     private var shells: [UUID: DamsonSession] = [:]
     private var cancellables = Set<AnyCancellable>()
     private let defaults = UserDefaults.standard
-    private let workspacesKey = "orchard.workspaces"
+    /// Pre-T8 sidebar list. Imported once into the registry, then deleted.
+    private let legacyWorkspacesKey = "orchard.workspaces"
+    private var repoObserveTask: Task<Void, Never>?
     private var notificationsAuthorized = false
 
     struct PendingDeletion: Identifiable {
@@ -70,6 +78,7 @@ final class AppStore: ObservableObject {
         self.runtime = runtime
         let dataStore = runtime?.dataStore
             ?? OrchardDataStore(url: dataDirectory.appendingPathComponent("orchard-data.json"))
+        self.workspaceService = runtime?.workspaceService ?? WorkspaceService(store: dataStore)
         self.meta = meta ?? WorkspaceMetaStore(store: dataStore)
         if let runtime {
             do {
@@ -168,14 +177,9 @@ final class AppStore: ObservableObject {
     // MARK: - Projects
 
     func restore() {
-        guard let paths = defaults.stringArray(forKey: workspacesKey) else { return }
-        for path in paths {
-            let url = URL(fileURLWithPath: path)
-            var isDir: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue
-            else { continue }
-            addProject(repo: url, silent: true)
-        }
+        migrateLegacyWorkspacesIfNeeded()
+        applyRegistry(workspaceService.listRepos(), selectNewProjects: true)
+        observeRepoRegistry()
     }
 
     func addProjectViaPanel() {
@@ -191,51 +195,33 @@ final class AppStore: ObservableObject {
     }
 
     func addProject(repo: URL, silent: Bool = false) {
-        if let existing = projects.first(where: {
-            $0.repo.standardizedFileURL == repo.standardizedFileURL
-        }) {
+        if let existing = project(at: repo) {
             selectedProjectID = existing.id
             selection = defaultSelection(for: existing)
             return
         }
         do {
-            let project = try ProjectSession(repo: repo, settings: settings)
-            project.onEvent = { [weak self] project, event in
-                self?.handle(event, from: project)
+            let record = try workspaceService.addRepo(path: repo)
+            if let existing = project(at: repo) {
+                existing.repoID = record.id
+                selectedProjectID = existing.id
+                selection = defaultSelection(for: existing)
+                return
             }
-            if let runtime {
-                // Runtime wiring: supervisor PTYs get ORCHARD_* identity and land in
-                // the terminal registry; the repo lands in T4's registry so worktree
-                // meta keys can use real `<repoId>::<path>` identities.
-                runtime.attach(project.agents)
-                project.repoID = (try? runtime.workspaceService.addRepo(path: repo))?.id
+            if let project = openProject(repo: repo, record: record, silent: silent) {
+                selectedProjectID = project.id
+                selection = defaultSelection(for: project)
             }
-            for record in project.records {
-                registerMetaKey(record, in: project)
-                _ = meta.ensure(record.id)
-            }
-            projects.append(project)
-            selectedProjectID = project.id
-            selection = defaultSelection(for: project)
-            persistProjects()
         } catch {
             guard !silent else { return }
-            let alert = NSAlert()
-            alert.messageText = "Couldn't open project"
-            alert.informativeText = String(describing: error)
-            alert.runModal()
+            presentOpenFailure(error)
         }
     }
 
     func removeProject(_ project: ProjectSession) {
-        project.shutdown()
-        dropWorkbench(for: project)
-        projects.removeAll { $0.id == project.id }
-        if selectedProjectID == project.id {
-            selectedProjectID = projects.first?.id
-            selection = projects.first.map(defaultSelection(for:))
-        }
-        persistProjects()
+        let selector = project.repoID ?? project.repo.path
+        detachProject(project)
+        _ = try? workspaceService.removeRepo(selector)
     }
 
     private func defaultSelection(for project: ProjectSession) -> WorkbenchKey {
@@ -243,11 +229,125 @@ final class AppStore: ObservableObject {
         return .projectRoot(project.id)
     }
 
-    private func persistProjects() {
-        defaults.set(projects.map { $0.repo.path }, forKey: workspacesKey)
+    /// One-time import of the pre-T8 UserDefaults path list into the registry.
+    /// The key is then deleted so it cannot fight `orchard-data.json` later.
+    private func migrateLegacyWorkspacesIfNeeded() {
+        guard let paths = defaults.stringArray(forKey: legacyWorkspacesKey) else { return }
+        for path in paths {
+            let url = URL(fileURLWithPath: path)
+            guard Self.isExistingDirectory(url) else { continue }
+            _ = try? workspaceService.addRepo(path: url)
+        }
+        defaults.removeObject(forKey: legacyWorkspacesKey)
+    }
+
+    private func observeRepoRegistry() {
+        repoObserveTask?.cancel()
+        let stream = workspaceService.repoChanges()
+        repoObserveTask = Task { [weak self] in
+            for await repos in stream {
+                guard !Task.isCancelled else { break }
+                self?.applyRegistry(repos, selectNewProjects: false)
+            }
+        }
+    }
+
+    /// Bring `projects` in line with the registry. Missing directories are
+    /// skipped (a `ProjectSession` cannot start). Newly added repos from the
+    /// CLI appear here; Open Project creates the session itself and dedups.
+    private func applyRegistry(_ repos: [RepoRecord], selectNewProjects: Bool) {
+        var wanted: [String: RepoRecord] = [:]
+        for record in repos {
+            wanted[Self.standardizedPath(record.path)] = record
+        }
+        for project in projects where wanted[project.repo.standardizedFileURL.path] == nil {
+            detachProject(project)
+        }
+        var opened: [ProjectSession] = []
+        for record in repos {
+            let url = URL(fileURLWithPath: record.path)
+            if let existing = project(at: url) {
+                existing.repoID = record.id
+                continue
+            }
+            guard Self.isExistingDirectory(url) else { continue }
+            if let project = openProject(repo: url, record: record, silent: true) {
+                opened.append(project)
+            }
+        }
+        if selectNewProjects, let last = opened.last {
+            selectedProjectID = last.id
+            selection = defaultSelection(for: last)
+        } else if selectedProjectID == nil, let last = projects.last {
+            selectedProjectID = last.id
+            selection = defaultSelection(for: last)
+        }
+    }
+
+    @discardableResult
+    private func openProject(repo: URL, record: RepoRecord, silent: Bool) -> ProjectSession? {
+        do {
+            let project = try ProjectSession(
+                repo: repo, settings: settings, repoID: record.id,
+                displayName: record.displayName)
+            project.onEvent = { [weak self] project, event in
+                self?.handle(event, from: project)
+            }
+            if let runtime {
+                // Supervisor PTYs get ORCHARD_* identity and land in the
+                // terminal registry so worktree meta keys use `<repoId>::<path>`.
+                runtime.attach(project.agents)
+            }
+            for worktree in project.records {
+                registerMetaKey(worktree, in: project)
+                _ = meta.ensure(worktree.id)
+            }
+            projects.append(project)
+            return project
+        } catch {
+            guard !silent else { return nil }
+            presentOpenFailure(error)
+            return nil
+        }
+    }
+
+    private func detachProject(_ project: ProjectSession) {
+        guard projects.contains(where: { $0.id == project.id }) else { return }
+        project.shutdown()
+        dropWorkbench(for: project)
+        projects.removeAll { $0.id == project.id }
+        if filterProjectID == project.id { filterProjectID = nil }
+        if composerProjectID == project.id { composerProjectID = nil }
+        if selectedProjectID == project.id {
+            selectedProjectID = projects.first?.id
+            selection = projects.first.map(defaultSelection(for:))
+        }
+    }
+
+    private func project(at url: URL) -> ProjectSession? {
+        let path = url.standardizedFileURL.path
+        return projects.first { $0.repo.standardizedFileURL.path == path }
+    }
+
+    private func presentOpenFailure(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "Couldn't open project"
+        alert.informativeText = String(describing: error)
+        alert.runModal()
+    }
+
+    private static func standardizedPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+
+    private static func isExistingDirectory(_ url: URL) -> Bool {
+        var isDir: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
     }
 
     func shutdownAll() {
+        repoObserveTask?.cancel()
+        repoObserveTask = nil
         for project in projects { project.shutdown() }
         for session in shells.values { session.terminate() }
         shells.removeAll()
