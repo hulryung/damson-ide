@@ -397,7 +397,7 @@ invalidate on navigation.
 anticipated: grouped changed-file list (staged-ness irrelevant — fork-point diff),
 hunk navigation (n/p), a commit box driving `GitService.commitAll` (finally used) with
 the diff refreshing after, and a push action using `GitService.push` with upstream
-状态 surfaced (ahead/no-upstream states from `unpushedCommits`). Keep it
+state surfaced (ahead/no-upstream states from `unpushedCommits`). Keep it
 worktree-scoped and observation-honest: failures surface inline with git's own stderr.
 
 ### Wave 6+ backlog
