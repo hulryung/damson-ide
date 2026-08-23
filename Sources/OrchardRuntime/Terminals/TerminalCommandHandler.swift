@@ -10,13 +10,22 @@ import OrchardTerminals
 /// When a `WorkspaceService` is attached, `--worktree path:|name:|active` selectors
 /// resolve through the workspace registry (including projected repo primary
 /// checkouts) so create/list key terminals by `repoId::path`.
+///
+/// With a `HostRegistry` attached, `terminal-create --host ssh:<name>` opens a remote
+/// shell (T29): still a local PTY, but its child is `ssh -tt <host>`, and the summary
+/// is stamped with the `ssh:<name>` execution host so nothing downstream mistakes the
+/// work for local. An unregistered host fails typed — the runtime never connects to a
+/// name it was not given.
 public struct TerminalCommandHandler: CommandHandler, @unchecked Sendable {
     private let service: TerminalService
     private let workspaces: WorkspaceService?
+    private let hosts: HostRegistry?
 
-    public init(service: TerminalService, workspaces: WorkspaceService? = nil) {
+    public init(service: TerminalService, workspaces: WorkspaceService? = nil,
+                hosts: HostRegistry? = nil) {
         self.service = service
         self.workspaces = workspaces
+        self.hosts = hosts
     }
 
     public var verbs: [String] {
@@ -32,6 +41,9 @@ public struct TerminalCommandHandler: CommandHandler, @unchecked Sendable {
             return .failure(id: request.id, error: RPCError(
                 code: error.code, message: error.message))
         } catch let error as WorkspaceError {
+            return .failure(id: request.id, error: RPCError(
+                code: error.code, message: error.message))
+        } catch let error as HostRegistryError {
             return .failure(id: request.id, error: RPCError(
                 code: error.code, message: error.message))
         } catch {
@@ -54,12 +66,37 @@ public struct TerminalCommandHandler: CommandHandler, @unchecked Sendable {
 
         case "terminal-create":
             let resolved = try await resolvedWorktree(params)
+            let engineID = params["engine"]?.stringValue ?? "shell"
+            let prompt = params["prompt"]?.stringValue ?? ""
+            let host = try executionHost(params)
+            if host.isLocal {
+                let summary = try await service.create(
+                    worktreeId: resolved?.id,
+                    cwd: params["cwd"]?.stringValue ?? resolved?.path,
+                    engineID: engineID,
+                    prompt: prompt,
+                    title: params["title"]?.stringValue)
+                return try encodeJSON(summary)
+            }
+            let record = try requireHosts().require(host: host)
+            // Remote agents are a later stage: an agent engine's argv, hooks, config
+            // and transcript all assume a local filesystem, and pretending otherwise
+            // would launch the agent on this machine under a remote host's name.
+            guard engineID == "shell" else {
+                throw TerminalServiceError.notImplemented(
+                    "running the '\(engineID)' agent on \(host.rawValue)")
+            }
+            // The worktree selector still resolves locally: a remote pane has no local
+            // workspace, so `cwd` is where `ssh` is launched from, not where the work
+            // happens. Remote worktrees are out of scope for this stage.
             let summary = try await service.create(
                 worktreeId: resolved?.id,
                 cwd: params["cwd"]?.stringValue ?? resolved?.path,
-                engineID: params["engine"]?.stringValue ?? "shell",
-                prompt: params["prompt"]?.stringValue ?? "",
-                title: params["title"]?.stringValue)
+                engineID: "shell",
+                prompt: SSHCommand.remoteShellCommandLine(
+                    for: record, command: prompt.isEmpty ? nil : prompt),
+                title: params["title"]?.stringValue ?? record.name,
+                executionHostId: host.rawValue)
             return try encodeJSON(summary)
 
         case "terminal-read":
@@ -108,6 +145,26 @@ public struct TerminalCommandHandler: CommandHandler, @unchecked Sendable {
         default:
             throw TerminalServiceError.invalidArgument("unrouted verb '\(request.method)'")
         }
+    }
+
+    /// `--host` defaults to `local`. An unparseable value is rejected rather than
+    /// falling back: "degrade to read-only inspection, never fall back to local
+    /// execution" (docs/research/orca-inventory.md §1.8).
+    private func executionHost(_ params: [String: JSONValue]) throws -> ExecutionHostId {
+        guard let raw = params["host"]?.stringValue?.trimmingCharacters(in: .whitespaces),
+              !raw.isEmpty else { return .local }
+        guard let host = ExecutionHostId(rawValue: raw) else {
+            throw TerminalServiceError.invalidArgument(
+                "--host must be 'local' or 'ssh:<name>' (got '\(raw)')")
+        }
+        return host
+    }
+
+    private func requireHosts() throws -> HostRegistry {
+        guard let hosts else {
+            throw TerminalServiceError.notImplemented("remote terminals in this runtime")
+        }
+        return hosts
     }
 
     private func requiredHandle(_ params: [String: JSONValue]) throws -> String {

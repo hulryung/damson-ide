@@ -14,6 +14,12 @@ public struct TerminalCreateSpec: Sendable {
     /// engines get it typed via the injection pipeline on first idle.
     public let prompt: String
     public let title: String?
+    /// Which host the work in this pane runs on — `local` or `ssh:<name>` (T29). The
+    /// PTY itself is always local; for a remote host its child is the `ssh` client, so
+    /// this records *where the work is*, which is not the same question as where the
+    /// process table entry is. Kept as the raw id string so this module stays free of
+    /// the runtime's host registry.
+    public let executionHostId: String
     /// PTY spawn geometry when the creator already knows the pane size (a visible app
     /// pane, a respawn into a sized pane). nil means the factory falls back to
     /// `TerminalSpawnDefaults` — never to the historical 80×24, which every real
@@ -23,6 +29,7 @@ public struct TerminalCreateSpec: Sendable {
 
     public init(handle: String, paneKey: String, worktreeId: String?, cwd: String?,
                 engineID: String, prompt: String, title: String?,
+                executionHostId: String = "local",
                 initialCols: Int? = nil, initialRows: Int? = nil) {
         self.handle = handle
         self.paneKey = paneKey
@@ -31,6 +38,7 @@ public struct TerminalCreateSpec: Sendable {
         self.engineID = engineID
         self.prompt = prompt
         self.title = title
+        self.executionHostId = executionHostId
         self.initialCols = initialCols
         self.initialRows = initialRows
     }
@@ -59,6 +67,10 @@ public struct TerminalSummary: Codable, Equatable, Sendable {
     public let worktreeId: String?
     public let title: String?
     public let engine: String
+    /// `local` or `ssh:<name>` — the host this pane's work runs on (T29). Stamped at
+    /// create time and never inferred later: a summary that lost its host would read as
+    /// local, and local is the one answer that must never be guessed.
+    public let executionHostId: String
     /// Whether the child process is still attached and running.
     public let connected: Bool
     public let writable: Bool
@@ -148,12 +160,19 @@ public struct TerminalExitEvent: Sendable {
     public let paneKey: String
     public let exitCode: Int32?
     public let deliberate: Bool
+    /// The pane's host (T29). Carried on the event because an exit code means
+    /// different things on different hosts: locally it is the process's own status,
+    /// while on `ssh:<name>` it may be the *connection* failing, which proves nothing
+    /// about the remote work. Consumers read it through `HostLiveness.verdictForPTYEnd`.
+    public let executionHostId: String
 
-    public init(handle: String, paneKey: String, exitCode: Int32?, deliberate: Bool) {
+    public init(handle: String, paneKey: String, exitCode: Int32?, deliberate: Bool,
+                executionHostId: String = "local") {
         self.handle = handle
         self.paneKey = paneKey
         self.exitCode = exitCode
         self.deliberate = deliberate
+        self.executionHostId = executionHostId
     }
 }
 

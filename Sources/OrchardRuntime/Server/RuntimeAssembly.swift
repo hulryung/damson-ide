@@ -32,6 +32,8 @@ public final class OrchardRuntimeHost {
     public nonisolated let automationScheduler: AutomationScheduler
     /// T20: debounced listening-port sweep, attributed by process cwd containment.
     public nonisolated let portService: PortService
+    /// T29: the registered remote hosts behind `ssh:<name>` execution host ids.
+    public nonisolated let hostRegistry: HostRegistry
 
     public nonisolated let registry: CommandRegistry
     /// In-process client of the same registry (the app's path; no socket involved).
@@ -56,6 +58,7 @@ public final class OrchardRuntimeHost {
         let terminalService = TerminalService(factory: terminalFactory)
         self.terminalService = terminalService
         self.workspaceService = WorkspaceService(store: dataStore)
+        self.hostRegistry = HostRegistry(store: dataStore)
         self.fileService = FileService()
         self.fileOpenCenter = FileOpenCenter()
 
@@ -170,7 +173,9 @@ public final class OrchardRuntimeHost {
             store: orchestration,
             runtime: workerRuntime))
         registry.register(TerminalCommandHandler(service: terminalService,
-                                                 workspaces: workspaceService))
+                                                 workspaces: workspaceService,
+                                                 hosts: hostRegistry))
+        registry.register(HostCommandHandler(registry: hostRegistry))
         registry.register(WorkspaceCommandHandler(service: workspaceService))
         registry.register(RepoRegistryHandler(service: workspaceService))
         registry.register(FileCommandHandler(files: fileService,

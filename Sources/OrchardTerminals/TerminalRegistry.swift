@@ -136,6 +136,7 @@ public final class TerminalRecord {
             worktreeId: worktreeId,
             title: title,
             engine: engine.id,
+            executionHostId: spec.executionHostId,
             connected: connected,
             writable: connected,
             lastOutputAt: lastOutputAt.map { $0.timeIntervalSince1970 * 1000 },

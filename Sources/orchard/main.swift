@@ -96,6 +96,12 @@ func formatHuman(method: String, result: JSONValue?) -> String {
             lines.append("(truncated)")
         }
         return lines.joined(separator: "\n")
+    case "host-list":
+        return formatHostList(result)
+    case "host-add":
+        return formatHostAdd(result)
+    case "host-check":
+        return formatHostCheck(result)
     case "worktree-ps":
         return formatWorktreePs(result)
     case "workspace-ports":
@@ -131,6 +137,50 @@ func formatTerminalList(_ result: JSONValue?) -> String {
             index == row.count - 1 ? row[index] : row[index].padding(toLength: widths[index], withPad: " ", startingAt: 0)
         }.joined(separator: "  ")
     }.joined(separator: "\n")
+}
+
+func formatHostList(_ result: JSONValue?) -> String {
+    let hosts = result?.objectValue?["hosts"]?.arrayValue ?? []
+    if hosts.isEmpty { return "No hosts registered. Try: orchard host add --import" }
+    return hosts.map { item -> String in
+        let host = item.objectValue ?? [:]
+        let name = host["name"]?.stringValue ?? "?"
+        let target = host["target"]?.stringValue ?? ""
+        let source = host["source"]?.stringValue ?? "manual"
+        let id = host["executionHostId"]?.stringValue ?? "ssh:\(name)"
+        return "\(name)  \(target)  \(source)  \(id)"
+    }.joined(separator: "\n")
+}
+
+func formatHostAdd(_ result: JSONValue?) -> String {
+    let object = result?.objectValue
+    if let imported = object?["imported"]?.objectValue {
+        let name = imported["name"]?.stringValue ?? "?"
+        let source = imported["source"]?.stringValue ?? "manual"
+        return "Registered \(name) (\(source)). Probe it with: orchard host check \(name)"
+    }
+    let available = object?["available"]?.arrayValue ?? []
+    if available.isEmpty { return "No new ~/.ssh/config hosts to import." }
+    var lines = ["Importable ~/.ssh/config hosts:"]
+    for item in available {
+        let entry = item.objectValue ?? [:]
+        let name = entry["name"]?.stringValue ?? "?"
+        let hostname = entry["hostname"]?.stringValue
+        lines.append(hostname.map { "  \(name)  (\($0))" } ?? "  \(name)")
+    }
+    lines.append("Import one with: orchard host add --import <name>")
+    return lines.joined(separator: "\n")
+}
+
+func formatHostCheck(_ result: JSONValue?) -> String {
+    let object = result?.objectValue ?? [:]
+    let name = object["name"]?.stringValue ?? "?"
+    let status = object["status"]?.stringValue ?? "unreachable"
+    let detail = object["detail"]?.stringValue ?? ""
+    var lines = ["\(name): \(status)" + (detail.isEmpty ? "" : " — \(detail)")]
+    if let command = object["command"]?.stringValue { lines.append("  probe: \(command)") }
+    if let note = object["note"]?.stringValue, !note.isEmpty { lines.append("  \(note)") }
+    return lines.joined(separator: "\n")
 }
 
 func formatWorktreePs(_ result: JSONValue?) -> String {
@@ -217,10 +267,13 @@ do {
         } else { throw CLIError.usage("usage: orchard guide list | orchard guide get orchestration [--json]") }
     default:
         var method = parsed.spec.name, params = parsed.params; params.removeValue(forKey: "json")
-        if method == "repo" || method == "browser" || method == "automations" || method == "worktree" || method == "terminal", case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue {
+        if method == "repo" || method == "browser" || method == "automations" || method == "worktree" || method == "terminal" || method == "host", case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue {
             method = "\(method)-\(subcommand)"
             let rest = Array(values.dropFirst())
-            if method.hasPrefix("automations-") && !rest.isEmpty && params["id"] == nil {
+            if method.hasPrefix("host-") {
+                // `host add <name>` / `host check <name>`: the positional is the name.
+                if !rest.isEmpty, params["name"] == nil { params["name"] = rest[0] }
+            } else if method.hasPrefix("automations-") && !rest.isEmpty && params["id"] == nil {
                 params["id"] = rest[0]
             } else if method.hasPrefix("worktree-") {
                 if params["cwd"] == nil {
@@ -251,6 +304,8 @@ do {
             throw CLIError.usage("usage: orchard worktree list|show|current|create|set|rm|ps [options]")
         } else if method == "terminal" {
             throw CLIError.usage("usage: orchard terminal list|create|read|send|wait|split|close|rename [options]")
+        } else if method == "host" {
+            throw CLIError.usage("usage: orchard host list | orchard host add <name> [--hostname <h>] [--user <u>] [--port <n>] | orchard host add --import [<name>] | orchard host check <name>")
         }
         if method == "file" {
             guard case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue else {

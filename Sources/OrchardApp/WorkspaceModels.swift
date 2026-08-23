@@ -60,11 +60,23 @@ struct WorkbenchTab: Identifiable, Hashable {
     var filePath: String?
     /// Unsaved buffer. The tab strip draws a dirty dot when this is true.
     var isDirty: Bool
+    /// T29: `ssh:<name>` when this pane's shell runs on a remote host, else nil
+    /// (local). The PTY is local either way — its child is the `ssh` client — so the
+    /// label carries the host, because "which machine is this shell on" is not a
+    /// question the user can answer from the prompt alone.
+    var executionHostId: String?
 
     var isAgentTab: Bool { agentID != nil }
 
+    /// The host chip shown in the tab label; nil for local panes.
+    var remoteHostLabel: String? {
+        guard let executionHostId, executionHostId != "local" else { return nil }
+        return ExecutionHostId(rawValue: executionHostId)?.label ?? executionHostId
+    }
+
     init(id: UUID = UUID(), kind: TabKind, title: String? = nil, agentID: UUID? = nil,
-         viewMode: TabViewMode = .terminal, filePath: String? = nil, isDirty: Bool = false) {
+         viewMode: TabViewMode = .terminal, filePath: String? = nil, isDirty: Bool = false,
+         executionHostId: String? = nil) {
         self.id = id
         self.kind = kind
         self.filePath = filePath
@@ -76,6 +88,7 @@ struct WorkbenchTab: Identifiable, Hashable {
         }
         self.agentID = agentID
         self.viewMode = agentID == nil ? .terminal : viewMode
+        self.executionHostId = executionHostId
     }
 }
 

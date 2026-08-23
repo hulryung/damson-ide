@@ -24,6 +24,10 @@ public struct OrchardData: Codable, Equatable, Sendable {
     /// profile binding, keyed by workspace key (worktree path).
     public var browserProfiles: [BrowserProfile]
     public var browserWorkspaceProfiles: [String: String]
+    /// T29 remote hosts: the registered SSH connection targets behind `ssh:<name>`
+    /// execution host ids. A record here is a name for a target, never a claim that
+    /// the target is reachable (see `HostLivenessVerdict`).
+    public var hosts: [HostRecord]
 
     public init(schemaVersion: Int = 1,
                 repos: [RepoRecord] = [],
@@ -34,7 +38,8 @@ public struct OrchardData: Codable, Equatable, Sendable {
                 workspaceStatusVocabulary: [WorkspaceStatusDefinition] = WorkspaceStatusDefinition.defaults,
                 automations: [Automation] = [], automationRuns: [AutomationRun] = [],
                 browserProfiles: [BrowserProfile] = [],
-                browserWorkspaceProfiles: [String: String] = [:]) {
+                browserWorkspaceProfiles: [String: String] = [:],
+                hosts: [HostRecord] = []) {
         self.schemaVersion = schemaVersion
         self.repos = repos
         self.folderWorkspaces = folderWorkspaces
@@ -46,12 +51,13 @@ public struct OrchardData: Codable, Equatable, Sendable {
         self.automationRuns = automationRuns
         self.browserProfiles = browserProfiles
         self.browserWorkspaceProfiles = browserWorkspaceProfiles
+        self.hosts = hosts
     }
 
     private enum CodingKeys: String, CodingKey {
         case schemaVersion, repos, folderWorkspaces, worktreeMeta, worktreeLineageById
         case retiredWorktreeNamesByRepo, workspaceStatusVocabulary, automations, automationRuns
-        case browserProfiles, browserWorkspaceProfiles
+        case browserProfiles, browserWorkspaceProfiles, hosts
     }
 
     public init(from decoder: Decoder) throws {
@@ -67,6 +73,7 @@ public struct OrchardData: Codable, Equatable, Sendable {
         automationRuns = try c.decodeIfPresent([AutomationRun].self, forKey: .automationRuns) ?? []
         browserProfiles = try c.decodeIfPresent([BrowserProfile].self, forKey: .browserProfiles) ?? []
         browserWorkspaceProfiles = try c.decodeIfPresent([String: String].self, forKey: .browserWorkspaceProfiles) ?? [:]
+        hosts = try c.decodeIfPresent([HostRecord].self, forKey: .hosts) ?? []
     }
 
     public static let empty = OrchardData()
@@ -81,6 +88,8 @@ public struct RepoRecord: Codable, Equatable, Sendable, Identifiable {
     public var baseRef: String
     public var kind: Kind
     public var addedAt: Date
+    /// The `ExecutionHostId` raw value the checkout lives on (`local` today; see
+    /// docs/design/remote-hosts.md for the staged remote-worktree work).
     public var hostId: String
 
     public init(id: String = UUID().uuidString.lowercased(),
