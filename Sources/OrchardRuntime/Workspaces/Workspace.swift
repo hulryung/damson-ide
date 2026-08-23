@@ -131,6 +131,38 @@ public struct Workspace: Codable, Equatable, Sendable, Identifiable {
             parentWorktreeId: lineage?.parentWorktreeId,
             lineage: lineage)
     }
+
+    /// Repo primary checkout as a first-class workspace (`repoId::path`). Git
+    /// checkouts carry live branch/head; callers pass empty strings for folder
+    /// roots.
+    public static func fromPrimaryCheckout(repo: RepoRecord, meta: WorktreeMeta,
+                                           branch: String, head: String,
+                                           lineage: WorktreeLineage?) -> Workspace {
+        let path = URL(fileURLWithPath: repo.path).standardizedFileURL.path
+        return Workspace(
+            id: WorktreeIdentity.make(repoId: repo.id, path: path),
+            instanceId: meta.instanceId,
+            repoId: repo.id,
+            path: path,
+            hostId: repo.hostId,
+            displayName: meta.displayName.isEmpty ? repo.displayName : meta.displayName,
+            comment: meta.comment,
+            workspaceStatus: meta.workspaceStatus,
+            isPinned: meta.isPinned,
+            isUnread: meta.isUnread,
+            isArchived: meta.isArchived,
+            sortOrder: meta.sortOrder,
+            lastActivityAt: meta.lastActivityAt,
+            createdAt: meta.createdAt ?? repo.addedAt,
+            linkedIssue: meta.linkedIssue,
+            linkedPR: meta.linkedPR,
+            branch: branch,
+            head: head,
+            baseRef: repo.baseRef,
+            kind: .worktree,
+            parentWorktreeId: lineage?.parentWorktreeId,
+            lineage: lineage)
+    }
 }
 
 public struct WorkspaceCreateRequest: Sendable {

@@ -234,4 +234,41 @@ final class FileHandlerTests: XCTestCase {
         XCTAssertFalse(response.ok)
         XCTAssertNotNil(response.error?.code)
     }
+
+    func testFileSearchResolvesGitPrimaryByPathSelector() async throws {
+        try XCTSkipIf(!FileManager.default.isExecutableFile(atPath: "/usr/bin/git"), "git unavailable")
+        let repo = tmp.appendingPathComponent("damson-ide")
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        func git(_ args: [String]) throws {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            p.arguments = args
+            p.currentDirectoryURL = repo
+            p.standardOutput = Pipe(); p.standardError = Pipe()
+            try p.run(); p.waitUntilExit()
+            XCTAssertEqual(p.terminationStatus, 0, args.joined(separator: " "))
+        }
+        try git(["init", "-q", "-b", "main"])
+        try git(["config", "user.email", "t@t.io"])
+        try git(["config", "user.name", "Test"])
+        try write("hello from checkout\n", to: "src/app.swift", in: repo)
+        try git(["add", "."])
+        try git(["commit", "-q", "-m", "init"])
+
+        let service = WorkspaceService(
+            dataURL: tmp.appendingPathComponent("orchard-data.json"),
+            worktreesRoot: tmp.appendingPathComponent("wt"))
+        _ = try service.addRepo(path: repo, displayName: "damson-ide")
+        var registry = CommandRegistry()
+        registry.register(FileCommandHandler(workspaces: service))
+        let server = InMemoryRuntimeServer(registry: registry, runtimeId: "rt_primary")
+
+        let response = await call(server, "file-search", [
+            "worktree": .string("path:\(repo.path)"),
+            "query": .string("hello"),
+        ])
+        XCTAssertTrue(response.ok, response.error?.message ?? "")
+        let hits = try XCTUnwrap(response.result?.objectValue?["matches"]?.arrayValue)
+        XCTAssertEqual(hits.first?.objectValue?["path"]?.stringValue, "src/app.swift")
+    }
 }

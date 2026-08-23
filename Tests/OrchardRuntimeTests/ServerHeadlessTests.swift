@@ -100,4 +100,57 @@ final class ServerHeadlessTests: XCTestCase {
         try encoder.encode(metadata).write(
             to: RuntimePaths.metadataURL(dataDirectory: root), options: .atomic)
     }
+
+    func testPrepareKeepsShortSocketBesideData() throws {
+        let root = try temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let paths = try RuntimePaths.prepare(dataDirectory: root)
+        XCTAssertEqual(paths.data, root)
+        XCTAssertEqual(paths.run, root.appendingPathComponent("run", isDirectory: true))
+        let socket = paths.run.appendingPathComponent(RuntimePaths.socketName())
+        XCTAssertLessThan(socket.path.utf8.count, RuntimePaths.unixSocketPathLimit)
+    }
+
+    func testPrepareMovesLongSocketUnderTmpOrchardUid() throws {
+        let long = String(repeating: "d", count: 90)
+        let root = URL(fileURLWithPath: "/tmp/\(long)-\(String(UUID().uuidString.prefix(8)))")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let preferred = root.appendingPathComponent("run", isDirectory: true)
+            .appendingPathComponent(RuntimePaths.socketName())
+        XCTAssertGreaterThanOrEqual(preferred.path.utf8.count, RuntimePaths.unixSocketPathLimit)
+
+        let paths = try RuntimePaths.prepare(dataDirectory: root)
+        XCTAssertEqual(paths.data, root)
+        XCTAssertEqual(paths.run, RuntimePaths.temporarySocketRoot())
+        let socket = paths.run.appendingPathComponent(RuntimePaths.socketName())
+        XCTAssertLessThan(socket.path.utf8.count, RuntimePaths.unixSocketPathLimit)
+        XCTAssertTrue(socket.path.contains("orchard-\(getuid())"))
+    }
+
+    @MainActor
+    func testLongDataDirPublishesFallbackSocketInMetadata() throws {
+        let long = String(repeating: "d", count: 90)
+        let root = URL(fileURLWithPath: "/tmp/\(long)-\(String(UUID().uuidString.prefix(8)))")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        let host = try OrchardRuntimeHost(
+            terminalFactory: { _, _ in ScriptedTerminalSession() },
+            dataDirectory: root, mode: .headless)
+        let metadata = try host.startSocketServer(authToken: "long-secret")
+        defer { host.shutdown() }
+
+        XCTAssertTrue(metadata.socketPath.hasPrefix(RuntimePaths.temporarySocketRoot().path))
+        XCTAssertLessThan(metadata.socketPath.utf8.count, RuntimePaths.unixSocketPathLimit)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: metadata.socketPath))
+        let published = try RuntimeDiscovery.load(dataDirectory: root)
+        XCTAssertEqual(published.socketPath, metadata.socketPath)
+        XCTAssertEqual(published.authToken, "long-secret")
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: RuntimePaths.metadataURL(dataDirectory: root).path))
+        XCTAssertNotEqual(URL(fileURLWithPath: metadata.socketPath).deletingLastPathComponent(),
+                          root.appendingPathComponent("run", isDirectory: true),
+                          "socket must leave a too-long data-dir while metadata stays there")
+    }
 }

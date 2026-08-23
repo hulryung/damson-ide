@@ -6,11 +6,17 @@ import OrchardTerminals
 /// close|rename` mapped 1:1 onto `TerminalService`, with the service's typed errors
 /// translated to wire error codes. `terminal-split` is a stub until the app-side pane
 /// tree exists (T5/wave-2) — the verb is claimed now so the CLI surface is stable.
-public struct TerminalCommandHandler: CommandHandler {
+///
+/// When a `WorkspaceService` is attached, `--worktree path:|name:|active` selectors
+/// resolve through the workspace registry (including projected repo primary
+/// checkouts) so create/list key terminals by `repoId::path`.
+public struct TerminalCommandHandler: CommandHandler, @unchecked Sendable {
     private let service: TerminalService
+    private let workspaces: WorkspaceService?
 
-    public init(service: TerminalService) {
+    public init(service: TerminalService, workspaces: WorkspaceService? = nil) {
         self.service = service
+        self.workspaces = workspaces
     }
 
     public var verbs: [String] {
@@ -25,6 +31,9 @@ public struct TerminalCommandHandler: CommandHandler {
         } catch let error as TerminalServiceError {
             return .failure(id: request.id, error: RPCError(
                 code: error.code, message: error.message))
+        } catch let error as WorkspaceError {
+            return .failure(id: request.id, error: RPCError(
+                code: error.code, message: error.message))
         } catch {
             return .failure(id: request.id, error: RPCError(
                 code: "internal_error", message: String(describing: error)))
@@ -35,7 +44,8 @@ public struct TerminalCommandHandler: CommandHandler {
         let params = request.params?.objectValue ?? [:]
         switch request.method {
         case "terminal-list":
-            let summaries = await service.list(worktreeId: params["worktree"]?.stringValue)
+            let resolved = try await resolvedWorktree(params)
+            let summaries = await service.list(worktreeId: resolved?.id)
             return try .object([
                 "terminals": encodeJSON(summaries),
                 "totalCount": .number(Double(summaries.count)),
@@ -43,9 +53,10 @@ public struct TerminalCommandHandler: CommandHandler {
             ])
 
         case "terminal-create":
+            let resolved = try await resolvedWorktree(params)
             let summary = try await service.create(
-                worktreeId: params["worktree"]?.stringValue,
-                cwd: params["cwd"]?.stringValue,
+                worktreeId: resolved?.id,
+                cwd: params["cwd"]?.stringValue ?? resolved?.path,
                 engineID: params["engine"]?.stringValue ?? "shell",
                 prompt: params["prompt"]?.stringValue ?? "",
                 title: params["title"]?.stringValue)
@@ -104,6 +115,33 @@ public struct TerminalCommandHandler: CommandHandler {
             throw TerminalServiceError.invalidArgument("missing required param 'terminal'")
         }
         return handle
+    }
+
+    private func resolvedWorktree(_ params: [String: JSONValue]) async throws -> (id: String, path: String?)? {
+        guard let selector = params["worktree"]?.stringValue, !selector.isEmpty else { return nil }
+        guard let workspaces else { return (selector, nil) }
+        let cwd = params["cwd"]?.stringValue
+        return try await MainActor.run {
+            do {
+                let workspace = try workspaces.resolveWorkspace(selector, cwd: cwd)
+                return (workspace.id, workspace.path)
+            } catch let error as WorkspaceError {
+                if Self.isStrictSelector(selector) { throw error }
+                return (selector, nil)
+            }
+        }
+    }
+
+    /// Selectors that must resolve through the workspace registry. Bare ids
+    /// still pass through so tests and pre-projection callers keep working.
+    private static func isStrictSelector(_ selector: String) -> Bool {
+        let trimmed = selector.trimmingCharacters(in: .whitespaces)
+        let lower = trimmed.lowercased()
+        if lower == "active" || lower == "current" { return true }
+        for prefix in ["path:", "name:", "branch:", "issue:"] {
+            if lower.hasPrefix(prefix) { return true }
+        }
+        return false
     }
 }
 

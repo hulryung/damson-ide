@@ -175,4 +175,68 @@ final class TerminalHandlerTests: XCTestCase {
         XCTAssertFalse(response.ok)
         XCTAssertEqual(response.error?.code, "invalid_argument")
     }
+
+    @MainActor
+    func testCreateResolvesPathSelectorToProjectedPrimaryCheckout() async throws {
+        try XCTSkipIf(!FileManager.default.isExecutableFile(atPath: "/usr/bin/git"), "git unavailable")
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("orchard-term-primary-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tmp) }
+        let repo = tmp.appendingPathComponent("checkout")
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        func git(_ args: [String]) throws {
+            let p = Process()
+            p.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+            p.arguments = args
+            p.currentDirectoryURL = repo
+            p.standardOutput = Pipe(); p.standardError = Pipe()
+            try p.run(); p.waitUntilExit()
+            XCTAssertEqual(p.terminationStatus, 0)
+        }
+        try git(["init", "-q", "-b", "main"])
+        try git(["config", "user.email", "t@t.io"])
+        try git(["config", "user.name", "Test"])
+        try "x\n".write(to: repo.appendingPathComponent("f.txt"), atomically: true, encoding: .utf8)
+        try git(["add", "."])
+        try git(["commit", "-q", "-m", "init"])
+
+        let workspaces = WorkspaceService(
+            dataURL: tmp.appendingPathComponent("orchard-data.json"),
+            worktreesRoot: tmp.appendingPathComponent("wt"))
+        let record = try workspaces.addRepo(path: repo)
+        var detector = ReadinessDetector.Config()
+        detector.idleDebounce = 1
+        detector.spawnFloor = 0
+        var pipeline = SendPipelineConfig()
+        pipeline.submitDelay = 0.02
+        pipeline.verifyTimeout = 0.3
+        pipeline.verifyPollInterval = 0.01
+        let service = TerminalService(
+            factory: { spec, _ in ScriptedTerminalSession() },
+            pipeline: pipeline,
+            detectorConfig: detector)
+        var registry = CommandRegistry()
+        registry.register(TerminalCommandHandler(service: service, workspaces: workspaces))
+        let local = InMemoryRuntimeServer(registry: registry, runtimeId: "rt_term_primary")
+
+        let created = await local.perform(RPCRequest(
+            method: "terminal-create",
+            params: .object([
+                "engine": .string("shell"),
+                "worktree": .string("path:\(repo.path)"),
+            ])))
+        XCTAssertTrue(created.ok, String(describing: created.error))
+        let worktreeId = created.result?.objectValue?["worktreeId"]?.stringValue
+        XCTAssertEqual(worktreeId, "\(record.id)::\(repo.standardizedFileURL.path)")
+
+        let unknown = await local.perform(RPCRequest(
+            method: "terminal-create",
+            params: .object([
+                "engine": .string("shell"),
+                "worktree": .string("path:/does/not/exist"),
+            ])))
+        XCTAssertFalse(unknown.ok)
+        XCTAssertEqual(unknown.error?.code, "unknown_worktree")
+    }
 }

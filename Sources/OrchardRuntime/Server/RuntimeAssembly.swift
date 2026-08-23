@@ -103,7 +103,8 @@ public final class OrchardRuntimeHost {
             runtime: .live(cliCommand: cliCommand,
                            workspaces: workspaceService,
                            terminals: terminalService)))
-        registry.register(TerminalCommandHandler(service: terminalService))
+        registry.register(TerminalCommandHandler(service: terminalService,
+                                                 workspaces: workspaceService))
         registry.register(WorkspaceCommandHandler(service: workspaceService))
         registry.register(RepoRegistryHandler(service: workspaceService))
         registry.register(FileCommandHandler(files: fileService,
