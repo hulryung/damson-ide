@@ -31,5 +31,10 @@ swift test
 section "swift build -c release"
 swift build -c release
 
+if [[ "${ORCHARD_CI_E2E:-0}" == "1" ]]; then
+    section "headless orchestration e2e"
+    ./scripts/e2e-headless.sh
+fi
+
 echo
 echo "==> ci.sh: all sections passed"

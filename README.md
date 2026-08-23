@@ -27,6 +27,18 @@ orchard               the agent-facing CLI executable
 OrchardApp            the app (binary is `OrchardApp`; the bundle stays Orchard.app)
 ```
 
+## CI
+
+Run the normal merge gate with `./scripts/ci.sh`. The process-boundary headless
+orchestration smoke is opt-in because it builds the release CLI, creates a
+temporary Git repository and worktree, and starts a real shell worker; enable it
+with `ORCHARD_CI_E2E=1 ./scripts/ci.sh`. The harness runs `orchard serve
+--data-dir <temp>` without the GUI and verifies socket, metadata, worktree, and
+temporary-directory cleanup on SIGINT.
+For the generic shell worker, the harness uses the scripted lifecycle path: it
+reads the capability from the injected preamble and sends `worker_done` with the
+shell's bound terminal identity, since a bare shell is not an autonomous agent.
+
 It remains the orchestration counterpart to
 [Damson](https://github.com/hulryung/damson), the GPU terminal it reuses —
 each agent's PTY renders through Damson's Metal terminal engine
