@@ -50,6 +50,24 @@ public protocol TerminalSession: AnyObject {
 
     /// Called once when the child process exits. Single-assignment.
     var onExit: ((Int32) -> Void)? { get set }
+
+    // MARK: - Restart survival (T23 keeper handoff)
+
+    /// Detach the underlying PTY from this session WITHOUT killing the child, for
+    /// handoff to the keeper across an app restart. nil when there is nothing
+    /// sensible to hand off (process-free test sessions; damson also refuses
+    /// tmux-backed panes). Defaulted so existing conformances are untouched.
+    func releaseForKeeperHandoff() -> KeeperPTYHandoff?
+
+    /// The escape bytes that recreate this session's tracked terminal state in a
+    /// fresh parser — replayed into the adopting session before any buffered/live
+    /// output. Empty by default.
+    func keeperRestorationPreamble() -> Data
+}
+
+public extension TerminalSession {
+    func releaseForKeeperHandoff() -> KeeperPTYHandoff? { nil }
+    func keeperRestorationPreamble() -> Data { Data() }
 }
 
 /// An immutable view of the visible grid at one instant. Rows come pre-trimmed of

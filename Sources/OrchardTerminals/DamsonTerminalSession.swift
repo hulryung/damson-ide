@@ -30,6 +30,38 @@ public final class DamsonTerminalSession: TerminalSession {
                                          initialRows: initialRows))
     }
 
+    /// Resurrect a session around a PTY reclaimed from the keeper (T23 restart
+    /// survival). The `PTYHost.adopt` path skips forkpty: the child predates this
+    /// process, and `replayPreamble` (the previous incarnation's
+    /// `stateRestorationPreamble`) plus everything buffered while the app was down is
+    /// parsed strictly before any live output.
+    public convenience init(adopted: KeeperAdoptedPTY, replayPreamble: Data,
+                            config: DamsonConfig, initialCols: Int, initialRows: Int) {
+        let host = PTYHost()
+        host.adopt(fd: adopted.fd, pid: adopted.pid,
+                   startSec: adopted.startSec, startUsec: adopted.startUsec,
+                   replay: replayPreamble + adopted.buffer)
+        self.init(session: DamsonSession(config: config, restoredScrollback: nil,
+                                         backend: host,
+                                         initialCols: initialCols,
+                                         initialRows: initialRows))
+    }
+
+    // MARK: - Restart survival (T23 keeper handoff)
+
+    /// Detach the PTY for keeper handoff — the child keeps running, this session just
+    /// stops owning it. nil when damson refuses (tmux-backed panes, non-PTY backends).
+    public func releaseForKeeperHandoff() -> KeeperPTYHandoff? {
+        guard let handoff = session.releasePTYForHandoff() else { return nil }
+        return KeeperPTYHandoff(fd: handoff.fd, pid: handoff.pid,
+                                startSec: handoff.startSec, startUsec: handoff.startUsec,
+                                cwd: handoff.cwd, tail: handoff.tail)
+    }
+
+    public func keeperRestorationPreamble() -> Data {
+        session.stateRestorationPreamble()
+    }
+
     public func write(_ data: Data) { session.write(data) }
 
     public var config: DamsonConfig { session.config }

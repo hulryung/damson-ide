@@ -170,6 +170,89 @@ public final class TerminalService {
         return record.summary()
     }
 
+    // MARK: - Restart survival (T23 keeper handoff / adoption)
+
+    /// Quit side: release every live registered PTY for keeper handoff. For each pane
+    /// that can survive (its session yields a real PTY handoff), the restoration
+    /// record is captured — preamble and grid geometry BEFORE release, because both
+    /// read live session state — and returned alongside the released master.
+    ///
+    /// Panes whose child already exited are skipped (nothing to keep alive), as are
+    /// sessions that refuse release (test fakes, non-PTY backends). The caller owns
+    /// the returned fds: hand them to the keeper or close them (the children then get
+    /// SIGHUP, exactly a normal quit).
+    public func releaseForKeeperHandoff() -> [KeeperReleasedPane] {
+        var out: [KeeperReleasedPane] = []
+        for record in registry.list() where record.connected {
+            let preamble = record.session.keeperRestorationPreamble()
+            let grid = record.session.gridSnapshot()
+            guard let handoff = record.session.releaseForKeeperHandoff() else { continue }
+            let pane = KeeperPaneRecord(
+                keeperUUID: UUID().uuidString,
+                paneKey: record.paneKey,
+                incarnation: record.incarnation,
+                worktreeId: record.worktreeId,
+                engineID: record.engine.id,
+                title: record.title,
+                cwd: handoff.cwd ?? record.spec.cwd,
+                argv: KeeperRestartArgv.stripped(record.session.config.argv),
+                preambleBase64: preamble.base64EncodedString(),
+                cols: grid.cols, rows: grid.rows,
+                hookToken: record.agentSession.hookToken,
+                repoPath: record.agentSession.worktree?.baseRepo.path,
+                worktreePath: record.agentSession.worktree?.path.path)
+            out.append(KeeperReleasedPane(paneRecord: pane, handoff: handoff))
+        }
+        return out
+    }
+
+    /// Boot side: adopt a pane that survived the previous app instance back into the
+    /// registry under the SAME `paneKey` with a bumped incarnation and a fresh handle.
+    ///
+    /// `agentSession` lets the app pass a supervisor-built session (worktree binding,
+    /// restored hook token) whose observers are chained rather than replaced — the
+    /// same contract as `adopt(agentSession:spec:)`; nil builds a service-owned one.
+    /// Either way the initial task prompt is marked delivered: it belongs to
+    /// incarnation 1 of a previous app run, never to a restored pane.
+    @discardableResult
+    public func adoptKeeperRestored(pane: KeeperPaneRecord, session: TerminalSession,
+                                    agentSession: AgentSession? = nil) throws -> TerminalSummary {
+        guard registry.record(forPaneKey: pane.paneKey) == nil else {
+            throw TerminalServiceError.invalidArgument(
+                "pane '\(pane.paneKey)' is already registered")
+        }
+        guard let engine = AgentEngineRegistry.engine(id: pane.engineID) else {
+            throw TerminalServiceError.unknownEngine(pane.engineID)
+        }
+        let spec = TerminalCreateSpec(
+            handle: TerminalRegistry.mintHandle(), paneKey: pane.paneKey,
+            worktreeId: pane.worktreeId, cwd: pane.cwd, engineID: pane.engineID,
+            prompt: "", title: pane.title,
+            initialCols: pane.cols, initialRows: pane.rows)
+        let agent = agentSession ?? makeAgentSession(spec: spec, engine: engine,
+                                                     session: session)
+        agent.terminalHandle = spec.handle
+        agent.paneKey = spec.paneKey
+        let record = TerminalRecord(handle: spec.handle, spec: spec, engine: engine,
+                                    session: session, agentSession: agent,
+                                    incarnation: pane.incarnation + 1)
+        record.initialPromptStarted = true
+        registry.register(record)
+        if agentSession != nil {
+            let upstream = agent.onStateChange
+            agent.onStateChange = { [weak self, weak record] state in
+                upstream?(state)
+                guard let self, let record else { return }
+                self.stateChanged(record, state: state)
+            }
+            attachHookFields(record)
+        } else {
+            wireStateChanges(record)
+        }
+        record.tracker.note(agent.state)
+        return record.summary()
+    }
+
     // MARK: - Read
 
     public func read(handle: String, cursor: Int? = nil, limit: Int = 200,

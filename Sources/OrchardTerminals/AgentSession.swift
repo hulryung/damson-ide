@@ -25,7 +25,9 @@ public final class AgentSession: ObservableObject, Identifiable {
 
     /// Unguessable per-run token embedded in this agent's hook config, so the loopback
     /// `HookServer` can route the agent CLI's lifecycle events back to this session.
-    public let hookToken = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+    /// Fresh by default; a keeper-restored session passes the previous incarnation's
+    /// token so the surviving CLI's installed hooks keep routing (T23).
+    public let hookToken: String
 
     /// Terminal identity minted at spawn and injected into the PTY env
     /// (`ORCHARD_TERMINAL_HANDLE` / `ORCHARD_PANE_KEY`). Set by `AgentSupervisor`;
@@ -70,11 +72,14 @@ public final class AgentSession: ObservableObject, Identifiable {
     public var onHookFields: ((HookStatusFields) -> Void)?
 
     public init(engine: AgentEngine, terminal: TerminalSession, worktree: Worktree?, task: AgentTask?,
-                detectorConfig: ReadinessDetector.Config = ReadinessDetector.Config()) {
+                detectorConfig: ReadinessDetector.Config = ReadinessDetector.Config(),
+                hookToken: String? = nil) {
         self.engine = engine
         self.terminal = terminal
         self.worktree = worktree
         self.task = task
+        self.hookToken = hookToken
+            ?? UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         self.detector = ReadinessDetector(engine: engine, config: detectorConfig)
 
         terminal.gridChanged

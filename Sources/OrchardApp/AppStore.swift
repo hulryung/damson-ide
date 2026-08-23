@@ -58,6 +58,12 @@ final class AppStore: ObservableObject {
     /// Currently focused tab group, so split/new-tab commands have a target.
     @Published var focusedGroupID: UUID?
 
+    /// T23: standardized repo path → hook-server port persisted at keeper handoff.
+    /// Filled by `KeeperRestart.prepareBoot` before `restore()` opens projects, so
+    /// each restored project's supervisor rebinds the port its surviving agents'
+    /// installed hook configs already point at.
+    var keeperHookPortHints: [String: UInt16] = [:]
+
     @Published var layouts: [WorkbenchKey: SplitNode] = [:]
 
     /// Bounded chat transcripts keyed by tab id (app-session lifetime).
@@ -515,7 +521,8 @@ final class AppStore: ObservableObject {
         do {
             let project = try ProjectSession(
                 repo: repo, settings: settings, repoID: record.id,
-                displayName: record.displayName)
+                displayName: record.displayName,
+                preferredHookPort: keeperHookPortHints[repo.standardizedFileURL.path])
             project.onEvent = { [weak self] project, event in
                 self?.handle(event, from: project)
             }

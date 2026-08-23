@@ -59,10 +59,14 @@ public final class TerminalRecord {
 
     private var cancellables = Set<AnyCancellable>()
 
+    /// `incarnation` seeds the respawn counter above 1 for a pane restored across an
+    /// app restart (T23 keeper adoption): the pane key survives the restart, so its
+    /// incarnation sequence must too.
     init(handle: String, spec: TerminalCreateSpec, engine: AgentEngine,
-         session: TerminalSession, agentSession: AgentSession) {
+         session: TerminalSession, agentSession: AgentSession, incarnation: Int = 1) {
         self.paneKey = spec.paneKey
         self.handle = handle
+        self.incarnation = max(1, incarnation)
         self.worktreeId = spec.worktreeId
         self.title = spec.title
         self.engine = engine

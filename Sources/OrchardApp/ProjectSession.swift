@@ -30,8 +30,10 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// unread dots, and notifications without views subscribing themselves.
     var onEvent: ((ProjectSession, OrchardEvent) -> Void)?
 
+    /// `preferredHookPort` (T23): the previous app generation's hook-server port for
+    /// this repo, so keeper-restored agents' installed hook configs keep working.
     init(repo: URL, settings: OrchardSettings, repoID: String? = nil,
-         displayName: String? = nil) throws {
+         displayName: String? = nil, preferredHookPort: UInt16? = nil) throws {
         self.repo = repo
         self.repoID = repoID
         if let displayName, !displayName.isEmpty {
@@ -44,6 +46,7 @@ final class ProjectSession: ObservableObject, Identifiable {
         self.agents = AgentSupervisor(
             configTemplate: settings.terminalConfig(),
             worktreeManager: service.manager)
+        agents.preferredHookPort = preferredHookPort
         try worktrees.start()
         agents.start()
         apply(settings)

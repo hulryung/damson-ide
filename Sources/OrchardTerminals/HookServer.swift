@@ -30,14 +30,30 @@ public final class HookServer {
 
     public init() {}
 
-    /// Start listening on a kernel-assigned loopback port. Returns the port, or nil
-    /// on failure (the caller then simply runs without Tier-1 hooks).
+    /// Start listening on a loopback port. With `preferredPort`, that port is tried
+    /// first — keeper restoration (T23) rebinds the previous app generation's port so
+    /// hook configs already installed in surviving agents' worktrees keep landing
+    /// here — falling back to a kernel-assigned port when it's busy. Returns the
+    /// bound port, or nil on failure (the caller then simply runs without Tier-1
+    /// hooks).
     @discardableResult
-    public func start() -> UInt16? {
+    public func start(preferredPort: UInt16? = nil) -> UInt16? {
+        if let preferredPort, preferredPort != 0,
+           let nwPort = NWEndpoint.Port(rawValue: preferredPort),
+           listen(on: nwPort) {
+            return port
+        }
+        return listen(on: .any) ? port : nil
+    }
+
+    private func listen(on nwPort: NWEndpoint.Port) -> Bool {
+        listener?.cancel()
+        listener = nil
+        port = 0
         let params = NWParameters.tcp
-        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: .any)
+        params.requiredLocalEndpoint = NWEndpoint.hostPort(host: "127.0.0.1", port: nwPort)
         params.allowLocalEndpointReuse = true
-        guard let listener = try? NWListener(using: params) else { return nil }
+        guard let listener = try? NWListener(using: params) else { return false }
         self.listener = listener
         listener.newConnectionHandler = { [weak self] conn in self?.accept(conn) }
 
@@ -52,7 +68,12 @@ public final class HookServer {
         }
         listener.start(queue: queue)
         _ = ready.wait(timeout: .now() + 2)
-        return port != 0 ? port : nil
+        if port == 0 {
+            listener.cancel()
+            self.listener = nil
+            return false
+        }
+        return true
     }
 
     public func stop() {
