@@ -207,6 +207,17 @@ struct TabGroupPane: View {
                 ForEach(TabKind.allCases) { kind in
                     Button(kind.label) { store.addTab(kind, to: group.id, key: key) }
                 }
+                // T29: remote shells. Only registered hosts appear — the app never
+                // offers a connection target the user did not add.
+                if !store.registeredHosts.isEmpty {
+                    Menu("Remote Shell") {
+                        ForEach(store.registeredHosts) { host in
+                            Button(host.name) {
+                                store.addRemoteShellTab(host: host, to: group.id, key: key)
+                            }
+                        }
+                    }
+                }
                 Divider()
                 Button("Split Right") { store.splitFocused(axis: .horizontal) }
                 Button("Split Down") { store.splitFocused(axis: .vertical) }
@@ -268,6 +279,16 @@ struct TabChip: View {
                         .font(.system(size: 10))
                     Text(tab.title)
                         .font(Tokens.fontRow)
+                    // The execution host, never inferred: a pane whose shell lives on
+                    // another machine says so in its label.
+                    if let host = tab.remoteHostLabel {
+                        Text(host)
+                            .font(Tokens.fontPill)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Tokens.rowHover))
+                            .help("This shell runs on \(host) over SSH")
+                    }
                     if let badge {
                         Text(badge)
                             .font(Tokens.fontPill)
@@ -326,7 +347,7 @@ struct TerminalPane: View {
     var body: some View {
         Group {
             if let session = store.damsonSession(for: tab, cwd: cwd) {
-                ZStack {
+                ZStack(alignment: .top) {
                     // The PTY stays in the tree so chat is an overlay, never a
                     // second session. Keyboard focus leaves it while chat is up.
                     DamsonTerminalView(session: session, isActive: tab.viewMode != .chat)
@@ -336,10 +357,22 @@ struct TerminalPane: View {
                             Task { await store.submitChat(for: tab) }
                         }
                     }
+                    // What the PTY ending proved, in verdict language: for a remote
+                    // pane a dropped connection is never a report that the remote work
+                    // stopped.
+                    if let note = store.connectionNotes[tab.id] {
+                        Text(note)
+                            .font(Tokens.fontRow)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(Tokens.surface)
+                    }
                 }
             } else {
-                PlaceholderPane(symbol: "terminal", title: "No session",
-                                detail: "Could not attach a terminal to this tab.")
+                PlaceholderPane(
+                    symbol: "terminal", title: "No session",
+                    detail: store.paneUnavailableDetail(for: tab))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)

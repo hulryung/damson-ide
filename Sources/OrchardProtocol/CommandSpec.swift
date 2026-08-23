@@ -162,6 +162,17 @@ public enum OrchardCommands {
                 flag("precheck", "Bounded shell command; nonzero skips the run", "command"),
                 flag("timeout", "Precheck timeout seconds (1...300)", "n"),
             ], positionals: ["list|show|create|edit|remove|run|runs"]),
+            // T29 remote hosts. `host check` is bounded: it reports
+            // reachable|auth-required|unreachable and never waits on a human, because
+            // BatchMode makes OpenSSH fail instead of prompting. Unreachable is loss of
+            // contact, never evidence that anything on the host stopped.
+            command("host", "Register and probe remote SSH hosts", [
+                flag("name", "Host name (an ~/.ssh/config alias, or your own label)", "name"),
+                flag("hostname", "Hostname or address to connect to", "host"),
+                flag("user", "Login user", "user"),
+                flag("port", "Port (default 22)", "n"),
+                flag("import", "With no name, list importable ~/.ssh/config hosts; with a name, import it"),
+            ], positionals: ["list|add|check", "name"]),
             command("reset", "Reset orchestration state", [flag("all", "Reset all"), flag("tasks", "Reset tasks"), flag("messages", "Reset messages")]),
         ]
     }()
@@ -183,6 +194,7 @@ public enum CommandGroup: String, Codable, CaseIterable, Sendable {
     case repo         // repo list/add/show
     case file         // file open/diff/open-changed/search
     case browser      // browser goto/…/tab (wave 2)
+    case host         // host list/add/check (T29 remote hosts)
     case automations  // scheduled prompts
     case guide        // agent-context, guide get <topic>
 }

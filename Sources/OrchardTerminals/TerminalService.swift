@@ -42,7 +42,7 @@ public final class TerminalService {
     @discardableResult
     public func create(worktreeId: String? = nil, cwd: String? = nil,
                        engineID: String = "shell", prompt: String = "",
-                       title: String? = nil,
+                       title: String? = nil, executionHostId: String = "local",
                        initialCols: Int? = nil, initialRows: Int? = nil) throws -> TerminalSummary {
         guard let engine = AgentEngineRegistry.engine(id: engineID) else {
             throw TerminalServiceError.unknownEngine(engineID)
@@ -55,6 +55,7 @@ public final class TerminalService {
             engineID: engineID,
             prompt: prompt,
             title: title,
+            executionHostId: executionHostId,
             initialCols: initialCols,
             initialRows: initialRows)
         let record = try spawn(spec: spec, engine: engine)
@@ -150,10 +151,14 @@ public final class TerminalService {
         // The pane kept its geometry — only the process is being replaced — so the new
         // PTY spawns at the outgoing session's current grid size, not the create-time one.
         let grid = record.session.gridSnapshot()
+        // A remote pane keeps its launch command: for `ssh:<host>` panes the prompt IS
+        // the `ssh` invocation, so dropping it would respawn the pane as a *local*
+        // shell — silently relocating the work, the one failure the host rules forbid.
+        let respawnPrompt = record.spec.executionHostId == "local" ? "" : record.spec.prompt
         let spec = TerminalCreateSpec(
             handle: handle, paneKey: record.paneKey, worktreeId: record.worktreeId,
-            cwd: record.spec.cwd, engineID: record.engine.id, prompt: "",
-            title: record.title,
+            cwd: record.spec.cwd, engineID: record.engine.id, prompt: respawnPrompt,
+            title: record.title, executionHostId: record.spec.executionHostId,
             initialCols: grid.cols, initialRows: grid.rows)
         // Spawn first: a factory failure must leave the current incarnation intact,
         // its handle still live.
@@ -572,7 +577,8 @@ public final class TerminalService {
             handle: record.handle,
             paneKey: record.paneKey,
             exitCode: record.exitCode ?? record.session.exitCode,
-            deliberate: deliberate))
+            deliberate: deliberate,
+            executionHostId: record.spec.executionHostId))
     }
 
     /// `.typeWhenIdle` engines get the task prompt exactly once, on the first idle,

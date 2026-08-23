@@ -74,6 +74,10 @@ final class AppStore: ObservableObject {
     var showSettings: (() -> Void)?
 
     private var shells: [UUID: DamsonSession] = [:]
+    /// T29: what a remote pane's PTY ending proved, in verdict language. Keyed by tab
+    /// id. Published so the pane can say "the connection ended" instead of implying the
+    /// remote work died — loss of contact is never evidence of death.
+    @Published private(set) var connectionNotes: [UUID: String] = [:]
     private var cancellables = Set<AnyCancellable>()
     private let defaults = UserDefaults.standard
     /// Pre-T8 sidebar list. Imported once into the registry, then deleted.
@@ -705,6 +709,24 @@ final class AppStore: ObservableObject {
         layouts[key] = node
     }
 
+    /// The hosts a "Remote Shell" menu can offer. Empty until `orchard host add`
+    /// registers one — Orchard never invents a connection target.
+    var registeredHosts: [HostRecord] { runtime?.hostRegistry.list() ?? [] }
+
+    /// Open a terminal tab whose shell runs on `host`. The PTY is local; its child is
+    /// `ssh -tt <host>`, and the tab carries the execution host so its label says so.
+    func addRemoteShellTab(host: HostRecord, to groupID: UUID, key: WorkbenchKey) {
+        guard let hostId = host.executionHostId else { return }
+        let tab = WorkbenchTab(kind: .terminal, title: host.name,
+                               executionHostId: hostId.rawValue)
+        updateLayout(key) { node in
+            _ = node.mutateGroup(groupID) { group in
+                group.tabs.append(tab)
+                group.selectedID = tab.id
+            }
+        }
+    }
+
     func addTab(_ kind: TabKind, to groupID: UUID, key: WorkbenchKey, agentID: UUID? = nil) {
         let tab = WorkbenchTab(kind: kind, agentID: agentID)
         updateLayout(key) { node in
@@ -729,6 +751,7 @@ final class AppStore: ObservableObject {
         if let session = shells.removeValue(forKey: tabID) {
             session.terminate()
         }
+        connectionNotes[tabID] = nil
         updateLayout(key) { node in
             _ = node.mutateGroup(groupID) { group in
                 guard group.tabs.count > 1 else { return }
@@ -892,12 +915,45 @@ final class AppStore: ObservableObject {
         if let existing = shells[tab.id] { return existing }
         var config = settings.terminalConfig()
         config.cwd = cwd.path
-        config.argv = DamsonConfig.defaultArgv()
+        // A remote pane runs `ssh -tt <host>` locally. If its host is no longer
+        // registered the pane opens nothing at all: silently falling back to a local
+        // shell under a remote label is the one outcome the host rules forbid.
+        let host = tab.executionHostId.flatMap { ExecutionHostId(rawValue: $0) } ?? .local
+        if host.isLocal {
+            config.argv = DamsonConfig.defaultArgv()
+        } else if let record = try? runtime?.hostRegistry.require(host: host) {
+            config.argv = SSHCommand.remoteShellArgv(for: record)
+        } else {
+            // No session, and deliberately no local fallback. The reason is computed
+            // on demand by `paneUnavailableDetail` rather than stored here: this runs
+            // inside a view update, where publishing state is not allowed.
+            return nil
+        }
         let size = paneSpawnSize()
         let session = DamsonSession(config: config,
                                     initialCols: size.cols, initialRows: size.rows)
+        // The PTY ending is the *connection* ending for a remote pane; what it proves
+        // about the far side runs through the one verdict vocabulary.
+        let tabID = tab.id
+        session.onExit = { [weak self] code in
+            Task { @MainActor in
+                self?.connectionNotes[tabID] =
+                    HostLiveness.describeConnectionEnd(host: host, exitCode: code)
+            }
+        }
         shells[tab.id] = session
         return session
+    }
+
+    /// Why a terminal pane has no session. A remote pane whose host is not registered
+    /// says so instead of silently opening a local shell.
+    func paneUnavailableDetail(for tab: WorkbenchTab) -> String {
+        if let note = connectionNotes[tab.id] { return note }
+        if let host = tab.remoteHostLabel {
+            return "No host named \(host) is registered, so nothing was launched. "
+                + "Register it with `orchard host add`."
+        }
+        return "Could not attach a terminal to this tab."
     }
 
     /// The spawn geometry for a new PTY pane. Every terminal pane renders in the same

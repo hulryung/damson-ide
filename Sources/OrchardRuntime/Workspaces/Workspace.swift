@@ -12,6 +12,11 @@ public struct Workspace: Codable, Equatable, Sendable, Identifiable {
     public var instanceId: String
     public var repoId: String
     public var path: String
+    /// The `ExecutionHostId` raw value (`local` or `ssh:<name>`) this workspace's files
+    /// and processes live on — stamped, never inferred (T29,
+    /// docs/design/remote-hosts.md). Remote worktrees are a later stage, so today every
+    /// workspace is `local`; the field exists so per-host partitioning has something to
+    /// key on when they land.
     public var hostId: String
     public var displayName: String
     public var comment: String
