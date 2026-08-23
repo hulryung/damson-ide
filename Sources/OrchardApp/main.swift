@@ -74,6 +74,7 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
     @MainActor @objc func showBrowserTab(_ sender: Any?) { store.selectKind(.browser) }
     @MainActor @objc func splitRight(_ sender: Any?) { store.splitFocused(axis: .horizontal) }
     @MainActor @objc func splitDown(_ sender: Any?) { store.splitFocused(axis: .vertical) }
+    @MainActor @objc func toggleChatView(_ sender: Any?) { store.toggleFocusedViewMode() }
     @MainActor @objc func refreshDiff(_ sender: Any?) {
         if let record = store.selectedRecord { Task { await record.refresh() } }
     }
@@ -217,6 +218,12 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
         splitD.keyEquivalentModifierMask = [.command, .shift]
         splitD.target = self
         viewMenu.addItem(splitD)
+        viewMenu.addItem(.separator())
+        let toggleChat = NSMenuItem(title: "Toggle Chat View", action: #selector(toggleChatView(_:)),
+                                    keyEquivalent: "j")
+        toggleChat.keyEquivalentModifierMask = [.command, .shift]
+        toggleChat.target = self
+        viewMenu.addItem(toggleChat)
         viewMenu.addItem(.separator())
         let zai = NSMenuItem(title: "Zoom All In", action: #selector(zoomAllIn(_:)), keyEquivalent: "=")
         zai.keyEquivalentModifierMask = [.command, .option]

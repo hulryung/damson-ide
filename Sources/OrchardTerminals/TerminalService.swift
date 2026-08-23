@@ -89,8 +89,12 @@ public final class TerminalService {
             guard let self, let record else { return }
             self.stateChanged(record, state: state)
         }
-        // Seed the tracker with the session's current state so an already-idle agent
-        // fast-paths `wait --for tui-idle` immediately after adoption.
+        attachHookFields(record)
+        // Seed the tracker so an already-idle agent fast-paths `wait --for tui-idle`
+        // and the chat projector sees the task prompt without a grid scrape.
+        if let prompt = agentSession.task?.prompt, !prompt.isEmpty {
+            record.tracker.lastPrompt = prompt
+        }
         record.tracker.note(agentSession.state)
         return record.summary()
     }
@@ -250,6 +254,7 @@ public final class TerminalService {
                         config: pipeline) { record.agentSession.state }
                     record.tracker.lastPrompt = text
                     record.agentSession.notePromptDelivered()
+                    publishStatus(record)
                 } else {
                     // Queued into a busy agent: still give the TUI its settle beat,
                     // but there is no idle departure to verify.
@@ -342,6 +347,19 @@ public final class TerminalService {
         }
     }
 
+    /// Live handle for a durable pane key (survives remints). Chat view-mode
+    /// addresses the PTY by pane, not by a possibly-stale spawn handle.
+    public func liveHandle(forPaneKey paneKey: String) -> String? {
+        registry.record(forPaneKey: paneKey)?.handle
+    }
+
+    /// Fold hook/OSC chat fields into one terminal's status record and publish
+    /// when they change. Additive: state-only callers keep using `agentStatus`.
+    public func applyHookStatus(handle: String, fields: HookStatusFields) throws {
+        let record = try registry.resolve(handle)
+        hookFieldsChanged(record, fields: fields)
+    }
+
     // MARK: - Spawn plumbing
 
     private func spawn(spec: TerminalCreateSpec, engine: AgentEngine) throws -> TerminalRecord {
@@ -380,14 +398,34 @@ public final class TerminalService {
             guard let self, let record else { return }
             self.stateChanged(record, state: state)
         }
+        attachHookFields(record)
     }
 
-    private func stateChanged(_ record: TerminalRecord, state: AgentRuntimeState) {
-        record.tracker.note(state)
+    private func attachHookFields(_ record: TerminalRecord) {
+        let upstream = record.agentSession.onHookFields
+        record.agentSession.onHookFields = { [weak self, weak record] fields in
+            upstream?(fields)
+            guard let self, let record else { return }
+            self.hookFieldsChanged(record, fields: fields)
+        }
+    }
+
+    private func hookFieldsChanged(_ record: TerminalRecord, fields: HookStatusFields) {
+        if record.tracker.applyFields(fields) {
+            publishStatus(record)
+        }
+    }
+
+    private func publishStatus(_ record: TerminalRecord) {
         let snapshot = record.statusSnapshot()
         for continuation in record.statusContinuations.values {
             continuation.yield(snapshot)
         }
+    }
+
+    private func stateChanged(_ record: TerminalRecord, state: AgentRuntimeState) {
+        record.tracker.note(state)
+        publishStatus(record)
 
         switch state {
         case .idle:
