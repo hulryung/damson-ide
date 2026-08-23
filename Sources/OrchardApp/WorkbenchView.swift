@@ -329,7 +329,9 @@ struct TerminalPane: View {
                 ZStack {
                     // The PTY stays in the tree so chat is an overlay, never a
                     // second session. Keyboard focus leaves it while chat is up.
-                    DamsonTerminalView(session: session, isActive: tab.viewMode != .chat)
+                    // TerminalFitHost snaps the surface to whole cells so the
+                    // first row is never half-clipped (T30).
+                    TerminalFitHost(session: session, isActive: tab.viewMode != .chat)
                         .id(tab.agentID ?? tab.id)
                     if tab.isAgentTab, tab.viewMode == .chat {
                         ChatView(controller: store.chatController(for: tab)) {
