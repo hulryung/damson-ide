@@ -156,17 +156,25 @@ public final class WorkspaceCommandHandler: CommandHandler, @unchecked Sendable 
         let cwd = params.string("cwd")
         let force = params.bool("force") ?? false
         let runHooks = params.bool("runHooks", "run-hooks") ?? false
+        let deleteBranch = params.bool("delete-branch", "deleteBranch") ?? false
+        let forceBranch = params.bool("force-branch", "forceBranch") ?? false
         let workspace = try await service.show(selector: selector, cwd: cwd)
         // A remote delete needs its preflight counted on the host first, so it takes
         // the async remote path. Failing to reach the host refuses the delete rather
         // than guessing the worktree was clean (T32).
         let result: WorkspaceRemoveResult
         if WorkspaceService.isRemote(workspace) {
+            if deleteBranch || forceBranch {
+                throw WorkspaceError(
+                    "remote_unsupported",
+                    "deleting a remote worktree's branch is not supported yet")
+            }
             result = try await service.removeRemoteWorktree(workspace, force: force,
                                                             runHooks: runHooks)
         } else {
             result = try await service.remove(
-                selector: selector, cwd: cwd, force: force, runHooks: runHooks)
+                selector: selector, cwd: cwd, force: force, runHooks: runHooks,
+                deleteBranch: deleteBranch, forceBranch: forceBranch)
         }
         if !result.removed && !result.preflightWarnings.isEmpty {
             throw WorkspaceError(
@@ -174,7 +182,10 @@ public final class WorkspaceCommandHandler: CommandHandler, @unchecked Sendable 
                 result.preflightWarnings.joined(separator: "; "))
         }
         return try JSONBridge.value(RemoveResult(removed: result.removed,
-                                                 warning: result.warning))
+                                                 warning: result.warning,
+                                                 branch: result.branch,
+                                                 branchMerged: result.branchMerged,
+                                                 branchDeleted: result.branchDeleted))
     }
 
     private func requiredSelector(_ params: JSONValue) throws -> String {
@@ -216,6 +227,9 @@ private struct CreateResult: Encodable {
 private struct RemoveResult: Encodable {
     var removed: Bool
     var warning: String?
+    var branch: String?
+    var branchMerged: Bool?
+    var branchDeleted: Bool?
 }
 
 private extension JSONValue {

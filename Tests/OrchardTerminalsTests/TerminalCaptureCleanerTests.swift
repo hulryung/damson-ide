@@ -88,9 +88,17 @@ final class TerminalCaptureCleanerTests: XCTestCase {
             "dimmed text",
             "building the thing",
             "hidden cursor marker",
-            "bellandbackspace",
+            "bell and backspace",
         ])
         XCTAssertEqual(report.escapeRemnantLines, 4)
+    }
+
+    /// Stripping a remnant between two printables must not glue them into one word.
+    func testStrippingCodesDoesNotJoinAdjacentFragments() {
+        let report = TerminalCaptureCleaner.clean([
+            "Sent\u{1B}[0mworker_done\u{1B}[0mwith --outcome succeeded",
+        ])
+        XCTAssertEqual(report.lines, ["Sent worker_done with --outcome succeeded"])
     }
 
     func testDropsSeparatorRulesAndBoxBorders() {
@@ -195,5 +203,70 @@ final class TerminalCaptureCleanerTests: XCTestCase {
         let report = TerminalCaptureCleaner.clean([])
         XCTAssertEqual(report.lines, [])
         XCTAssertEqual(report.inputLineCount, 0)
+    }
+
+    /// A collapsed TUI paint of the same letters as a well-spaced raw line must
+    /// keep the spaced original, not the concatenated one.
+    func testPrefersRawCaptureSpacingOverCollapsedRepaint() {
+        let report = TerminalCaptureCleaner.clean([
+            "Update available! Run: brew upgrade claude-code@latest",
+            "Updateavailable!Run:brewupgradeclaude-code@latest",
+            "Orchard dogfood T38 completed",
+            "OrcharddogfoodT38completed$",
+            "/Users/dkkang/Library/Caches/orchard/Orchard.app/Contents/Helpers/orchard send --from",
+            "Bash(/Users/dkkang/Library/Caches/orchard/Orchard.app/Contents/Helpers/orchardsend--from",
+        ])
+        let joined = report.lines.joined(separator: "\n")
+        XCTAssertTrue(joined.contains("Update available! Run: brew upgrade claude-code@latest"), joined)
+        XCTAssertFalse(joined.contains("Updateavailable!"), joined)
+        XCTAssertTrue(joined.contains("Orchard dogfood T38 completed"), joined)
+        XCTAssertFalse(joined.contains("OrcharddogfoodT38completed"), joined)
+        XCTAssertTrue(joined.contains("orchard send --from"), joined)
+        XCTAssertFalse(joined.contains("orchardsend"), joined)
+    }
+
+    func testDropsSwiftDebugJSONValueDump() {
+        let report = TerminalCaptureCleaner.clean([
+            #"object(["type":OrchardProtocol.JSONValue.string("worker_done"),"count":OrchardProtocol.JSONValue.number(1.0"#,
+            #"),"lifecycle":OrchardProtocol.JSONValue.object(["taskId":OrchardProtocol.JSONValue.string("task_a2cfa1d1dcd"#,
+            "real work survived",
+        ])
+        XCTAssertEqual(report.lines, ["real work survived"])
+        XCTAssertEqual(report.debugDumpLines, 2)
+        XCTAssertEqual(report.inputLineCount, 3)
+    }
+
+    // MARK: - Dogfood cycle 2
+
+    private func dogfood2Capture() throws -> [String] {
+        let url = try XCTUnwrap(
+            Bundle.module.url(forResource: "Fixtures/claude-code-tui-capture-dogfood-2",
+                              withExtension: "txt"),
+            "the dogfood-2 capture fixture is missing from the test bundle")
+        let text = try String(contentsOf: url, encoding: .utf8)
+        var lines = text.components(separatedBy: "\n")
+        if lines.last == "" { lines.removeLast() }
+        return lines
+    }
+
+    func testDogfood2CapturePreservesWordSpacingAndDropsSendDump() throws {
+        let raw = try dogfood2Capture()
+        XCTAssertEqual(raw.count, 630, "the fixture must stay the untouched capture")
+
+        let report = TerminalCaptureCleaner.clean(raw)
+        XCTAssertEqual(report.inputLineCount, raw.count)
+        XCTAssertGreaterThan(report.debugDumpLines, 0)
+
+        let cleaned = report.lines.joined(separator: "\n")
+        XCTAssertTrue(cleaned.contains("orchard send"), cleaned)
+        XCTAssertFalse(cleaned.contains("orchardsend"),
+                       "collapsed orchard+send survived: \(cleaned)")
+        XCTAssertTrue(cleaned.contains("Orchard dogfood T38 completed"), cleaned)
+        XCTAssertFalse(cleaned.contains("OrcharddogfoodT38completed"),
+                       "collapsed scratch-file line survived")
+        XCTAssertFalse(cleaned.contains("OrchardProtocol.JSONValue"),
+                       "Swift debug dump leaked into the readable face")
+        XCTAssertFalse(cleaned.contains("object(["),
+                       "Swift debug dump leaked into the readable face")
     }
 }

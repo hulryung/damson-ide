@@ -112,8 +112,10 @@ func formatHuman(method: String, result: JSONValue?) -> String {
         return formatTerminalList(result)
     case "terminal-read":
         return (object?["lines"]?.arrayValue ?? []).compactMap(\.stringValue).joined(separator: "\n")
+    case "send":
+        return OrchardHumanFormatter.send(result)
     default:
-        return result.map(String.init(describing:)) ?? "ok"
+        return OrchardHumanFormatter.json(result)
     }
 }
 

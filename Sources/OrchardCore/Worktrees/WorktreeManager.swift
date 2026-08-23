@@ -36,6 +36,27 @@ public struct GitError: Error, CustomStringConvertible {
     public var description: String { message }
 }
 
+/// `git branch -d` refused because the branch still holds unmerged commits.
+///
+/// The message is git's own first line (`error: the branch 'X' is not fully merged.`)
+/// so callers can surface it verbatim — wrapping it in a `git … failed` prefix would
+/// lose the contract T40's `--delete-branch` path advertises.
+public struct BranchDeletionError: Error, CustomStringConvertible {
+    public let branch: String
+    public let message: String
+    public init(branch: String, message: String) {
+        self.branch = branch
+        self.message = message
+    }
+    public var description: String { message }
+
+    /// Git's stable first line for an unmerged `branch -d`. Hints after it vary by
+    /// git version and config, so they are not part of the typed contract.
+    public static func unmergedMessage(for branch: String) -> String {
+        "error: the branch '\(branch)' is not fully merged."
+    }
+}
+
 /// What deleting a worktree would destroy. Surfaced in the delete confirmation so the user
 /// is never asked a yes/no question without being told the stakes — an agent's only output
 /// often lives in uncommitted files.
@@ -43,9 +64,30 @@ public struct WorktreeDeletionPreflight: Sendable {
     public let worktree: Worktree
     public let status: GitWorktreeStatus
     /// Reasons deletion would lose work. Empty means it's safe to remove without asking.
+    /// Branch merged/unmerged state is *not* a warning — it is named separately so a
+    /// clean worktree with an unmerged branch is still `isSafe` until the caller
+    /// also asks to delete the branch.
     public let warnings: [String]
+    /// Whether `worktree.branch` is fully merged into its upstream (or HEAD).
+    public let branchMerged: Bool
 
     public var isSafe: Bool { warnings.isEmpty }
+
+    /// Preflight sentence naming the branch and its merged/unmerged state.
+    public var branchStatusMessage: String {
+        if branchMerged {
+            return "branch '\(worktree.branch)' is merged"
+        }
+        return "branch '\(worktree.branch)' is not fully merged"
+    }
+
+    public init(worktree: Worktree, status: GitWorktreeStatus, warnings: [String],
+                branchMerged: Bool) {
+        self.worktree = worktree
+        self.status = status
+        self.warnings = warnings
+        self.branchMerged = branchMerged
+    }
 }
 
 /// Creates, tracks, and tears down git worktrees so each agent works in isolation.
@@ -401,7 +443,19 @@ public final class WorktreeManager {
         if atRisk > 0 {
             warnings.append("\(atRisk) \(atRisk == 1 ? "commit is" : "commits are") not pushed anywhere")
         }
-        return WorktreeDeletionPreflight(worktree: wt, status: status, warnings: warnings)
+        let merged = isBranchMerged(wt.branch, in: wt.baseRepo)
+        return WorktreeDeletionPreflight(worktree: wt, status: status, warnings: warnings,
+                                         branchMerged: merged)
+    }
+
+    /// Whether `name` is fully merged the way `git branch -d` would decide: ancestor
+    /// of its upstream if one exists, otherwise ancestor of `HEAD` in `repo`.
+    public func isBranchMerged(_ name: String, in repo: URL) -> Bool {
+        let upstream = git.line(in: repo, ["rev-parse", "--abbrev-ref", "\(name)@{upstream}"])
+        let target = (upstream?.isEmpty == false) ? upstream! : "HEAD"
+        guard let result = try? git.capture(["-C", repo.path, "merge-base", "--is-ancestor",
+                                             name, target]) else { return false }
+        return result.status == 0
     }
 
     /// Run the `orchard.yaml` archive script inside `wt`. Returns nil when the project
@@ -419,11 +473,20 @@ public final class WorktreeManager {
     /// user can inspect/merge; pass `force: true` to discard uncommitted work.
     ///
     /// The branch is left behind on purpose — removing a checkout shouldn't destroy commits.
-    /// `deleteBranch: true` removes it too, for the explicit "discard this experiment" path.
+    /// `deleteBranch: true` runs `git branch -d` after a successful removal. Unmerged
+    /// branches are refused with git's exact unmerged message unless `forceBranch`
+    /// (then `git branch -D`). `--force-branch` implies `--delete-branch`.
     @discardableResult
-    public func remove(_ wt: Worktree, force: Bool = false, deleteBranch: Bool = false) throws -> Bool {
+    public func remove(_ wt: Worktree, force: Bool = false, deleteBranch: Bool = false,
+                       forceBranch: Bool = false) throws -> Bool {
         try Self.assertRemovable(wt)
+        let dropBranch = deleteBranch || forceBranch
         return try queue.sync {
+            if dropBranch && !forceBranch && !isBranchMerged(wt.branch, in: wt.baseRepo) {
+                throw BranchDeletionError(
+                    branch: wt.branch,
+                    message: BranchDeletionError.unmergedMessage(for: wt.branch))
+            }
             var args = ["-C", wt.baseRepo.path, "worktree", "remove", wt.path.path]
             if force { args.append("--force") }
             do {
@@ -432,16 +495,30 @@ public final class WorktreeManager {
                 if !force { return false } // likely dirty; keep it
                 throw error
             }
-            if deleteBranch {
-                // `-d`, never `-D`: git refuses to delete a branch holding unmerged commits,
-                // which is exactly the work the user would not want silently destroyed. The
-                // branch survives as the recovery path; `forceDeleteBranch` is the explicit
-                // opt-in for throwing it away.
-                _ = try? git.run(in: wt.baseRepo, ["branch", "-d", wt.branch])
-            }
             clearMeta(repo: wt.baseRepo, id: wt.id.uuidString)
+            if dropBranch {
+                let flag = forceBranch ? "-D" : "-d"
+                do {
+                    try git.run(in: wt.baseRepo, ["branch", flag, wt.branch])
+                } catch let error as GitError {
+                    // Worktree is already gone. Surface git's unmerged text rather than
+                    // a wrapped `git … failed` prefix, and keep the branch as recovery.
+                    let gitText = Self.unmergedText(from: error.message, branch: wt.branch)
+                    throw BranchDeletionError(branch: wt.branch, message: gitText)
+                }
+            }
             return true
         }
+    }
+
+    /// Pull git's unmerged first line out of a wrapped `GitError` message.
+    private static func unmergedText(from wrapped: String, branch: String) -> String {
+        let expected = BranchDeletionError.unmergedMessage(for: branch)
+        if let range = wrapped.range(of: expected) {
+            return String(wrapped[range])
+        }
+        if wrapped.contains("not fully merged") { return expected }
+        return expected
     }
 
     /// Whether the branch survived a `remove(deleteBranch: true)` because it still holds

@@ -41,4 +41,52 @@ final class CLIFormattingTests: XCTestCase {
         XCTAssertTrue(output.contains("/home/ci/worktrees/apricot"), output)
         XCTAssertTrue(output.contains("Warning: ssh:build: unreachable. Showing the last known worktrees."), output)
     }
+
+    func testWorktreeRmAdvertisesDeleteBranchFlags() throws {
+        let spec = try XCTUnwrap(OrchardCommands.all.first { $0.name == "worktree" })
+        let names = spec.flags.map(\.name)
+        XCTAssertTrue(names.contains("delete-branch"), names.joined(separator: ","))
+        XCTAssertTrue(names.contains("force-branch"), names.joined(separator: ","))
+        let help = CommandHelpRenderer.render(spec)
+        XCTAssertTrue(help.contains("--delete-branch"), help)
+        XCTAssertTrue(help.contains("--force-branch"), help)
+    }
+
+    /// Dogfood-2: `orchard send` without `--json` printed a Swift debug dump of
+    /// `JSONValue`. The human face is a compact receipt; anything else is JSON.
+    func testSendHumanOutputIsAReceiptNotASwiftDump() {
+        let result: JSONValue = .object([
+            "type": .string("worker_done"),
+            "count": .number(1),
+            "runId": .string("run_abc"),
+            "messageIds": .array([.string("msg_1")]),
+            "lifecycle": .object([
+                "status": .string("settled"),
+                "outcome": .string("succeeded"),
+                "taskId": .string("task_abc"),
+                "dispatchId": .string("ctx_abc"),
+            ]),
+        ])
+        let output = OrchardHumanFormatter.send(result)
+        XCTAssertTrue(output.contains("sent worker_done"), output)
+        XCTAssertTrue(output.contains("settled"), output)
+        XCTAssertTrue(output.contains("succeeded"), output)
+        XCTAssertTrue(output.contains("task:task_abc"), output)
+        XCTAssertFalse(output.contains("OrchardProtocol.JSONValue"), output)
+        XCTAssertFalse(output.contains("object(["), output)
+    }
+
+    func testJSONFallbackIsJSONNotASwiftDump() throws {
+        let result: JSONValue = .object([
+            "type": .string("worker_done"),
+            "count": .number(1),
+        ])
+        let output = OrchardHumanFormatter.json(result)
+        XCTAssertTrue(output.contains("\"type\""), output)
+        XCTAssertTrue(output.contains("worker_done"), output)
+        XCTAssertFalse(output.contains("OrchardProtocol.JSONValue"), output)
+        XCTAssertFalse(output.contains("object(["), output)
+        let parsed = try JSONDecoder().decode(JSONValue.self, from: Data(output.utf8))
+        XCTAssertEqual(parsed.objectValue?["type"]?.stringValue, "worker_done")
+    }
 }

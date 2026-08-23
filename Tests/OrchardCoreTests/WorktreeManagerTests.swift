@@ -222,8 +222,48 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertTrue(mgr.localBranches(in: base).contains("orchard/keep-branch"))
 
         let drop = try mgr.create(base: base, branch: "orchard/drop-branch", from: ref)
+        let mergedPreflight = mgr.deletionPreflight(drop)
+        XCTAssertTrue(mergedPreflight.branchMerged)
+        XCTAssertEqual(mergedPreflight.branchStatusMessage,
+                       "branch 'orchard/drop-branch' is merged")
         XCTAssertTrue(try mgr.remove(drop, deleteBranch: true))
         XCTAssertFalse(mgr.localBranches(in: base).contains("orchard/drop-branch"))
+    }
+
+    /// T40: `--delete-branch` is `git branch -d`. Unmerged branches are refused with
+    /// git's exact first line and the worktree is left in place; `--force-branch`
+    /// uses `-D` and actually deletes it.
+    func testDeleteBranchRefusesUnmergedUnlessForceBranch() throws {
+        let repo = try makeRepo()
+        let mgr = WorktreeManager(root: tmp.appendingPathComponent("worktrees"))
+        let base = try mgr.detectBaseRepo(from: repo)
+        let ref = try mgr.resolveRef("HEAD", in: base)
+        let wt = try mgr.create(base: base, branch: "orchard/unmerged", from: ref)
+
+        try "extra\n".write(to: wt.path.appendingPathComponent("extra.txt"),
+                            atomically: true, encoding: .utf8)
+        XCTAssertEqual(try git(["add", "."], cwd: wt.path), 0)
+        XCTAssertEqual(try git(["commit", "-q", "-m", "unmerged work"], cwd: wt.path), 0)
+
+        let preflight = mgr.deletionPreflight(wt)
+        XCTAssertFalse(preflight.branchMerged)
+        XCTAssertEqual(preflight.branchStatusMessage,
+                       "branch 'orchard/unmerged' is not fully merged")
+        XCTAssertTrue(preflight.warnings.contains { $0.contains("not pushed") })
+
+        XCTAssertThrowsError(try mgr.remove(wt, deleteBranch: true)) { error in
+            let refusal = error as? BranchDeletionError
+            XCTAssertEqual(refusal?.branch, "orchard/unmerged")
+            XCTAssertEqual(refusal?.message,
+                           BranchDeletionError.unmergedMessage(for: "orchard/unmerged"))
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: wt.path.path),
+                      "an unmerged --delete-branch must not remove the worktree")
+        XCTAssertTrue(mgr.localBranches(in: base).contains("orchard/unmerged"))
+
+        XCTAssertTrue(try mgr.remove(wt, deleteBranch: true, forceBranch: true))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: wt.path.path))
+        XCTAssertFalse(mgr.localBranches(in: base).contains("orchard/unmerged"))
     }
 
     func testLocalBranchesListsCurrentBranchFirst() throws {

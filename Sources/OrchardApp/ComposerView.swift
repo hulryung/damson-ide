@@ -201,6 +201,7 @@ struct DeleteWorktreeSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var deleteBranch = false
+    @State private var forceBranch = false
     @State private var errorMessage: String?
 
     private var preflight: WorktreeDeletionPreflight {
@@ -243,8 +244,17 @@ struct DeleteWorktreeSheet: View {
                 )
             }
 
+            Text(flight.branchStatusMessage)
+                .font(Tokens.fontMeta)
+                .foregroundStyle(flight.branchMerged ? Tokens.textSecondary : .orange)
+
             Toggle("Also delete the branch", isOn: $deleteBranch)
                 .font(Tokens.fontMeta)
+
+            if deleteBranch && !flight.branchMerged {
+                Toggle("Force delete unmerged branch", isOn: $forceBranch)
+                    .font(Tokens.fontMeta)
+            }
 
             if let errorMessage {
                 Text(errorMessage)
@@ -270,7 +280,8 @@ struct DeleteWorktreeSheet: View {
     private func performDelete(force: Bool) {
         do {
             let removed = try store.deleteWorktree(
-                record, in: project, force: force, deleteBranch: deleteBranch)
+                record, in: project, force: force, deleteBranch: deleteBranch,
+                forceBranch: forceBranch && deleteBranch)
             if !removed {
                 errorMessage = "This worktree has uncommitted changes. Press Delete again to discard them."
                 return

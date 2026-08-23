@@ -280,4 +280,7 @@ public struct WorkspaceRemoveResult: Sendable {
     public var removed: Bool
     public var warning: String?
     public var preflightWarnings: [String]
+    public var branch: String? = nil
+    public var branchMerged: Bool? = nil
+    public var branchDeleted: Bool? = nil
 }

@@ -838,13 +838,16 @@ final class AppStore: ObservableObject {
     }
 
     func deleteWorktree(_ record: WorktreeRecord, in project: ProjectSession,
-                        force: Bool, deleteBranch: Bool) throws -> Bool {
+                        force: Bool, deleteBranch: Bool, forceBranch: Bool = false) throws -> Bool {
         if project.isRemote {
             throw GitError("remote worktrees are removed through the orchard CLI")
         }
         project.agents.retireAgents(inWorktree: record.id)
+        // Same runtime path as `orchard worktree rm --delete-branch` / `--force-branch`:
+        // WorktreeService → WorktreeManager.remove. The checkbox is not a parallel
+        // delete; it is the same flag the CLI sends.
         let deletion = try project.worktrees.deleteWorktree(
-            record, force: force, deleteBranch: deleteBranch)
+            record, force: force, deleteBranch: deleteBranch, forceBranch: forceBranch)
         guard deletion.removed else { return false }
         meta.remove(record.id)
         layouts[.worktree(record.id)] = nil

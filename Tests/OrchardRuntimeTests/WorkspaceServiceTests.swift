@@ -269,6 +269,22 @@ final class WorkspaceServiceTests: XCTestCase {
         XCTAssertTrue(forced.removed)
     }
 
+    func testRemovePreflightNamesTheBranch() async throws {
+        let repo = try makeRepo()
+        let service = makeService()
+        let record = try service.addRepo(path: repo)
+        let created = try await service.create(WorkspaceCreateRequest(repo: record.id, name: "named-br"))
+        try "wip\n".write(to: URL(fileURLWithPath: created.workspace.path)
+            .appendingPathComponent("wip.txt"), atomically: true, encoding: .utf8)
+        let refused = try service.remove(selector: created.workspace.id, force: false)
+        XCTAssertFalse(refused.removed)
+        XCTAssertEqual(refused.branch, created.workspace.branch)
+        XCTAssertEqual(refused.branchMerged, true)
+        XCTAssertTrue(refused.preflightWarnings.contains {
+            $0.contains("branch '\(created.workspace.branch)' is merged")
+        })
+    }
+
     // MARK: - Repo registry (T8)
 
     func testRepoPathLookupAndRemoveBySelector() throws {

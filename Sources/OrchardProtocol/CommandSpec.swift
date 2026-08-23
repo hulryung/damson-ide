@@ -172,6 +172,8 @@ public enum OrchardCommands {
                 flag("parent-worktree", "Parent worktree", "selector"),
                 flag("no-parent", "Do not nest under a parent"),
                 flag("force", "Force remove a dirty worktree"),
+                flag("delete-branch", "After a successful removal, delete the worktree's branch (git branch -d)"),
+                flag("force-branch", "Force-delete an unmerged branch (git branch -D); implies --delete-branch"),
                 flag("cwd", "Working directory for resolution", "path"),
                 flag("pinned", "Pinned"),
                 flag("unread", "Unread"),
