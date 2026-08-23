@@ -80,6 +80,41 @@ public struct AgentStatusSnapshot: Codable, Equatable, Sendable {
     public let projection: AgentRuntimeProjection?
     /// Rolling log of previous states, newest last, capped.
     public let stateHistory: [AgentStateHistoryRecord]
+    /// Most recent assistant-message preview from a hook/OSC payload. Optional so
+    /// absence ("no new info") is distinct from an empty string.
+    public let lastAssistantMessage: String?
+    /// Newest completed-turn assistant text, kept across the next `working`.
+    /// A batched done→working publication can clear `lastAssistantMessage` before
+    /// a subscriber observes it (Orca's `lastCompletedAssistantMessage`).
+    public let lastCompletedAssistantMessage: String?
+    /// Tool the agent reported it is currently using, when the hook carried one.
+    public let toolName: String?
+
+    public init(state: AgentStatusState, prompt: String, updatedAt: Double,
+                stateStartedAt: Double, agentType: String, paneKey: String,
+                terminalHandle: String, worktreeId: String? = nil,
+                terminalTitle: String? = nil, isRunningAgent: Bool,
+                projection: AgentRuntimeProjection?,
+                stateHistory: [AgentStateHistoryRecord] = [],
+                lastAssistantMessage: String? = nil,
+                lastCompletedAssistantMessage: String? = nil,
+                toolName: String? = nil) {
+        self.state = state
+        self.prompt = prompt
+        self.updatedAt = updatedAt
+        self.stateStartedAt = stateStartedAt
+        self.agentType = agentType
+        self.paneKey = paneKey
+        self.terminalHandle = terminalHandle
+        self.worktreeId = worktreeId
+        self.terminalTitle = terminalTitle
+        self.isRunningAgent = isRunningAgent
+        self.projection = projection
+        self.stateHistory = stateHistory
+        self.lastAssistantMessage = lastAssistantMessage
+        self.lastCompletedAssistantMessage = lastCompletedAssistantMessage
+        self.toolName = toolName
+    }
 }
 
 /// Maximum history entries kept per agent (Orca's `AGENT_STATE_HISTORY_MAX`).
@@ -102,6 +137,36 @@ final class AgentStatusTracker {
     private var history: [AgentStateHistoryRecord] = []
     /// The most recent prompt delivered (send pipeline / initial task prompt).
     var lastPrompt = ""
+    var lastAssistantMessage = ""
+    var lastCompletedAssistantMessage = ""
+    var lastToolName = ""
+
+    /// Fold hook/OSC chat fields into the factual record. Returns true when a
+    /// field actually changed so callers can publish even without a state flip —
+    /// assistant text often arrives mid-`working`.
+    @discardableResult
+    func applyFields(_ fields: HookStatusFields) -> Bool {
+        var changed = false
+        if let prompt = fields.prompt, !prompt.isEmpty, prompt != lastPrompt {
+            lastPrompt = prompt
+            changed = true
+        }
+        if let message = fields.lastAssistantMessage, message != lastAssistantMessage {
+            lastAssistantMessage = message
+            changed = true
+            // A Stop payload can land after we are already `done`; keep the
+            // completed-turn copy so a late subscriber still sees the reply.
+            if statusState == .done {
+                lastCompletedAssistantMessage = message
+            }
+        }
+        if let tool = fields.toolName, tool != lastToolName {
+            lastToolName = tool
+            changed = true
+        }
+        if changed { updatedAt = Date() }
+        return changed
+    }
 
     /// Record a fused-state transition. Same-state confirmations refresh `updatedAt`
     /// only, so `stateStartedAt` keeps meaning "when this state began".
@@ -110,6 +175,9 @@ final class AgentStatusTracker {
         updatedAt = now
         currentState = state
         let mapped = state.statusState
+        if mapped == .done, !lastAssistantMessage.isEmpty {
+            lastCompletedAssistantMessage = lastAssistantMessage
+        }
         guard mapped != statusState else { return }
         history.append(AgentStateHistoryRecord(
             state: statusState, prompt: lastPrompt,
@@ -135,6 +203,10 @@ final class AgentStatusTracker {
             terminalTitle: title,
             isRunningAgent: isRunningAgent,
             projection: isRunningAgent ? currentState.runtimeProjection : nil,
-            stateHistory: history)
+            stateHistory: history,
+            lastAssistantMessage: lastAssistantMessage.isEmpty ? nil : lastAssistantMessage,
+            lastCompletedAssistantMessage: lastCompletedAssistantMessage.isEmpty
+                ? nil : lastCompletedAssistantMessage,
+            toolName: lastToolName.isEmpty ? nil : lastToolName)
     }
 }

@@ -61,6 +61,9 @@ public final class AgentSupervisor {
                 guard let self,
                       let agent = self.agents.first(where: { $0.hookToken == event.token })
                 else { return }
+                // Chat fields first: a Stop body carries last_assistant_message and
+                // must land on the status tracker before the idle transition.
+                agent.applyHookFields(HookStatusFields.parse(json: event.body))
                 agent.applyExternalSignal(
                     agent.engine.hookSignal(event: event.event, body: event.body))
             }

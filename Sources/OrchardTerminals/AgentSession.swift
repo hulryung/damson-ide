@@ -62,6 +62,13 @@ public final class AgentSession: ObservableObject, Identifiable {
     /// Called on every state change (the supervisor hooks event emission here).
     public var onStateChange: ((AgentRuntimeState) -> Void)?
 
+    /// Latest chat-bearing fields from a hook/OSC payload. The terminal service
+    /// folds these into the status stream so chat view-mode never scrapes the grid.
+    public private(set) var lastHookFields = HookStatusFields()
+    /// Fired when a hook/OSC payload carries prompt or assistant text (even if
+    /// the fused state does not change).
+    public var onHookFields: ((HookStatusFields) -> Void)?
+
     public init(engine: AgentEngine, terminal: TerminalSession, worktree: Worktree?, task: AgentTask?,
                 detectorConfig: ReadinessDetector.Config = ReadinessDetector.Config()) {
         self.engine = engine
@@ -152,16 +159,28 @@ public final class AgentSession: ObservableObject, Identifiable {
         evaluate()
     }
 
+    /// Fold chat fields from a hook POST body. Apply this *before* the matching
+    /// `applyExternalSignal` so a Stop payload's assistant text is already on the
+    /// tracker when the idle transition copies it into `lastCompletedAssistantMessage`.
+    public func applyHookFields(_ fields: HookStatusFields) {
+        guard fields.hasValues else { return }
+        lastHookFields.merge(fields)
+        onHookFields?(fields)
+    }
+
     /// Map an OSC 9999 agent-status escape to a state. Payload is either JSON with a
-    /// `status` field or a bare keyword: working / idle|done / blocked|waiting.
+    /// `status`/`state` field (and optional assistant/prompt fields) or a bare
+    /// keyword: working / idle|done / blocked|waiting.
     private func onOutputEvent(_ event: TerminalOutputEvent) {
         guard case let .osc(params) = event, params.first == "9999", params.count >= 2 else { return }
         let payload = params[1]
         var keyword = payload.trimmingCharacters(in: .whitespaces).lowercased()
         if let data = payload.data(using: .utf8),
-           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let status = obj["status"] as? String {
-            keyword = status.lowercased()
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            applyHookFields(HookStatusFields.parse(object: obj))
+            if let status = (obj["status"] as? String) ?? (obj["state"] as? String) {
+                keyword = status.lowercased()
+            }
         }
         switch keyword {
         case "working", "busy", "running": applyExternalSignal(.working)

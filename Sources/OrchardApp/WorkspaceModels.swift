@@ -15,6 +15,12 @@ enum WorkbenchKey: Hashable {
     case worktree(UUID)
 }
 
+/// Per-tab chrome on an agent terminal: the raw PTY, or a native chat overlay
+/// of the same session. Persisted for the app session only.
+enum TabViewMode: String, Hashable, Codable {
+    case terminal, chat
+}
+
 enum TabKind: String, CaseIterable, Hashable, Identifiable {
     case terminal, diff, editor, browser
     var id: String { rawValue }
@@ -48,12 +54,18 @@ struct WorkbenchTab: Identifiable, Hashable {
     var title: String
     /// When set, the terminal tab renders that agent's `DamsonSession` instead of a shell.
     var agentID: UUID?
+    /// Agent tabs only. Chat is an overlay on the live PTY, never a second session.
+    var viewMode: TabViewMode
 
-    init(id: UUID = UUID(), kind: TabKind, title: String? = nil, agentID: UUID? = nil) {
+    var isAgentTab: Bool { agentID != nil }
+
+    init(id: UUID = UUID(), kind: TabKind, title: String? = nil, agentID: UUID? = nil,
+         viewMode: TabViewMode = .terminal) {
         self.id = id
         self.kind = kind
         self.title = title ?? kind.label
         self.agentID = agentID
+        self.viewMode = agentID == nil ? .terminal : viewMode
     }
 }
 

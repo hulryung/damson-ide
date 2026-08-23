@@ -186,11 +186,19 @@ struct TabGroupPane: View {
                 TabChip(
                     tab: tab,
                     isSelected: tab.id == group.selectedID,
-                    badge: badge(for: tab)
+                    badge: badge(for: tab),
+                    onToggleViewMode: tab.isAgentTab
+                        ? { store.toggleViewMode(tab.id, in: group.id, key: key) }
+                        : nil
                 ) {
                     store.selectTab(tab.id, in: group.id, key: key)
                 }
                 .contextMenu {
+                    if tab.isAgentTab {
+                        Button(tab.viewMode == .chat ? "Show Terminal" : "Show Chat") {
+                            store.toggleViewMode(tab.id, in: group.id, key: key)
+                        }
+                    }
                     Button("Close Tab") { store.closeTab(tab.id, in: group.id, key: key) }
                 }
             }
@@ -248,37 +256,53 @@ struct TabChip: View {
     let tab: WorkbenchTab
     let isSelected: Bool
     let badge: String?
+    let onToggleViewMode: (() -> Void)?
     let select: () -> Void
 
     var body: some View {
-        Button(action: select) {
-            HStack(spacing: 5) {
-                Image(systemName: tab.kind.symbol)
-                    .font(.system(size: 10))
-                Text(tab.title)
-                    .font(Tokens.fontRow)
-                if let badge {
-                    Text(badge)
-                        .font(Tokens.fontPill)
-                        .monospacedDigit()
-                        .padding(.horizontal, 4)
-                        .padding(.vertical, 1)
-                        .background(Capsule().fill(Tokens.rowHover))
+        HStack(spacing: 2) {
+            Button(action: select) {
+                HStack(spacing: 5) {
+                    Image(systemName: tab.kind.symbol)
+                        .font(.system(size: 10))
+                    Text(tab.title)
+                        .font(Tokens.fontRow)
+                    if let badge {
+                        Text(badge)
+                            .font(Tokens.fontPill)
+                            .monospacedDigit()
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Tokens.rowHover))
+                    }
                 }
             }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 4)
-            .background(
-                RoundedRectangle(cornerRadius: Tokens.radius)
-                    .fill(isSelected ? Tokens.background : .clear)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Tokens.radius)
-                    .strokeBorder(isSelected ? Tokens.border : .clear, lineWidth: 1)
-            )
-            .foregroundStyle(isSelected ? Tokens.text : Tokens.textSecondary)
+            .buttonStyle(.plain)
+            if let onToggleViewMode {
+                Button(action: onToggleViewMode) {
+                    Image(systemName: tab.viewMode == .chat
+                          ? "terminal"
+                          : "bubble.left.and.bubble.right")
+                        .font(.system(size: 9, weight: .semibold))
+                        .padding(3)
+                }
+                .buttonStyle(.borderless)
+                .help(tab.viewMode == .chat
+                      ? "Show terminal (⌘⇧J)"
+                      : "Show chat (⌘⇧J)")
+            }
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: Tokens.radius)
+                .fill(isSelected ? Tokens.background : .clear)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Tokens.radius)
+                .strokeBorder(isSelected ? Tokens.border : .clear, lineWidth: 1)
+        )
+        .foregroundStyle(isSelected ? Tokens.text : Tokens.textSecondary)
     }
 }
 
@@ -301,14 +325,24 @@ struct TerminalPane: View {
     var body: some View {
         Group {
             if let session = store.damsonSession(for: tab, cwd: cwd) {
-                DamsonTerminalView(session: session, isActive: true)
-                    .id(tab.agentID ?? tab.id)
+                ZStack {
+                    // The PTY stays in the tree so chat is an overlay, never a
+                    // second session. Keyboard focus leaves it while chat is up.
+                    DamsonTerminalView(session: session, isActive: tab.viewMode != .chat)
+                        .id(tab.agentID ?? tab.id)
+                    if tab.isAgentTab, tab.viewMode == .chat {
+                        ChatView(controller: store.chatController(for: tab)) {
+                            Task { await store.submitChat(for: tab) }
+                        }
+                    }
+                }
             } else {
                 PlaceholderPane(symbol: "terminal", title: "No session",
                                 detail: "Could not attach a terminal to this tab.")
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onAppear { store.prepareChat(for: tab) }
     }
 }
 

@@ -74,6 +74,26 @@ final class TerminalAdoptionTests: XCTestCase {
         XCTAssertThrowsError(try service.adopt(agentSession: second, spec: spec))
     }
 
+    func testAdoptedHookFieldsReachTheStatusStream() throws {
+        let service = makeService()
+        let terminal = ScriptedTerminalSession()
+        let task = AgentTask(title: "t", prompt: "initial ask", engineID: "shell",
+                             baseRepoPath: "")
+        let session = AgentSession(engine: GenericShellEngine(), terminal: terminal,
+                                   worktree: nil, task: task)
+        let spec = TerminalCreateSpec(
+            handle: TerminalRegistry.mintHandle(), paneKey: TerminalRegistry.mintPaneKey(),
+            worktreeId: nil, cwd: nil, engineID: "shell", prompt: "", title: nil)
+        _ = try service.adopt(agentSession: session, spec: spec)
+
+        XCTAssertEqual(try service.agentStatus(handle: spec.handle).prompt, "initial ask")
+
+        session.applyHookFields(HookStatusFields(
+            lastAssistantMessage: "Done via hook."))
+        let status = try service.agentStatus(handle: spec.handle)
+        XCTAssertEqual(status.lastAssistantMessage, "Done via hook.")
+    }
+
     func testSupervisorSpawnEnvironmentCarriesOrchardIdentity() {
         let env = AgentSupervisor.spawnEnvironment(
             base: ["PATH": "/usr/bin"],

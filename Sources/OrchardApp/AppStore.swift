@@ -50,6 +50,9 @@ final class AppStore: ObservableObject {
 
     @Published var layouts: [WorkbenchKey: SplitNode] = [:]
 
+    /// Bounded chat transcripts keyed by tab id (app-session lifetime).
+    private var chatControllers: [UUID: ChatPaneController] = [:]
+
     var focusMainWindow: (() -> Void)?
     var showDashboard: (() -> Void)?
     var showSettings: (() -> Void)?
@@ -480,6 +483,7 @@ final class AppStore: ObservableObject {
     }
 
     func closeTab(_ tabID: UUID, in groupID: UUID, key: WorkbenchKey) {
+        dropChat(tabID)
         if let session = shells.removeValue(forKey: tabID) {
             session.terminate()
         }
@@ -527,7 +531,90 @@ final class AppStore: ObservableObject {
             }
         }
         layouts[key] = node
+        if let tab = node.selectedTab(in: node.firstGroupID() ?? UUID()), tab.agentID == agent.id {
+            prepareChat(for: tab)
+        }
         objectWillChange.send()
+    }
+
+    /// Flip an agent tab between the raw PTY and the chat overlay. Mode is stored
+    /// on the tab for the app session; the PTY is not respawned.
+    func toggleViewMode(_ tabID: UUID, in groupID: UUID, key: WorkbenchKey) {
+        updateLayout(key) { node in
+            _ = node.mutateGroup(groupID) { group in
+                guard let index = group.tabs.firstIndex(where: { $0.id == tabID }),
+                      group.tabs[index].isAgentTab else { return }
+                group.tabs[index].viewMode = group.tabs[index].viewMode == .chat
+                    ? .terminal : .chat
+                group.selectedID = tabID
+            }
+        }
+        focusedGroupID = groupID
+    }
+
+    func toggleFocusedViewMode() {
+        guard let key = selection else { return }
+        let node = layout(for: key)
+        guard let groupID = focusedGroupID ?? node.firstGroupID(),
+              let tab = node.selectedTab(in: groupID), tab.isAgentTab else { return }
+        toggleViewMode(tab.id, in: groupID, key: key)
+    }
+
+    func chatController(for tab: WorkbenchTab) -> ChatPaneController {
+        if let existing = chatControllers[tab.id] {
+            attachChat(existing, tab: tab)
+            return existing
+        }
+        let controller = ChatPaneController()
+        chatControllers[tab.id] = controller
+        attachChat(controller, tab: tab)
+        return controller
+    }
+
+    func prepareChat(for tab: WorkbenchTab) {
+        guard tab.isAgentTab else { return }
+        _ = chatController(for: tab)
+    }
+
+    func submitChat(for tab: WorkbenchTab) async {
+        guard let service = runtime?.terminalService,
+              let handle = chatHandle(for: tab) else {
+            chatController(for: tab).refusal = chatHandle(for: tab) == nil
+                ? "No agent is attached to this tab."
+                : "Runtime is unavailable."
+            return
+        }
+        await chatController(for: tab).submit(handle: handle, service: service)
+    }
+
+    func chatHandle(for tab: WorkbenchTab) -> String? {
+        guard let agent = agentSession(for: tab) else { return nil }
+        if let paneKey = agent.paneKey,
+           let handle = runtime?.terminalService.liveHandle(forPaneKey: paneKey) {
+            return handle
+        }
+        return agent.terminalHandle
+    }
+
+    func agentSession(for tab: WorkbenchTab) -> AgentSession? {
+        guard let agentID = tab.agentID else { return nil }
+        for project in projects {
+            if let agent = project.agents.agents.first(where: { $0.id == agentID }) {
+                return agent
+            }
+        }
+        return nil
+    }
+
+    private func attachChat(_ controller: ChatPaneController, tab: WorkbenchTab) {
+        guard let service = runtime?.terminalService,
+              let handle = chatHandle(for: tab) else { return }
+        controller.start(handle: handle, service: service)
+    }
+
+    private func dropChat(_ tabID: UUID) {
+        chatControllers[tabID]?.stop()
+        chatControllers[tabID] = nil
     }
 
     func selectKind(_ kind: TabKind) {
@@ -590,9 +677,21 @@ final class AppStore: ObservableObject {
     }
 
     private func dropWorkbench(for project: ProjectSession) {
-        layouts[.projectRoot(project.id)] = nil
-        for record in project.records {
-            layouts[.worktree(record.id)] = nil
+        let keys: [WorkbenchKey] = [.projectRoot(project.id)]
+            + project.records.map { .worktree($0.id) }
+        for key in keys {
+            if let node = layouts[key] { dropChat(in: node) }
+            layouts[key] = nil
+        }
+    }
+
+    private func dropChat(in node: SplitNode) {
+        switch node {
+        case .group(let group):
+            for tab in group.tabs { dropChat(tab.id) }
+        case .split(_, _, let first, let second):
+            dropChat(in: first)
+            dropChat(in: second)
         }
     }
 

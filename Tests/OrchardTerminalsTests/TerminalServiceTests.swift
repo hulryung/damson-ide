@@ -389,4 +389,40 @@ final class TerminalServiceTests: XCTestCase {
         XCTAssertNil(status.projection, "no agent → no state, not a fake idle")
         XCTAssertNil(service.list().first?.agentState)
     }
+
+    func testHookFieldsPublishWithoutStateChangeAndCompleteOnIdle() async throws {
+        let created = try service.create(engineID: "claude-code")
+        let stream = try service.agentStatusUpdates(handle: created.handle)
+        var iterator = stream.makeAsyncIterator()
+        _ = await iterator.next()
+
+        try service.applyHookStatus(
+            handle: created.handle,
+            fields: HookStatusFields(prompt: "explain it", lastAssistantMessage: "Working on it."))
+        let mid = await iterator.next()
+        XCTAssertEqual(mid?.prompt, "explain it")
+        XCTAssertEqual(mid?.lastAssistantMessage, "Working on it.")
+        XCTAssertNil(mid?.lastCompletedAssistantMessage,
+                     "still working — completed copy waits for idle")
+        XCTAssertEqual(mid?.state, .working)
+
+        session(created.handle).emitOSC([
+            "9999",
+            #"{"status":"idle","lastAssistantMessage":"Here is the explanation."}"#,
+        ])
+        var entry = await iterator.next()
+        while let current = entry, current.projection != .idle {
+            entry = await iterator.next()
+        }
+        XCTAssertEqual(entry?.lastAssistantMessage, "Here is the explanation.")
+        XCTAssertEqual(entry?.lastCompletedAssistantMessage, "Here is the explanation.")
+        XCTAssertEqual(entry?.projection, .idle)
+    }
+
+    func testLiveHandleFollowsRemint() throws {
+        let created = try service.create(engineID: "claude-code")
+        XCTAssertEqual(service.liveHandle(forPaneKey: created.paneKey), created.handle)
+        let reminted = try service.remintHandle(paneKey: created.paneKey)
+        XCTAssertEqual(service.liveHandle(forPaneKey: created.paneKey), reminted.handle)
+    }
 }
