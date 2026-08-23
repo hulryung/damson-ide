@@ -501,7 +501,36 @@ up (release, delete the worktree). Deliverable: docs/reports/dogfood-1.md record
 every command, receipt, quirk, and bug found (bugs go to the backlog; do not fix
 code). No damson-ide source changes.
 
-### Wave 9+ backlog
+### Wave 9 (T35–T38; T35/T36/T37 parallel, T38 depends on T35+T36)
+
+**T35 — Dispatch ergonomics (dogfood fixes, runtime).** From dogfood-1: accept
+`claude` as an alias for the `claude-code` engine and enumerate engine ids in
+agent-context; a failed worker-start cleans up its partial worktree/dispatch (or
+returns exact residuals with working cleanup commands); the injected preamble and
+worker env carry an absolute ORCHARD_CLI_COMMAND (never bare `orchard`); worker-read
+`--source transcript` is honored or fails typed (no silent terminal fallback); the
+terminal-tail archive strips TUI chrome (spinner frames, repeated separators) with
+raw bytes still recoverable.
+
+**T36 — CLI ergonomics.** `orchard <command> --help` prints that command's spec
+(flags, positionals, examples) instead of unknown-flag; bare `orchard guide` lists
+topics; human formatter for worktree list covering remote entries with the staleness
+warning; usage strings audited against dogfood-1's friction notes.
+
+**T37 — Remote workspace UI.** App flow for remote repos: an Open Remote… entry
+(host picker from the registry + remote path field with probe feedback), remote
+repos/worktrees render in the sidebar with the host chip, opening a remote worktree
+opens its ssh pane, and file/agent affordances show disabled states with the typed
+remote_unsupported explanation rather than failing silently.
+
+**T38 — Dogfood cycle 2 (report-only; after T35+T36 merge).** Re-run the full live
+cycle from docs/reports/dogfood-1.md with the fixes in place: `--agent claude` must
+work, the preamble must be executable verbatim by the worker, transcript reads must
+be honest, archives readable. Record docs/reports/dogfood-2.md with a
+finding-by-finding comparison table against cycle 1, plus any new findings. Same
+safety rules: never touch resources you did not create; report bugs, do not fix.
+
+### Wave 10+ backlog
 
 T32 leftovers: human-readable remote worktree-list formatter (staleness warning is
 JSON-only), remote file backend + remote agents (SSH stage 3), app-side UI to open a
