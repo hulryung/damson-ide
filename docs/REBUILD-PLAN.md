@@ -532,6 +532,11 @@ safety rules: never touch resources you did not create; report bugs, do not fix.
 
 ### Wave 10+ backlog
 
+From dogfood cycle 2 (docs/reports/dogfood-2.md): archive chrome-stripping still
+collapses words (finding 4 partially fixed); worker send in a Swift-debug context
+prints noisy output; `worktree rm` leaves the branch behind (offer branch deletion in
+the preflight like v1 did).
+
 T32 leftovers: human-readable remote worktree-list formatter (staleness warning is
 JSON-only), remote file backend + remote agents (SSH stage 3), app-side UI to open a
 remote workspace (the host chip renders; opening flow does not exist).
