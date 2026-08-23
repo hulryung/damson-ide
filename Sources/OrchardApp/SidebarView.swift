@@ -147,7 +147,6 @@ struct SidebarView: View {
                     }
                 }
             }
-            .padding(.horizontal, 6)
             .padding(.vertical, 6)
         }
         .frame(maxHeight: .infinity)
@@ -290,13 +289,10 @@ struct ProjectRootRow: View {
             HostChip(hostId: project.hostId)
             Spacer(minLength: 2)
         }
-        .padding(.horizontal, 7)
+        .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: Tokens.radiusCard)
-                .fill(isSelected ? Tokens.rowSelected : (isHovering ? Tokens.rowHover : .clear))
-        )
+        .background(isSelected ? Tokens.rowSelected : (isHovering ? Tokens.rowHover : .clear))
         .contentShape(Rectangle())
         .onTapGesture { store.selectProjectRoot(project) }
         .onHover { isHovering = $0 }
@@ -324,13 +320,10 @@ struct WorkspaceCard: View {
                 AgentInlineRow(agent: agent)
             }
         }
-        .padding(.horizontal, 7)
+        .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: Tokens.radiusCard)
-                .fill(isSelected ? Tokens.rowSelected : (isHovering ? Tokens.rowHover : .clear))
-        )
+        .background(isSelected ? Tokens.rowSelected : (isHovering ? Tokens.rowHover : .clear))
         .contentShape(Rectangle())
         .onTapGesture { store.select(record, in: project) }
         .onHover { isHovering = $0 }

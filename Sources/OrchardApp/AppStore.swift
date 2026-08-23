@@ -33,7 +33,17 @@ final class AppStore: ObservableObject {
 
     @Published var projects: [ProjectSession] = []
     @Published var selectedProjectID: UUID?
-    @Published var selection: WorkbenchKey?
+    @Published var selection: WorkbenchKey? {
+        // Every selection path (card tap, restore, deletion fallback) must leave a
+        // stored layout behind so rendering never has to create one (see layout(for:)).
+        didSet {
+            guard let selection else { return }
+            let node = ensureLayout(for: selection)
+            // Menubar split/new-tab act on the focused group; retarget it when
+            // the workspace changes (ensureLayout only sets it on first create).
+            focusedGroupID = node.firstGroupID()
+        }
+    }
     @Published var filterProjectID: UUID?
     /// Board-column id from the workspace-status vocabulary (defaults + custom).
     @Published var filterStatusID: String?
@@ -827,8 +837,15 @@ final class AppStore: ObservableObject {
     // MARK: - Workbench
 
     func layout(for key: WorkbenchKey) -> SplitNode {
-        ensureLayout(for: key)
-        return layouts[key] ?? .makeDefault()
+        // Pure read: mutating @Published state during view rendering makes
+        // SwiftUI drop updates (selection, add-tab, and split all went dead).
+        // Stored layouts are created when the selection changes, never here.
+        if let existing = layouts[key] { return existing }
+        let hostId = executionHostId(for: key)
+        let remote = RemoteWorkspacePolicy.isRemote(hostId: hostId)
+        return SplitNode.makeDefault(
+            executionHostId: remote ? hostId : nil,
+            includeLocalOnlyTabs: !remote)
     }
 
     @discardableResult
@@ -873,7 +890,7 @@ final class AppStore: ObservableObject {
     }
 
     func updateLayout(_ key: WorkbenchKey, _ body: (inout SplitNode) -> Void) {
-        var node = layout(for: key)
+        var node = ensureLayout(for: key)
         body(&node)
         layouts[key] = node
     }
@@ -937,8 +954,16 @@ final class AppStore: ObservableObject {
         }
     }
 
+    func split(_ groupID: UUID, key: WorkbenchKey, axis: SplitAxis) {
+        updateLayout(key) { node in
+            _ = node.splitGroup(groupID, axis: axis)
+        }
+        focusedGroupID = groupID
+    }
+
     func splitFocused(axis: SplitAxis) {
-        guard let key = selection, let groupID = focusedGroupID else { return }
+        guard let key = selection,
+              let groupID = focusedGroupID ?? ensureLayout(for: key).firstGroupID() else { return }
         updateLayout(key) { node in
             _ = node.splitGroup(groupID, axis: axis)
         }

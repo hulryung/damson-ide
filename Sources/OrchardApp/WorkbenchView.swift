@@ -238,8 +238,8 @@ struct TabGroupPane: View {
                     }
                 }
                 Divider()
-                Button("Split Right") { store.splitFocused(axis: .horizontal) }
-                Button("Split Down") { store.splitFocused(axis: .vertical) }
+                Button("Split Right") { store.split(group.id, key: key, axis: .horizontal) }
+                Button("Split Down") { store.split(group.id, key: key, axis: .vertical) }
             } label: {
                 Image(systemName: "plus")
                     .font(.system(size: 10))
