@@ -564,6 +564,12 @@ opt-in ci.sh stage (ORCHARD_CI_E2E=1) so plain unit runs stay fast.
 
 ### Wave 11+ backlog
 
+T39 leftovers (need a real remote host to verify): sshd reverse-forward grant, real
+remote Claude POSTing through the tunnel, fixed-range port claim surviving to the
+pane's ssh. Open by design: no HostLiveness live producer yet, remote provider
+transcripts unresolvable, keeper restoration of remote panes (SSH stage 4), app-side
+remote agent opening (CLI/RPC only today).
+
 From dogfood cycle 2 (docs/reports/dogfood-2.md): archive chrome-stripping still
 collapses words (finding 4 partially fixed); worker send in a Swift-debug context
 prints noisy output; `worktree rm` leaves the branch behind (offer branch deletion in
