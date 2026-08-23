@@ -25,7 +25,8 @@ struct RootView: View {
                             Button { store.requestNewWorktree() } label: {
                                 Label("New Worktree", systemImage: "plus")
                             }
-                            .help("New worktree (⌘N)")
+                            .disabled(!store.canCreateWorktree)
+                            .help(store.newWorktreeUnavailableReason ?? "New worktree (⌘N)")
                         }
                     }
             }
@@ -42,6 +43,9 @@ struct RootView: View {
         }
         .sheet(isPresented: $store.isJumpPaletteOpen) {
             JumpPalette()
+        }
+        .sheet(isPresented: $store.isOpenRemotePresented) {
+            OpenRemoteSheet()
         }
     }
 

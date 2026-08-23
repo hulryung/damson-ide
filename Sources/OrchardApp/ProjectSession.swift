@@ -3,6 +3,7 @@ import Combine
 import DamsonTerminal
 import Foundation
 import OrchardCore
+import OrchardRuntime
 import OrchardTerminals
 
 /// One opened repo: the in-process worktree + agent services, plus a merged
@@ -11,6 +12,10 @@ import OrchardTerminals
 /// Project identity comes from the runtime repo registry (`RepoRecord` path +
 /// id). `id` stays a per-process SwiftUI identity; worktree restore and agent
 /// lifecycle are unchanged.
+///
+/// A remote repo (`hostId` other than `local`) has no checkout on this machine.
+/// Local `WorktreeService.start()` is skipped so a same-named local directory
+/// cannot answer for files that live on the host (T32 / T37).
 @MainActor
 final class ProjectSession: ObservableObject, Identifiable {
     let id = UUID()
@@ -20,6 +25,8 @@ final class ProjectSession: ObservableObject, Identifiable {
     let agents: AgentSupervisor
     /// Registry id for this repo. Worktree identities (`<repoId>::<path>`) hang off it.
     var repoID: String?
+    /// Stamped at open from `RepoRecord.hostId`. Never inferred afterwards.
+    let hostId: String
 
     /// Snapshot of `worktrees.worktrees` so SwiftUI sees list mutations. Individual
     /// records still publish their own git/agent fields.
@@ -33,9 +40,11 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// `preferredHookPort` (T23): the previous app generation's hook-server port for
     /// this repo, so keeper-restored agents' installed hook configs keep working.
     init(repo: URL, settings: OrchardSettings, repoID: String? = nil,
-         displayName: String? = nil, preferredHookPort: UInt16? = nil) throws {
+         displayName: String? = nil, preferredHookPort: UInt16? = nil,
+         hostId: String = ExecutionHostId.local.rawValue) throws {
         self.repo = repo
         self.repoID = repoID
+        self.hostId = hostId
         if let displayName, !displayName.isEmpty {
             self.name = displayName
         } else {
@@ -47,21 +56,84 @@ final class ProjectSession: ObservableObject, Identifiable {
             configTemplate: settings.terminalConfig(),
             worktreeManager: service.manager)
         agents.preferredHookPort = preferredHookPort
-        try worktrees.start()
+        // A remote path is not a local checkout. Starting the local git stack
+        // against it would either fail or — the T32 hazard — succeed against a
+        // same-named directory on this machine.
+        if !isRemote {
+            try worktrees.start()
+        }
         agents.start()
         apply(settings)
-        syncRecords()
-        checkoutStatus = worktrees.primaryCheckoutStatus()
+        if !isRemote {
+            syncRecords()
+            checkoutStatus = worktrees.primaryCheckoutStatus()
+        }
         listen()
+    }
+
+    var isRemote: Bool { RemoteWorkspacePolicy.isRemote(hostId: hostId) }
+
+    var hostLabel: String? {
+        guard isRemote else { return nil }
+        return RemoteWorkspacePolicy.hostLabel(hostId)
+    }
+
+    /// Sidebar / header subtitle. Remote repos never ask local git for a branch.
+    var rootSubtitle: String {
+        if isRemote { return hostLabel ?? "remote" }
+        guard worktrees.isGitRepository else { return "folder" }
+        return worktrees.currentBranchName ?? "detached"
     }
 
     func apply(_ settings: OrchardSettings) {
         worktrees.runsSetupScripts = settings.runSetupScripts
+        guard !isRemote else {
+            agents.configTemplate = settings.terminalConfig()
+            return
+        }
         let prefix = settings.branchPrefixOverride.trimmingCharacters(in: .whitespaces)
         if !prefix.isEmpty { worktrees.overrideBranchPrefix(prefix) }
         let base = settings.defaultBaseRefOverride.trimmingCharacters(in: .whitespaces)
         if !base.isEmpty { worktrees.overrideBaseRef(base) }
         agents.configTemplate = settings.terminalConfig()
+    }
+
+    /// Replace the card list with the last-known remote worktrees. Primary
+    /// checkout stays on `ProjectRootRow`; only extra worktrees become cards.
+    func applyRemoteWorkspaces(_ workspaces: [Workspace], repo: RepoRecord) {
+        let existing = Dictionary(uniqueKeysWithValues: records.map { ($0.id, $0) })
+        var next: [WorktreeRecord] = []
+        for workspace in workspaces where !Self.isPrimary(workspace, repo: repo) {
+            let id = UUID(uuidString: workspace.instanceId) ?? UUID()
+            if let found = existing[id],
+               found.worktree.path.path == workspace.path,
+               found.worktree.branch == workspace.branch {
+                found.meta.displayName = workspace.displayName
+                next.append(found)
+                continue
+            }
+            let wt = Worktree(
+                id: id,
+                baseRepo: URL(fileURLWithPath: repo.path),
+                path: URL(fileURLWithPath: workspace.path),
+                branch: workspace.branch,
+                baseRef: workspace.baseRef,
+                title: workspace.displayName)
+            var meta = WorktreeMeta.defaults(for: wt)
+            meta.displayName = workspace.displayName
+            meta.workspaceStatus = workspace.workspaceStatus
+            meta.isArchived = workspace.isArchived
+            meta.sortOrder = workspace.sortOrder
+            next.append(WorktreeRecord(worktree: wt, manager: worktrees.manager, meta: meta))
+        }
+        records = next
+        objectWillChange.send()
+    }
+
+    static func isPrimary(_ workspace: Workspace, repo: RepoRecord) -> Bool {
+        workspace.path == repo.path
+            || workspace.id.caseInsensitiveCompare(
+                WorktreeIdentity.make(repoId: repo.id, path: repo.path)) == .orderedSame
     }
 
     func syncRecords() {

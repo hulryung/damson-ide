@@ -176,6 +176,10 @@ struct JumpPalette: View {
     }
 
     private func loadQuickOpen() {
+        if let key = store.selection, store.isRemote(key) {
+            quickOpenPaths = []
+            return
+        }
         guard let root = selectedRoot else {
             quickOpenPaths = []
             return

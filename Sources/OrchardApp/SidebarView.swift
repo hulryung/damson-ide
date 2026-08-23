@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import DamsonTerminal
 import OrchardCore
+import OrchardRuntime
 import OrchardTerminals
 
 /// Repo groups → workspace cards. Card status is the user-set `workspaceStatus`;
@@ -37,12 +38,17 @@ struct SidebarView: View {
             .controlSize(.small)
             .help("Jump to a workspace, file, or command (⌘J)")
 
-            Button { store.addProjectViaPanel() } label: {
+            Menu {
+                Button("Open Project…") { store.addProjectViaPanel() }
+                Button("Open Remote…") { store.presentOpenRemote() }
+            } label: {
                 Image(systemName: "folder.badge.plus")
             }
-            .buttonStyle(.borderless)
+            .menuIndicator(.hidden)
+            .menuStyle(.borderlessButton)
+            .fixedSize()
             .controlSize(.small)
-            .help("Open a project")
+            .help("Open a project or a remote repo")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
@@ -159,6 +165,8 @@ struct SidebarView: View {
             Button("Open Project…") { store.addProjectViaPanel() }
                 .controlSize(.small)
                 .padding(.top, 2)
+            Button("Open Remote…") { store.presentOpenRemote() }
+                .controlSize(.small)
         }
         .padding(10)
     }
@@ -171,7 +179,7 @@ struct SidebarView: View {
             }
             .controlSize(.small)
             .disabled(!store.canCreateWorktree)
-            .help(store.selectedProject?.worktrees.worktreeUnavailableReason
+            .help(store.newWorktreeUnavailableReason
                   ?? "Create a worktree and start an agent (⌘N)")
 
             Spacer()
@@ -218,6 +226,7 @@ struct RepoHeader: View {
                 .font(Tokens.fontHeader)
                 .foregroundStyle(Tokens.textSecondary)
                 .lineLimit(1)
+            HostChip(hostId: project.hostId)
             Spacer(minLength: 4)
             Text("\(project.records.count)")
                 .font(Tokens.fontPill)
@@ -236,10 +245,16 @@ struct RepoHeader: View {
                 store.selectedProjectID = project.id
                 store.requestNewWorktree()
             }
+            .disabled(project.isRemote)
+            .help(RemoteWorkspacePolicy.unsupportedExplanation(.composer, hostId: project.hostId) ?? "")
             Divider()
             Button("Reveal in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([project.repo])
             }
+            .disabled(project.isRemote)
+            .help(project.isRemote
+                  ? "This checkout lives on \(RemoteWorkspacePolicy.hostLabel(project.hostId)); it is not a local folder."
+                  : "")
             Divider()
             Button("Close Project", role: .destructive) {
                 store.removeProject(project)
@@ -254,14 +269,13 @@ struct ProjectRootRow: View {
     var isSelected: Bool
     @State private var isHovering = false
 
-    private var subtitle: String {
-        guard project.worktrees.isGitRepository else { return "folder" }
-        return project.worktrees.currentBranchName ?? "detached"
-    }
+    private var subtitle: String { project.rootSubtitle }
 
     var body: some View {
         HStack(spacing: 6) {
-            Image(systemName: project.worktrees.isGitRepository ? "house" : "folder")
+            Image(systemName: project.isRemote
+                  ? "network"
+                  : (project.worktrees.isGitRepository ? "house" : "folder"))
                 .font(.system(size: 10))
                 .foregroundStyle(Tokens.textTertiary)
                 .frame(width: 14)
@@ -273,6 +287,7 @@ struct ProjectRootRow: View {
                 .foregroundStyle(Tokens.textTertiary)
                 .lineLimit(1)
                 .truncationMode(.middle)
+            HostChip(hostId: project.hostId)
             Spacer(minLength: 2)
         }
         .padding(.horizontal, 7)
@@ -348,7 +363,7 @@ struct WorkspaceCard: View {
 
             Spacer(minLength: 2)
 
-            if isHovering {
+            if isHovering, !project.isRemote {
                 Button { store.requestDelete(record, in: project) } label: {
                     Image(systemName: "trash")
                         .font(.system(size: 10))
@@ -370,9 +385,12 @@ struct WorkspaceCard: View {
                 .foregroundStyle(Tokens.textTertiary)
                 .lineLimit(1)
                 .truncationMode(.middle)
+            HostChip(hostId: project.hostId)
             Spacer(minLength: 4)
             WorkspacePortsChip(ports: store.ports(for: record, in: project))
-            DiffStatBadge(stat: record.status.stat)
+            if !project.isRemote {
+                DiffStatBadge(stat: record.status.stat)
+            }
         }
         .padding(.leading, 20)
     }
@@ -401,6 +419,8 @@ struct WorkspaceCard: View {
                     }
                 }
             }
+            .disabled(project.isRemote)
+            .help(RemoteWorkspacePolicy.unsupportedExplanation(.agents, hostId: project.hostId) ?? "")
         } else {
             Button("Dismiss agents") {
                 project.agents.retireAgents(inWorktree: record.id)
@@ -416,9 +436,15 @@ struct WorkspaceCard: View {
             store.select(record, in: project)
             store.selectKind(.diff)
         }
+        .disabled(project.isRemote)
+        .help(RemoteWorkspacePolicy.unsupportedExplanation(.diff, hostId: project.hostId) ?? "")
         Button("Reveal in Finder") {
             NSWorkspace.shared.activateFileViewerSelecting([record.path])
         }
+        .disabled(project.isRemote)
+        .help(project.isRemote
+              ? "This worktree lives on \(RemoteWorkspacePolicy.hostLabel(project.hostId)); it is not a local folder."
+              : "")
         Button("Copy Branch Name") {
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(record.branch, forType: .string)
@@ -427,6 +453,10 @@ struct WorkspaceCard: View {
         Button("Delete Worktree…", role: .destructive) {
             store.requestDelete(record, in: project)
         }
+        .disabled(project.isRemote)
+        .help(project.isRemote
+              ? "Remote worktrees are removed through the orchard CLI; this path cannot reach \(RemoteWorkspacePolicy.hostLabel(project.hostId))."
+              : "")
     }
 }
 

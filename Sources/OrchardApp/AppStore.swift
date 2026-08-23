@@ -44,6 +44,7 @@ final class AppStore: ObservableObject {
     @Published var composerProjectID: UUID?
     @Published var pendingDeletion: PendingDeletion?
     @Published var isJumpPaletteOpen = false
+    @Published var isOpenRemotePresented = false
 
     /// Single unread source for cards and the dashboard. Views must not keep
     /// their own sets — fold events through `UnreadReducer`.
@@ -143,7 +144,16 @@ final class AppStore: ObservableObject {
     }
 
     var canCreateWorktree: Bool {
-        selectedProject?.worktrees.isGitRepository ?? false
+        guard let project = selectedProject, !project.isRemote else { return false }
+        return project.worktrees.isGitRepository
+    }
+
+    /// Why the New Worktree control is disabled, or nil when it is available.
+    var newWorktreeUnavailableReason: String? {
+        if let project = selectedProject, project.isRemote {
+            return RemoteWorkspacePolicy.unsupportedExplanation(.composer, hostId: project.hostId)
+        }
+        return selectedProject?.worktrees.worktreeUnavailableReason
     }
 
     var visibleProjects: [ProjectSession] {
@@ -186,6 +196,12 @@ final class AppStore: ObservableObject {
         applyUnread(.focusedWorkspace(record.id))
         meta.touch(record.id)
         ensureLayout(for: .worktree(record.id))
+        if project.isRemote {
+            // Opening a remote worktree attaches its ssh pane. Local git status
+            // must not run against the remote path.
+            refreshRemoteListing(project)
+            return
+        }
         Task { await record.refresh() }
     }
 
@@ -193,7 +209,17 @@ final class AppStore: ObservableObject {
         selectedProjectID = project.id
         selection = .projectRoot(project.id)
         ensureLayout(for: .projectRoot(project.id))
+        if project.isRemote {
+            refreshRemoteListing(project)
+            return
+        }
         Task { await project.refreshCheckout() }
+    }
+
+    private func refreshRemoteListing(_ project: ProjectSession) {
+        guard let repoID = project.repoID,
+              let repo = workspaceService.repo(id: repoID) else { return }
+        hydrateRemoteWorktrees(project, repo: repo, refresh: true)
     }
 
     func focus(agentID: UUID) {
@@ -345,6 +371,7 @@ final class AppStore: ObservableObject {
     /// the caller held Option (documented on `JumpPalette.activateFile`).
     func openPaletteFile(_ relativePath: String, in record: WorktreeRecord, project: ProjectSession,
                          mode: FileOpenRequest.Mode = .edit) {
+        if project.isRemote { return }
         select(record, in: project)
         pendingOpenPath = relativePath
         if mode == .diff {
@@ -373,6 +400,7 @@ final class AppStore: ObservableObject {
     }
 
     func openBrowserTab(workspaceKey: String) {
+        if let key = selection, unsupportedReason(RemoteAffordance.browser, for: key) != nil { return }
         Task {
             await applyDefaultBrowserProfile(workspaceKey: workspaceKey)
             _ = try? await browser?.service.createTab(workspace: workspaceKey)
@@ -424,6 +452,21 @@ final class AppStore: ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
         guard panel.runModal() == .OK, let url = panel.url else { return }
         addProject(repo: url)
+    }
+
+    /// Register a remote checkout through the same `addRemoteRepo` path the CLI
+    /// uses. Probe failures throw `WorkspaceError` so the sheet can show them
+    /// in verdict language.
+    func addRemoteProject(host: HostRecord, path: String) async throws {
+        guard let hostId = host.executionHostId else {
+            throw WorkspaceError("unknown_host", "no registered host named '\(host.name)'")
+        }
+        let record = try await workspaceService.addRemoteRepo(path: path, host: hostId)
+        applyRegistry(workspaceService.listRepos(), selectNewProjects: true)
+        if let project = projects.first(where: { $0.repoID == record.id }) {
+            selectedProjectID = project.id
+            selection = defaultSelection(for: project)
+        }
     }
 
     func addProject(repo: URL, silent: Bool = false) {
@@ -496,25 +539,32 @@ final class AppStore: ObservableObject {
         }
     }
 
-    /// Bring `projects` in line with the registry. Missing directories are
-    /// skipped (a `ProjectSession` cannot start). Newly added repos from the
-    /// CLI appear here; Open Project creates the session itself and dedups.
+    /// Bring `projects` in line with the registry. Missing *local* directories
+    /// are skipped (a `ProjectSession` cannot start). Remote repos have no
+    /// local directory and are opened from the last-known worktree set.
+    /// Newly added repos from the CLI appear here; Open Project creates the
+    /// session itself and dedups.
     private func applyRegistry(_ repos: [RepoRecord], selectNewProjects: Bool) {
         var wanted: [String: RepoRecord] = [:]
         for record in repos {
-            wanted[Self.standardizedPath(record.path)] = record
+            wanted[Self.registryKey(for: record)] = record
         }
-        for project in projects where wanted[project.repo.standardizedFileURL.path] == nil {
+        for project in projects where wanted[Self.registryKey(for: project)] == nil {
             detachProject(project)
         }
         var opened: [ProjectSession] = []
         for record in repos {
-            let url = URL(fileURLWithPath: record.path)
-            if let existing = project(at: url) {
+            if let existing = project(matching: record) {
                 existing.repoID = record.id
+                if existing.isRemote {
+                    hydrateRemoteWorktrees(existing, repo: record, refresh: false)
+                }
                 continue
             }
-            guard Self.isExistingDirectory(url) else { continue }
+            let url = URL(fileURLWithPath: record.path)
+            if !RemoteWorkspacePolicy.isRemote(hostId: record.hostId) {
+                guard Self.isExistingDirectory(url) else { continue }
+            }
             if let project = openProject(repo: url, record: record, silent: true) {
                 opened.append(project)
             }
@@ -534,7 +584,8 @@ final class AppStore: ObservableObject {
             let project = try ProjectSession(
                 repo: repo, settings: settings, repoID: record.id,
                 displayName: record.displayName,
-                preferredHookPort: keeperHookPortHints[repo.standardizedFileURL.path])
+                preferredHookPort: keeperHookPortHints[repo.standardizedFileURL.path],
+                hostId: record.hostId)
             project.onEvent = { [weak self] project, event in
                 self?.handle(event, from: project)
             }
@@ -542,6 +593,9 @@ final class AppStore: ObservableObject {
                 // Supervisor PTYs get ORCHARD_* identity and land in the
                 // terminal registry so worktree meta keys use `<repoId>::<path>`.
                 runtime.attach(project.agents)
+            }
+            if project.isRemote {
+                hydrateRemoteWorktrees(project, repo: record, refresh: true)
             }
             for worktree in project.records {
                 registerMetaKey(worktree, in: project)
@@ -577,7 +631,63 @@ final class AppStore: ObservableObject {
 
     private func project(at url: URL) -> ProjectSession? {
         let path = url.standardizedFileURL.path
-        return projects.first { $0.repo.standardizedFileURL.path == path }
+        return projects.first {
+            !$0.isRemote && $0.repo.standardizedFileURL.path == path
+        }
+    }
+
+    private func project(matching record: RepoRecord) -> ProjectSession? {
+        if let byID = projects.first(where: { $0.repoID == record.id }) {
+            return byID
+        }
+        if RemoteWorkspacePolicy.isRemote(hostId: record.hostId) {
+            return projects.first {
+                $0.isRemote && $0.hostId == record.hostId && $0.repo.path == record.path
+            }
+        }
+        return project(at: URL(fileURLWithPath: record.path))
+    }
+
+    /// Last-known remote worktrees (and an optional live refresh). A failed
+    /// refresh leaves the stored set intact — an unreachable host is not an
+    /// empty sidebar.
+    private func hydrateRemoteWorktrees(_ project: ProjectSession, repo: RepoRecord,
+                                        refresh: Bool) {
+        let apply: () -> Void = { [weak self, weak project] in
+            guard let self, let project else { return }
+            let data = self.workspaceService.store.load()
+            project.applyRemoteWorkspaces(
+                self.workspaceService.storedRemoteWorkspaces(for: repo, data: data),
+                repo: repo)
+            for worktree in project.records {
+                self.registerMetaKey(worktree, in: project)
+                _ = self.meta.ensure(worktree.id)
+            }
+        }
+        apply()
+        guard refresh else { return }
+        Task { [weak self] in
+            do {
+                _ = try await self?.workspaceService.refreshRemoteWorktrees(repo: repo)
+            } catch {
+                // Loss of contact is not evidence the worktrees stopped.
+            }
+            apply()
+        }
+    }
+
+    private static func registryKey(for record: RepoRecord) -> String {
+        if RemoteWorkspacePolicy.isRemote(hostId: record.hostId) {
+            return "\(record.hostId)|\(record.path)"
+        }
+        return standardizedPath(record.path)
+    }
+
+    private static func registryKey(for project: ProjectSession) -> String {
+        if project.isRemote {
+            return "\(project.hostId)|\(project.repo.path)"
+        }
+        return project.repo.standardizedFileURL.path
     }
 
     private func presentOpenFailure(_ error: Error) {
@@ -628,12 +738,22 @@ final class AppStore: ObservableObject {
             addProjectViaPanel()
             return
         }
+        guard !project.isRemote else { return }
         guard project.worktrees.isGitRepository else { return }
         composerProjectID = project.id
     }
 
+    func presentOpenRemote() {
+        isOpenRemotePresented = true
+    }
+
     func compose(project: ProjectSession, name: String, prompt: String,
                  engineID: String, baseRef: String?, count: Int) throws {
+        if project.isRemote {
+            throw GitError(RemoteWorkspacePolicy.unsupportedExplanation(
+                .composer, hostId: project.hostId)
+                ?? "agents cannot run on a remote host yet")
+        }
         guard AgentEngineRegistry.engine(id: engineID) != nil else {
             throw GitError("engine '\(engineID)' isn't registered in this build.")
         }
@@ -660,6 +780,11 @@ final class AppStore: ObservableObject {
     }
 
     func startAgent(in record: WorktreeRecord, project: ProjectSession, engineID: String) throws {
+        if project.isRemote {
+            throw GitError(RemoteWorkspacePolicy.unsupportedExplanation(
+                .agents, hostId: project.hostId)
+                ?? "agents cannot run on a remote host yet")
+        }
         guard AgentEngineRegistry.engine(id: engineID) != nil else {
             throw GitError("engine '\(engineID)' isn't registered in this build.")
         }
@@ -677,11 +802,15 @@ final class AppStore: ObservableObject {
     }
 
     func requestDelete(_ record: WorktreeRecord, in project: ProjectSession) {
+        guard !project.isRemote else { return }
         pendingDeletion = PendingDeletion(id: record.id, projectID: project.id, record: record)
     }
 
     func deleteWorktree(_ record: WorktreeRecord, in project: ProjectSession,
                         force: Bool, deleteBranch: Bool) throws -> Bool {
+        if project.isRemote {
+            throw GitError("remote worktrees are removed through the orchard CLI")
+        }
         project.agents.retireAgents(inWorktree: record.id)
         let deletion = try project.worktrees.deleteWorktree(
             record, force: force, deleteBranch: deleteBranch)
@@ -705,10 +834,42 @@ final class AppStore: ObservableObject {
     @discardableResult
     func ensureLayout(for key: WorkbenchKey) -> SplitNode {
         if let existing = layouts[key] { return existing }
-        let node = SplitNode.makeDefault()
+        let hostId = executionHostId(for: key)
+        let remote = RemoteWorkspacePolicy.isRemote(hostId: hostId)
+        let node = SplitNode.makeDefault(
+            executionHostId: remote ? hostId : nil,
+            includeLocalOnlyTabs: !remote)
         layouts[key] = node
         focusedGroupID = node.firstGroupID()
         return node
+    }
+
+    /// Execution host stamped on the workspace this workbench is showing.
+    func executionHostId(for key: WorkbenchKey) -> String? {
+        switch key {
+        case .projectRoot(let id):
+            return projects.first { $0.id == id }?.hostId
+        case .worktree(let id):
+            for project in projects {
+                if project.record(id: id) != nil { return project.hostId }
+            }
+            return nil
+        }
+    }
+
+    func isRemote(_ key: WorkbenchKey) -> Bool {
+        RemoteWorkspacePolicy.isRemote(hostId: executionHostId(for: key))
+    }
+
+    func unsupportedReason(_ affordance: RemoteAffordance, for key: WorkbenchKey?) -> String? {
+        guard let key else { return nil }
+        return RemoteWorkspacePolicy.unsupportedExplanation(
+            affordance, hostId: executionHostId(for: key))
+    }
+
+    func unsupportedReason(_ kind: TabKind, for key: WorkbenchKey?) -> String? {
+        guard let affordance = kind.remoteAffordance else { return nil }
+        return unsupportedReason(affordance, for: key)
     }
 
     func updateLayout(_ key: WorkbenchKey, _ body: (inout SplitNode) -> Void) {
@@ -736,6 +897,7 @@ final class AppStore: ObservableObject {
     }
 
     func addTab(_ kind: TabKind, to groupID: UUID, key: WorkbenchKey, agentID: UUID? = nil) {
+        guard unsupportedReason(kind, for: key) == nil else { return }
         let tab = WorkbenchTab(kind: kind, agentID: agentID)
         updateLayout(key) { node in
             _ = node.mutateGroup(groupID) { group in
@@ -896,6 +1058,7 @@ final class AppStore: ObservableObject {
 
     func selectKind(_ kind: TabKind) {
         guard let key = selection else { return }
+        guard unsupportedReason(kind, for: key) == nil else { return }
         let node = layout(for: key)
         guard let groupID = focusedGroupID ?? node.firstGroupID() else { return }
         if let tab = node.selectedTab(in: groupID), tab.kind == kind { return }
@@ -934,6 +1097,7 @@ final class AppStore: ObservableObject {
     func openEditor(_ relativePath: String) {
         pendingOpenPath = relativePath
         guard let key = selection else { return }
+        guard unsupportedReason(RemoteAffordance.editor, for: key) == nil else { return }
         var node = layout(for: key)
         if let found = node.findEditor(path: relativePath) {
             selectTab(found.tabID, in: found.groupID, key: key)
@@ -970,6 +1134,7 @@ final class AppStore: ObservableObject {
     }
 
     func openDiff(_ relativePath: String) {
+        guard unsupportedReason(RemoteAffordance.diff, for: selection) == nil else { return }
         pendingOpenPath = relativePath
         selectKind(.diff)
     }
@@ -997,6 +1162,7 @@ final class AppStore: ObservableObject {
     }
 
     func refreshGit(for key: WorkbenchKey) async {
+        if isRemote(key) { return }
         switch key {
         case .worktree(let id):
             for project in projects {
@@ -1032,6 +1198,15 @@ final class AppStore: ObservableObject {
         }
         if let existing = shells[tab.id] { return existing }
         let worktreeId = workspaceId(for: key)
+        let workspaceHost = executionHostId(for: key).flatMap { ExecutionHostId(rawValue: $0) }
+        let tabHost = tab.executionHostId.flatMap { ExecutionHostId(rawValue: $0) }
+        // A remote workspace owns the host. A tab-only remote host (the T29
+        // Remote Shell menu on a local workspace) keeps a login shell.
+        let host = (workspaceHost?.isLocal == false ? workspaceHost : nil) ?? tabHost ?? .local
+        if !host.isLocal {
+            return openRemoteShell(tab: tab, key: key, host: host, worktreeId: worktreeId,
+                                   workspaceIsRemote: workspaceHost?.isLocal == false)
+        }
         if let worktreeId,
            let adopted = runtime?.terminalService.adoptedShellDamsonSession(worktreeId: worktreeId),
            !shells.values.contains(where: { $0 === adopted }) {
@@ -1040,25 +1215,9 @@ final class AppStore: ObservableObject {
         }
         var config = settings.terminalConfig()
         config.cwd = cwd.path
-        // A remote pane runs `ssh -tt <host>` locally. If its host is no longer
-        // registered the pane opens nothing at all: silently falling back to a local
-        // shell under a remote label is the one outcome the host rules forbid.
-        let host = tab.executionHostId.flatMap { ExecutionHostId(rawValue: $0) } ?? .local
-        if host.isLocal {
-            config.argv = DamsonConfig.defaultArgv()
-        } else if let record = try? runtime?.hostRegistry.require(host: host) {
-            config.argv = SSHCommand.remoteShellArgv(for: record)
-        } else {
-            // No session, and deliberately no local fallback. The reason is computed
-            // on demand by `paneUnavailableDetail` rather than stored here: this runs
-            // inside a view update, where publishing state is not allowed.
-            return nil
-        }
+        config.argv = DamsonConfig.defaultArgv()
         let size = paneSpawnSize()
-        // Local shells go through the terminal service so they have a paneKey and
-        // survive a clean quit. Remote shells stay app-owned: their argv is the
-        // `ssh` invocation, which the generic shell engine would drop.
-        if host.isLocal, let runtime {
+        if let runtime {
             do {
                 let summary = try runtime.terminalService.create(
                     worktreeId: worktreeId, cwd: cwd.path, engineID: "shell",
@@ -1074,17 +1233,79 @@ final class AppStore: ObservableObject {
         }
         let session = DamsonSession(config: config,
                                     initialCols: size.cols, initialRows: size.rows)
-        // The PTY ending is the *connection* ending for a remote pane; what it proves
-        // about the far side runs through the one verdict vocabulary.
-        let tabID = tab.id
+        shells[tab.id] = session
+        return session
+    }
+
+    /// Open the ssh pane the runtime already knows how to spawn: `ssh -tt`
+    /// plus `cd <remote path> && exec $SHELL -l` when the workspace is remote.
+    /// Never hands the remote path to a local `chdir`.
+    private func openRemoteShell(tab: WorkbenchTab, key: WorkbenchKey,
+                                 host: ExecutionHostId, worktreeId: String?,
+                                 workspaceIsRemote: Bool) -> DamsonSession? {
+        if let worktreeId,
+           let adopted = runtime?.terminalService.adoptedShellDamsonSession(worktreeId: worktreeId),
+           !shells.values.contains(where: { $0 === adopted }) {
+            attachConnectionNote(tabID: tab.id, host: host, session: adopted)
+            shells[tab.id] = adopted
+            return adopted
+        }
+        guard let record = try? runtime?.hostRegistry.require(host: host) else {
+            return nil
+        }
+        let remoteCommand: String?
+        if workspaceIsRemote, let path = remotePath(for: key), !path.isEmpty {
+            remoteCommand = SSHCommand.cdAndLoginShellCommand(directory: path)
+        } else {
+            remoteCommand = nil
+        }
+        let prompt = SSHCommand.remoteShellCommandLine(for: record, command: remoteCommand)
+        let size = paneSpawnSize()
+        if let runtime {
+            do {
+                let summary = try runtime.terminalService.create(
+                    worktreeId: worktreeId, cwd: nil, engineID: "shell",
+                    prompt: prompt, title: tab.title,
+                    executionHostId: host.rawValue,
+                    initialCols: size.cols, initialRows: size.rows)
+                if let session = runtime.terminalService.damsonSession(handle: summary.handle) {
+                    attachConnectionNote(tabID: tab.id, host: host, session: session)
+                    shells[tab.id] = session
+                    return session
+                }
+            } catch {
+                NSLog("orchard: failed to open remote pane: %@", String(describing: error))
+            }
+        }
+        var config = settings.terminalConfig()
+        config.cwd = NSHomeDirectory()
+        config.argv = SSHCommand.remoteShellArgv(for: record, command: remoteCommand)
+        let session = DamsonSession(config: config,
+                                    initialCols: size.cols, initialRows: size.rows)
+        attachConnectionNote(tabID: tab.id, host: host, session: session)
+        shells[tab.id] = session
+        return session
+    }
+
+    private func remotePath(for key: WorkbenchKey) -> String? {
+        switch key {
+        case .projectRoot(let id):
+            return projects.first { $0.id == id }?.repo.path
+        case .worktree(let id):
+            for project in projects {
+                if let record = project.record(id: id) { return record.path.path }
+            }
+            return nil
+        }
+    }
+
+    private func attachConnectionNote(tabID: UUID, host: ExecutionHostId, session: DamsonSession) {
         session.onExit = { [weak self] code in
             Task { @MainActor in
                 self?.connectionNotes[tabID] =
                     HostLiveness.describeConnectionEnd(host: host, exitCode: code)
             }
         }
-        shells[tab.id] = session
-        return session
     }
 
     /// RPC worktree identity for a workbench key, used to stamp UI shells so
@@ -1107,10 +1328,12 @@ final class AppStore: ObservableObject {
 
     /// Why a terminal pane has no session. A remote pane whose host is not registered
     /// says so instead of silently opening a local shell.
-    func paneUnavailableDetail(for tab: WorkbenchTab) -> String {
+    func paneUnavailableDetail(for tab: WorkbenchTab, key: WorkbenchKey? = nil) -> String {
         if let note = connectionNotes[tab.id] { return note }
-        if let host = tab.remoteHostLabel {
-            return "No host named \(host) is registered, so nothing was launched. "
+        let hostName = tab.remoteHostLabel
+            ?? key.flatMap { executionHostId(for: $0) }.map { RemoteWorkspacePolicy.hostLabel($0) }
+        if let hostName, hostName != "Local" {
+            return "No host named \(hostName) is registered, so nothing was launched. "
                 + "Register it with `orchard host add`."
         }
         return "Could not attach a terminal to this tab."

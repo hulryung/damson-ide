@@ -1,6 +1,7 @@
 import SwiftUI
 import DamsonTerminal
 import OrchardCore
+import OrchardRuntime
 import OrchardTerminals
 
 /// Center workbench: per-workspace tab groups with splits.
@@ -37,24 +38,34 @@ struct WorkbenchView: View {
             switch key {
             case .projectRoot(let id):
                 if let project = store.projects.first(where: { $0.id == id }) {
-                    Image(systemName: "house")
+                    Image(systemName: project.isRemote ? "network" : "house")
                         .foregroundStyle(Tokens.textTertiary)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(project.name)
                             .font(.system(size: 13, weight: .semibold))
-                        Text(project.worktrees.currentBranchName ?? project.repo.path)
-                            .font(Tokens.fontMeta)
-                            .foregroundStyle(Tokens.textSecondary)
-                            .lineLimit(1)
+                        HStack(spacing: 6) {
+                            Text(project.rootSubtitle)
+                            if project.isRemote {
+                                Text("·")
+                                Text(project.repo.path)
+                            }
+                        }
+                        .font(Tokens.fontMeta)
+                        .foregroundStyle(Tokens.textSecondary)
+                        .lineLimit(1)
                     }
+                    HostChip(hostId: project.hostId)
                 }
             case .worktree(let id):
                 if let record = store.selectedRecord, record.id == id,
                    let project = store.project(owning: record) {
                     WorkspaceStatusSlot(appearance: store.statusAppearance(for: record.id), size: 10)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(record.title)
-                            .font(.system(size: 13, weight: .semibold))
+                        HStack(spacing: 6) {
+                            Text(record.title)
+                                .font(.system(size: 13, weight: .semibold))
+                            HostChip(hostId: project.hostId)
+                        }
                         HStack(spacing: 6) {
                             Text(record.branch)
                             Text("·")
@@ -183,6 +194,7 @@ struct TabGroupPane: View {
     private var tabStrip: some View {
         HStack(spacing: 2) {
             ForEach(group.tabs) { tab in
+                let reason = store.unsupportedReason(tab.kind, for: key)
                 TabChip(
                     tab: tab,
                     isSelected: tab.id == group.selectedID,
@@ -191,8 +203,12 @@ struct TabGroupPane: View {
                         ? { store.toggleViewMode(tab.id, in: group.id, key: key) }
                         : nil
                 ) {
-                    store.selectTab(tab.id, in: group.id, key: key)
+                    if reason == nil {
+                        store.selectTab(tab.id, in: group.id, key: key)
+                    }
                 }
+                .disabled(reason != nil)
+                .help(reason ?? "")
                 .contextMenu {
                     if tab.isAgentTab {
                         Button(tab.viewMode == .chat ? "Show Terminal" : "Show Chat") {
@@ -205,7 +221,10 @@ struct TabGroupPane: View {
             Spacer(minLength: 4)
             Menu {
                 ForEach(TabKind.allCases) { kind in
+                    let reason = store.unsupportedReason(kind, for: key)
                     Button(kind.label) { store.addTab(kind, to: group.id, key: key) }
+                        .disabled(reason != nil)
+                        .help(reason ?? "")
                 }
                 // T29: remote shells. Only registered hosts appear — the app never
                 // offers a connection target the user did not add.
@@ -236,15 +255,21 @@ struct TabGroupPane: View {
     @ViewBuilder
     private var tabBody: some View {
         if let tab = group.selected {
-            switch tab.kind {
-            case .terminal:
-                TerminalPane(tab: tab, key: key)
-            case .diff:
-                DiffHost(key: key)
-            case .editor:
-                EditorPane(tab: tab, key: key)
-            case .browser:
-                BrowserPane(key: key)
+            if let affordance = tab.kind.remoteAffordance,
+               store.unsupportedReason(affordance, for: key) != nil {
+                RemoteUnsupportedView(affordance: affordance,
+                                      hostId: store.executionHostId(for: key))
+            } else {
+                switch tab.kind {
+                case .terminal:
+                    TerminalPane(tab: tab, key: key)
+                case .diff:
+                    DiffHost(key: key)
+                case .editor:
+                    EditorPane(tab: tab, key: key)
+                case .browser:
+                    BrowserPane(key: key)
+                }
             }
         } else {
             Color.clear
@@ -283,14 +308,7 @@ struct TabChip: View {
                     }
                     // The execution host, never inferred: a pane whose shell lives on
                     // another machine says so in its label.
-                    if let host = tab.remoteHostLabel {
-                        Text(host)
-                            .font(Tokens.fontPill)
-                            .padding(.horizontal, 4)
-                            .padding(.vertical, 1)
-                            .background(Capsule().fill(Tokens.rowHover))
-                            .help("This shell runs on \(host) over SSH")
-                    }
+                    HostChip(hostId: tab.executionHostId)
                     if let badge {
                         Text(badge)
                             .font(Tokens.fontPill)
@@ -336,6 +354,11 @@ struct TerminalPane: View {
     let key: WorkbenchKey
 
     private var cwd: URL {
+        // A remote path is not a local directory. Handing it to Damson as cwd
+        // either fails or finds a same-named folder on this machine.
+        if store.isRemote(key) {
+            return URL(fileURLWithPath: NSHomeDirectory())
+        }
         switch key {
         case .projectRoot(let id):
             return store.projects.first { $0.id == id }?.repo
@@ -376,7 +399,7 @@ struct TerminalPane: View {
             } else {
                 PlaceholderPane(
                     symbol: "terminal", title: "No session",
-                    detail: store.paneUnavailableDetail(for: tab))
+                    detail: store.paneUnavailableDetail(for: tab, key: key))
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -389,17 +412,21 @@ struct DiffHost: View {
     let key: WorkbenchKey
 
     var body: some View {
-        switch key {
-        case .worktree(let id):
-            if let project = store.projects.first(where: { $0.record(id: id) != nil }),
-               let record = project.record(id: id) {
-                // Observe the record so commit/push/refresh actually re-render
-                // the pane (stat and unpushedCommits live on @Published status).
-                WorktreeDiffPane(record: record)
-            }
-        case .projectRoot(let id):
-            if let project = store.projects.first(where: { $0.id == id }) {
-                ProjectCheckoutDiffPane(project: project)
+        if store.unsupportedReason(RemoteAffordance.diff, for: key) != nil {
+            RemoteUnsupportedView(affordance: .diff, hostId: store.executionHostId(for: key))
+        } else {
+            switch key {
+            case .worktree(let id):
+                if let project = store.projects.first(where: { $0.record(id: id) != nil }),
+                   let record = project.record(id: id) {
+                    // Observe the record so commit/push/refresh actually re-render
+                    // the pane (stat and unpushedCommits live on @Published status).
+                    WorktreeDiffPane(record: record)
+                }
+            case .projectRoot(let id):
+                if let project = store.projects.first(where: { $0.id == id }) {
+                    ProjectCheckoutDiffPane(project: project)
+                }
             }
         }
     }
@@ -438,8 +465,11 @@ struct EmptyStateView: View {
                 .font(.title3)
             Text("Open a git repository to start orchestrating agents.")
                 .foregroundStyle(Tokens.textSecondary)
-            Button("Open Project…") { store.addProjectViaPanel() }
-                .buttonStyle(.borderedProminent)
+            HStack(spacing: 10) {
+                Button("Open Project…") { store.addProjectViaPanel() }
+                    .buttonStyle(.borderedProminent)
+                Button("Open Remote…") { store.presentOpenRemote() }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Tokens.background)
