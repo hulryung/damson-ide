@@ -292,7 +292,41 @@ Shared-territory rule for the wave: the `orchard` CLI spec table and OrchardApp 
 accept additive edits from several tasks; keep them in per-feature files where possible
 and expect the coordinator to resolve small merge conflicts.
 
-### Wave 3+ backlog
+### Wave 3 (T11–T14, parallel; merge order T11 → T12 → T13 → T14)
+
+**T11 — Orchestration hardening (runtime).** Make v2's supervision trustworthy:
+capability-hash enforcement on lifecycle `send` (a `worker_done`/`heartbeat`/`ask`
+without the dispatch capability whose SHA-256 matches the stored hash — or from a
+pane other than the assignee — is rejected with a typed settlement code);
+worker-process-exit auto-escalation (terminal exit of a live supervised dispatch fails
+it and posts a priority-high `escalation` to the Run, waking `check --wait`; deliberate
+closes do not escalate); a real dogfood e2e test driving `worker-start --agent shell`
+through the live runtime to settlement. Owns Sources/OrchardRuntime/Orchestration/**,
+additive OrchardOrchestration/OrchardTerminals API, Tests/OrchardRuntimeTests/Worker*.
+
+**T12 — `orchard serve` headless (control plane).** Boot OrchardRuntimeHost without
+the GUI: `orchard serve [--data-dir <path>]` runs the socket server + services in the
+foreground until SIGINT/SIGTERM (clean shutdown removes the socket + metadata);
+headless terminal factory (DamsonSession renders nothing — sessions stay headless);
+`status` reports mode app|headless; refuse to start when a live runtime already owns
+the metadata file (stale metadata from a dead pid is reclaimed). Owns
+Sources/orchard/** (serve entry), Sources/OrchardRuntime/Server/**, tests.
+
+**T13 — Chat view-mode (app).** Per-tab `viewMode: terminal | chat` on agent tabs: a
+native chat rendering of the agent conversation built from the terminal service's
+AgentStatusEntry stream (prompts, last assistant message, state transitions), with an
+input box that submits through the verified injection pipeline and falls back to the
+raw terminal on demand; toggle in the tab chrome, state per tab. Owns
+Sources/OrchardApp/** chat files + additive OrchardTerminals status-stream API.
+
+**T14 — Search & watch (files).** Extend the file service: full-text content search
+(bounded, include patterns, per-file match excerpts, binary skip), directory watching
+with reconciliation events the explorer consumes (create/delete/rename reflected
+without manual refresh), and auto-reveal of the active file. Owns
+Sources/OrchardRuntime/Files/**, Sources/OrchardApp/FileExplorer/**, file CLI
+additions, Tests/OrchardRuntimeTests/File*.
+
+### Wave 4+ backlog
 
 App sidebar duality was resolved by T8 (was: `orchard repo add` never surfaced in the
 UI, verified live 2026-08-23). Remaining: chat view-mode overlay on agent PTYs,
