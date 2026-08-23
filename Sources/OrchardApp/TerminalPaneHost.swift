@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import DamsonTerminal
 import OrchardTerminals
 import SwiftUI
@@ -12,13 +13,23 @@ import SwiftUI
 /// stay on the SwiftUI parent: short documents top-align so row 0 is fully
 /// visible; overflowing content bottom-aligns. Damson's own follow-bottom /
 /// content-anchor path keeps scroll stable when the snapped row count changes.
+///
+/// Adopted panes need a second pass: keeper preamble replay is delivered on the
+/// next main-queue turn, so the first layout sees an empty grid. Subscribing to
+/// `gridChanged` re-applies the same snap/align once that grid arrives — the
+/// path fresh panes already get from their first prompt paint.
 struct TerminalFitHost: View {
     @ObservedObject var session: DamsonSession
     var isActive: Bool
     var onFocus: (() -> Void)?
+    /// Bumped on `gridChanged` so short-vs-overflow alignment and the snapped
+    /// frame re-apply after an adopted pane's async preamble replay. Read in
+    /// `body` so SwiftUI invalidates without recreating the surface.
+    @State private var gridGeneration = 0
 
     var body: some View {
         GeometryReader { geo in
+            let _ = gridGeneration
             let metrics = TerminalCellMetrics.measure(config: session.config)
             let layout = TerminalPaneFit.layout(container: geo.size, metrics: metrics)
             let top = TerminalPaneFit.shouldTopAlign(
@@ -28,6 +39,9 @@ struct TerminalFitHost: View {
                 .overlay(alignment: top ? .topLeading : .bottomLeading) {
                     TerminalFitSurface(session: session, isActive: isActive, onFocus: onFocus)
                 }
+        }
+        .onReceive(session.gridChanged) { _ in
+            gridGeneration += 1
         }
     }
 

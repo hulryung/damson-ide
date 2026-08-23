@@ -115,4 +115,25 @@ public enum TerminalPaneFit {
         if followingBottom { return maxTop }
         return min(max(anchorLine, 0), maxTop)
     }
+
+    /// One-shot latch for keeper-adopted panes. Damson delivers the restoration
+    /// preamble on the next main-queue turn (`PTYHost.adopt` →
+    /// `DispatchQueue.main.async`), so the first layout sees an empty parser.
+    /// The host re-applies cell-snap / top-align when this consumes the first
+    /// `gridChanged`; later changes keep using the same fit path without a
+    /// special case.
+    public struct AdoptionFit: Equatable {
+        private var consumed = false
+
+        public init() {}
+
+        public var isPending: Bool { !consumed }
+
+        /// True exactly once — the first grid-change after adoption.
+        public mutating func consumeGridChange() -> Bool {
+            if consumed { return false }
+            consumed = true
+            return true
+        }
+    }
 }

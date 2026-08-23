@@ -19,6 +19,11 @@ public final class ScriptedTerminalSession: TerminalSession {
 
     /// The scripted visible screen, returned by `gridSnapshot()`.
     public var screenLines: [String] = []
+    /// Scripted PTY geometry. Defaults match the historical fake (80×24); an
+    /// adopted-pane test sets these to the restoration record's cols/rows so a
+    /// sized respawn can prove it reads the live grid, not a spawn default.
+    public var gridCols: Int = 80
+    public var gridRows: Int = 24
     public var isAltScreen = true
     public var inSyncOutputMode = false
 
@@ -64,7 +69,8 @@ public final class ScriptedTerminalSession: TerminalSession {
     public func gridSnapshot() -> TerminalGridSnapshot {
         TerminalGridSnapshot(
             lines: screenLines, cursorRow: 0, cursorCol: 0,
-            cols: 80, rows: max(screenLines.count, 24),
+            cols: max(gridCols, 1),
+            rows: max(gridRows, screenLines.count, 1),
             isAltScreen: isAltScreen, inSyncOutputMode: inSyncOutputMode)
     }
 

@@ -165,4 +165,43 @@ final class TerminalPaneFitTests: XCTestCase {
         XCTAssertEqual(before, 60)
         XCTAssertEqual(after, 50)
     }
+
+    // MARK: - Adoption re-fit (T31)
+
+    func testAdoptionFitConsumesOnlyTheFirstGridChange() {
+        var fit = TerminalPaneFit.AdoptionFit()
+        XCTAssertTrue(fit.isPending)
+        XCTAssertTrue(fit.consumeGridChange(),
+                      "the first grid-change after adoption must re-apply the pane fit")
+        XCTAssertFalse(fit.isPending)
+        XCTAssertFalse(fit.consumeGridChange(),
+                       "later grid-changes use the ordinary fit path, not a second latch")
+    }
+
+    func testEmptyPreReplayGridTopAlignsThenShortReplayStaysTopAligned() {
+        let container = CGSize(width: 88, height: 16 * 10 + 8 + 5)
+        let layout = TerminalPaneFit.layout(container: container, metrics: cell)
+
+        // Pre-replay: empty parser, prompt line only — same as a fresh pane.
+        let empty = TerminalPaneFit.contentRowCount(
+            scrollback: 0, lastOccupiedViewportRow: 0)
+        XCTAssertTrue(TerminalPaneFit.shouldTopAlign(
+            contentRows: empty, viewportRows: layout.rows))
+        XCTAssertEqual(
+            TerminalPaneFit.surfaceFrame(
+                container: container, layout: layout, contentRows: empty).origin,
+            .zero)
+
+        // First grid-change: keeper preamble + a short shell prompt at row 0.
+        var fit = TerminalPaneFit.AdoptionFit()
+        XCTAssertTrue(fit.consumeGridChange())
+        let short = TerminalPaneFit.contentRowCount(
+            scrollback: 0, lastOccupiedViewportRow: 0)
+        let frame = TerminalPaneFit.surfaceFrame(
+            container: container, layout: layout, contentRows: short)
+        XCTAssertEqual(frame.origin.y, 0, "row 0 must stay fully visible after replay")
+        XCTAssertEqual(frame.height, layout.contentSize.height)
+        XCTAssertGreaterThan(layout.leftover.height, 0)
+        XCTAssertLessThan(frame.maxY, container.height)
+    }
 }

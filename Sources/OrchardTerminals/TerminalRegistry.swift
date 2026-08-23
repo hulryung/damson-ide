@@ -104,8 +104,15 @@ public final class TerminalRecord {
         // so previews/staleness read correctly without piggybacking on `gridChanged`,
         // which also fires for local mutations like a resize.
         session.outputBytes
-            .sink { [weak self] _ in self?.lastOutputAt = Date() }
+            .sink { [weak self] _ in self?.noteActivity() }
             .store(in: &cancellables)
+    }
+
+    /// Mark the pane as having produced output. Keeper adoption seeds this so a
+    /// restored pane doesn't look idle-never-spoke while preamble replay is still
+    /// queued on the main queue.
+    func noteActivity(at date: Date = Date()) {
+        lastOutputAt = date
     }
 
     /// Swap in a freshly spawned PTY for this pane (respawn): new handle, next

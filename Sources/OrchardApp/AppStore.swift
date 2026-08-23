@@ -1018,8 +1018,10 @@ final class AppStore: ObservableObject {
     }
 
     /// Damson session for a terminal tab. Agent tabs use the supervisor's session;
-    /// shells are owned here so views never spawn a PTY.
-    func damsonSession(for tab: WorkbenchTab, cwd: URL) -> DamsonSession? {
+    /// local shells are created through the terminal service so a clean quit can
+    /// hand them to the keeper and the next boot re-attaches the adopted PTY
+    /// (T31). Views never spawn a PTY of their own.
+    func damsonSession(for tab: WorkbenchTab, key: WorkbenchKey, cwd: URL) -> DamsonSession? {
         if let agentID = tab.agentID {
             for project in projects {
                 if let agent = project.agents.agents.first(where: { $0.id == agentID }),
@@ -1029,6 +1031,13 @@ final class AppStore: ObservableObject {
             }
         }
         if let existing = shells[tab.id] { return existing }
+        let worktreeId = workspaceId(for: key)
+        if let worktreeId,
+           let adopted = runtime?.terminalService.adoptedShellDamsonSession(worktreeId: worktreeId),
+           !shells.values.contains(where: { $0 === adopted }) {
+            shells[tab.id] = adopted
+            return adopted
+        }
         var config = settings.terminalConfig()
         config.cwd = cwd.path
         // A remote pane runs `ssh -tt <host>` locally. If its host is no longer
@@ -1046,6 +1055,23 @@ final class AppStore: ObservableObject {
             return nil
         }
         let size = paneSpawnSize()
+        // Local shells go through the terminal service so they have a paneKey and
+        // survive a clean quit. Remote shells stay app-owned: their argv is the
+        // `ssh` invocation, which the generic shell engine would drop.
+        if host.isLocal, let runtime {
+            do {
+                let summary = try runtime.terminalService.create(
+                    worktreeId: worktreeId, cwd: cwd.path, engineID: "shell",
+                    title: tab.title, executionHostId: host.rawValue,
+                    initialCols: size.cols, initialRows: size.rows)
+                if let session = runtime.terminalService.damsonSession(handle: summary.handle) {
+                    shells[tab.id] = session
+                    return session
+                }
+            } catch {
+                NSLog("orchard: failed to register shell pane: %@", String(describing: error))
+            }
+        }
         let session = DamsonSession(config: config,
                                     initialCols: size.cols, initialRows: size.rows)
         // The PTY ending is the *connection* ending for a remote pane; what it proves
@@ -1059,6 +1085,24 @@ final class AppStore: ObservableObject {
         }
         shells[tab.id] = session
         return session
+    }
+
+    /// RPC worktree identity for a workbench key, used to stamp UI shells so
+    /// keeper adoption can re-attach them to the same workspace on the next boot.
+    private func workspaceId(for key: WorkbenchKey) -> String? {
+        switch key {
+        case .worktree(let id):
+            for project in projects {
+                if let record = project.record(id: id) {
+                    return workspaceIdentity(for: record, in: project)
+                }
+            }
+            return nil
+        case .projectRoot(let id):
+            guard let project = projects.first(where: { $0.id == id }),
+                  let repoID = project.repoID else { return nil }
+            return "\(repoID)::\(project.repo.path)"
+        }
     }
 
     /// Why a terminal pane has no session. A remote pane whose host is not registered
