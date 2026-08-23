@@ -179,12 +179,25 @@ public final class FileCommandHandler: CommandHandler, @unchecked Sendable {
     private func resolveTarget(_ params: [String: JSONValue]) throws -> Target {
         if let selector = params.str("worktree") ?? params.str("selector") ?? params.str("id"),
            !selector.isEmpty {
-            return Target(workspace: try workspaces.show(selector: selector, cwd: params.str("cwd")))
+            return try local(Target(
+                workspace: try workspaces.show(selector: selector, cwd: params.str("cwd"))))
         }
         if let cwd = params.str("cwd"), !cwd.isEmpty {
-            return Target(workspace: try workspaces.current(cwd: cwd))
+            return try local(Target(workspace: try workspaces.current(cwd: cwd)))
         }
         throw FileServiceError.invalidArgument("missing worktree selector")
+    }
+
+    /// Every read in this service resolves a path against the local filesystem. A
+    /// remote workspace's path names files on another machine, so serving it here would
+    /// either fail confusingly or — the real hazard — find a same-named local directory
+    /// and quietly answer with the wrong repo's files. A remote backend is stage 2+ work
+    /// (docs/design/remote-hosts.md §6); until then the refusal is typed.
+    private func local(_ target: Target) throws -> Target {
+        guard WorkspaceService.isRemote(target.workspace) else { return target }
+        throw FileServiceError("remote_unsupported",
+                               "\(target.id) lives on \(target.workspace.hostId); "
+                                   + "the file service cannot read remote workspaces yet")
     }
 
     private func relativePath(_ params: [String: JSONValue], root: URL) throws -> String {

@@ -111,7 +111,10 @@ public enum OrchardCommands {
             command("worker-release", "Archive and release worker resources", [flag("dispatch", "Dispatch identifier", "id", required: true), retry]),
             command("worker-retain", "Retain worker resources", [flag("dispatch", "Dispatch identifier", "id", required: true), retry]),
             command("worker-list", "List supervised workers", [flag("terminal-state", "Terminal state filter", "state"), run]),
-            command("repo", "Manage registered repositories", [flag("path", "Repository path", "path"), flag("repo", "Repository selector", "selector"), flag("display-name", "Display name", "text")], positionals: ["list|add|show"]),
+            // T32: `repo add --host ssh:<name>` registers a checkout that lives on a
+            // registered host. The remote path is probed over a bounded ssh run before
+            // the record exists, so a repo record is never a claim nobody checked.
+            command("repo", "Manage registered repositories", [flag("path", "Repository path", "path"), flag("repo", "Repository selector", "selector"), flag("display-name", "Display name", "text"), flag("base-ref", "Default base ref for new worktrees", "ref"), flag("host", "Execution host: local (default) or ssh:<name>", "id")], positionals: ["list|add|show"]),
             command("worktree", "List worktrees or show agent/shell processes and listening ports", [
                 flag("repo", "Repository selector", "selector"),
                 flag("worktree", "Worktree selector", "selector"),
@@ -159,6 +162,9 @@ public enum OrchardCommands {
                 flag("interrupt", "Send an interrupt"),
                 flag("for", "Wait condition", "tui-idle|exit"),
                 flag("timeout-ms", "Wait timeout in milliseconds", "ms"),
+                // T29/T32: a pane on a registered host. Opening one in a remote worktree
+                // needs no flag — the pane inherits the workspace's stamped host.
+                flag("host", "Execution host: local (default) or ssh:<name>", "id"),
             ], positionals: ["list|create|read|send|wait|split|close|rename"]),
             // T10 embedded browser. Refs (@eN) come from the latest `snapshot` of a
             // page and are invalidated by any navigation (top-level or subframe) —
