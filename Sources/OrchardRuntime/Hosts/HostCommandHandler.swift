@@ -7,17 +7,24 @@ import OrchardProtocol
 /// (`ConnectTimeout=5` plus the runner's own deadline) because an agent-facing verb
 /// that can hang is worse than one that answers "unreachable" — a coordinator blocked
 /// on a probe is indistinguishable from a crashed one.
+///
+/// `host-list` is a read of the registry plus the in-memory liveness snapshot (T45).
+/// A missing or stale status is not a claim about the host record, and listing never
+/// probes.
 public struct HostCommandHandler: CommandHandler, @unchecked Sendable {
     private let registry: HostRegistry
     private let runner: HostCommandRunner
     private let probeTimeout: TimeInterval
+    private let liveness: HostLivenessService?
 
     public init(registry: HostRegistry,
                 runner: HostCommandRunner = ProcessHostCommandRunner(),
-                probeTimeout: TimeInterval = HostProbe.defaultTimeout) {
+                probeTimeout: TimeInterval = HostProbe.defaultTimeout,
+                liveness: HostLivenessService? = nil) {
         self.registry = registry
         self.runner = runner
         self.probeTimeout = probeTimeout
+        self.liveness = liveness
     }
 
     public var verbs: [String] { ["host-list", "host-add", "host-check"] }
@@ -87,6 +94,9 @@ public struct HostCommandHandler: CommandHandler, @unchecked Sendable {
             }
             let record = try registry.require(name: name)
             let result = await HostProbe.check(host: record, runner: runner, timeout: probeTimeout)
+            // A user-initiated check publishes into the same snapshot the periodic
+            // producer uses. It does not mutate the host record or any workspace.
+            liveness?.publish(result)
             return try JSONBridge.value(result)
 
         default:
@@ -95,10 +105,26 @@ public struct HostCommandHandler: CommandHandler, @unchecked Sendable {
     }
 
     private func encodeHosts(_ hosts: [HostRecord]) throws -> JSONValue {
-        .array(try hosts.map { host in
+        let snapshot = liveness?.snapshot()
+        let now = Date()
+        return .array(try hosts.map { host in
             var object = try JSONBridge.value(host).objectValue ?? [:]
             object["executionHostId"] = .string(host.executionHostId?.rawValue ?? "ssh:\(host.name)")
             object["target"] = .string(SSHCommand.destination(for: host))
+            if let live = snapshot?.status(for: host.name) {
+                object["status"] = .string(live.status.rawValue)
+                object["lastCheckedAt"] = .number(live.lastCheckedAt.timeIntervalSince1970)
+                object["ageSeconds"] = .number(live.ageSeconds(now: now))
+                if let latency = live.latencyMs {
+                    object["latencyMs"] = .number(latency)
+                }
+                if !live.detail.isEmpty {
+                    object["detail"] = .string(live.detail)
+                }
+                if let note = live.note, !note.isEmpty {
+                    object["note"] = .string(note)
+                }
+            }
             return .object(object)
         })
     }

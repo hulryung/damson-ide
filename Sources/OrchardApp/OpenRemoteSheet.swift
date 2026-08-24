@@ -2,15 +2,15 @@ import SwiftUI
 import OrchardRuntime
 
 /// File → Open Remote… / sidebar folder-plus. Host picker is the registry
-/// (re-probed on open); submit registers through `WorkspaceService.addRemoteRepo`,
-/// the same path as `orchard repo add --host`.
+/// plus the T45 liveness snapshot (live status + last-checked age). Submit
+/// registers through `WorkspaceService.addRemoteRepo`, the same path as
+/// `orchard repo add --host`.
 struct OpenRemoteSheet: View {
     @EnvironmentObject var store: AppStore
     @Environment(\.dismiss) private var dismiss
 
     @State private var selectedHostName: String = ""
     @State private var remotePath: String = ""
-    @State private var probeByName: [String: HostProbeResult] = [:]
     @State private var probing = false
     @State private var submitting = false
     @State private var errorMessage: String?
@@ -47,7 +47,7 @@ struct OpenRemoteSheet: View {
         .onAppear {
             if selectedHostName.isEmpty { selectedHostName = hosts.first?.name ?? "" }
             pathFocused = true
-            Task { await reprobeHosts() }
+            Task { await refreshLiveStatus() }
         }
     }
 
@@ -96,7 +96,7 @@ struct OpenRemoteSheet: View {
 
     private func hostRow(_ host: HostRecord) -> some View {
         let selected = host.name == selectedHostName
-        let probe = probeByName[host.name]
+        let probe = store.hostLiveness.status(for: host.name)
         return Button {
             selectedHostName = host.name
         } label: {
@@ -108,7 +108,7 @@ struct OpenRemoteSheet: View {
                     HStack(spacing: 6) {
                         Text(host.name)
                             .font(Tokens.fontRow)
-                        HostChip(hostId: host.executionHostId?.rawValue)
+                        HostChip(hostId: host.executionHostId?.rawValue, compact: false)
                         Spacer(minLength: 4)
                         Text(RemoteWorkspacePolicy.probeStatusChip(probe?.status))
                             .font(Tokens.fontPill)
@@ -123,6 +123,9 @@ struct OpenRemoteSheet: View {
                             .font(Tokens.fontMeta)
                             .foregroundStyle(Tokens.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
+                        Text("Checked \(HostLivenessPresentation.ageLabel(since: probe.lastCheckedAt))")
+                            .font(Tokens.fontMeta)
+                            .foregroundStyle(Tokens.textTertiary)
                     }
                 }
             }
@@ -175,23 +178,13 @@ struct OpenRemoteSheet: View {
         }
     }
 
-    private func reprobeHosts() async {
-        let snapshot = hosts
-        guard !snapshot.isEmpty else { return }
+    private func refreshLiveStatus() async {
+        guard !hosts.isEmpty else { return }
         probing = true
         defer { probing = false }
-        // Re-probe on open: a cached check is a claim the host may no longer
-        // support, and Open Remote must not present a stale reachable chip.
-        await withTaskGroup(of: (String, HostProbeResult).self) { group in
-            for host in snapshot {
-                group.addTask {
-                    (host.name, await HostProbe.check(host: host))
-                }
-            }
-            for await (name, result) in group {
-                probeByName[name] = result
-            }
-        }
+        // Feed from the T45 producer. A sweep (or one-shot of unchecked hosts)
+        // refreshes presentation only — never workspace or worker state.
+        await store.refreshHostLiveness()
     }
 
     private func submit() async {

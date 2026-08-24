@@ -41,6 +41,8 @@ final class HostProbeTests: XCTestCase {
         XCTAssertEqual(probe.status, .reachable)
         XCTAssertEqual(probe.executionHostId, "ssh:build")
         XCTAssertNil(probe.note)
+        XCTAssertNotNil(probe.latencyMs)
+        XCTAssertGreaterThanOrEqual(probe.latencyMs ?? -1, 0)
     }
 
     func testPermissionDeniedIsAuthRequiredNotUnreachable() async {

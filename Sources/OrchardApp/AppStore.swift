@@ -65,6 +65,9 @@ final class AppStore: ObservableObject {
     @Published private(set) var agentStatusByID: [UUID: AgentStatusSnapshot] = [:]
     /// Last completed T20 port sweep (attributed listeners only).
     @Published private(set) var portSnapshot = PortScanSnapshot.empty
+    /// T45: last published per-host reachability. Presentation-only — a status
+    /// change never folds into workspace, worktree, terminal, or worker state.
+    @Published private(set) var hostLiveness = HostLivenessSnapshot.empty
 
     /// Currently focused tab group, so split/new-tab commands have a target.
     @Published var focusedGroupID: UUID?
@@ -97,6 +100,7 @@ final class AppStore: ObservableObject {
     private let legacyWorkspacesKey = "orchard.workspaces"
     private var repoObserveTask: Task<Void, Never>?
     private var portObserveTask: Task<Void, Never>?
+    private var hostLivenessObserveTask: Task<Void, Never>?
     private var statusListenTasks: [UUID: Task<Void, Never>] = [:]
     private var notificationsAuthorized = false
 
@@ -445,6 +449,7 @@ final class AppStore: ObservableObject {
         applyRegistry(workspaceService.listRepos(), selectNewProjects: true)
         observeRepoRegistry()
         observePorts()
+        observeHostLiveness()
     }
 
     func ports(for record: WorktreeRecord, in project: ProjectSession) -> [WorkspaceListeningPort] {
@@ -551,6 +556,34 @@ final class AppStore: ObservableObject {
                 self?.portSnapshot = snapshot
             }
         }
+    }
+
+    private func observeHostLiveness() {
+        hostLivenessObserveTask?.cancel()
+        guard let service = runtime?.hostLiveness else { return }
+        hostLiveness = service.snapshot()
+        hostLivenessObserveTask = Task { [weak self] in
+            for await snapshot in service.snapshots() {
+                guard !Task.isCancelled else { break }
+                self?.hostLiveness = snapshot
+            }
+        }
+    }
+
+    /// Freshness for Open Remote: run a sweep if the producer is awake, and
+    /// one-shot any registered host the snapshot does not yet cover. Publishing
+    /// into the liveness service only — never a workspace or worker mutation.
+    func refreshHostLiveness() async {
+        guard let service = runtime?.hostLiveness else { return }
+        let snapshot = await service.sweep()
+        let known = Set(snapshot.hosts.keys)
+        // Idle (no remote repo/pane): one-shot every registered host so the
+        // picker is not blank. Awake: fill in unused registered hosts only.
+        let missing = registeredHosts.filter { snapshot.idle || !known.contains($0.name) }
+        for host in missing {
+            service.publish(await HostProbe.check(host: host))
+        }
+        hostLiveness = service.snapshot()
     }
 
     /// Bring `projects` in line with the registry. Missing *local* directories
@@ -725,6 +758,8 @@ final class AppStore: ObservableObject {
         repoObserveTask = nil
         portObserveTask?.cancel()
         portObserveTask = nil
+        hostLivenessObserveTask?.cancel()
+        hostLivenessObserveTask = nil
         for task in statusListenTasks.values { task.cancel() }
         statusListenTasks.removeAll()
         agentStatusByID.removeAll()

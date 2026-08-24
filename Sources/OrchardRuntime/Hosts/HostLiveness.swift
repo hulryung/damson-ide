@@ -12,6 +12,11 @@ import Foundation
 /// Why this matters more than it looks: the failure mode it prevents is a coordinator
 /// reading a dropped connection as "the worker died", respawning the work, and ending
 /// up with two agents editing the same worktree from two machines.
+///
+/// Host *reachability* (T45, `HostReachability` / `HostLivenessService`) is a different
+/// question: a periodic probe publishes reachable|auth-required|unreachable on the
+/// host itself. That status never produces a `HostLivenessVerdict` — an unreachable
+/// host makes processes `unverifiable`, never `exited`.
 public enum HostLivenessVerdict: Equatable, Sendable {
     /// The owning host confirmed the process is running.
     case live

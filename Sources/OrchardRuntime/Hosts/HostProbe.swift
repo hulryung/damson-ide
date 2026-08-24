@@ -24,9 +24,14 @@ public struct HostProbeResult: Codable, Equatable, Sendable {
     /// Present when the probe did not reach the host: the reminder that this is loss of
     /// contact, not evidence that anything there stopped.
     public let note: String?
+    /// When this probe finished. Presentation-only — never persisted on the host record.
+    public let lastCheckedAt: Date
+    /// Wall-clock duration of this probe in milliseconds, when it was measured.
+    public let latencyMs: Double?
 
     public init(name: String, executionHostId: String, status: HostReachability,
-                detail: String, command: String, timedOut: Bool, note: String? = nil) {
+                detail: String, command: String, timedOut: Bool, note: String? = nil,
+                lastCheckedAt: Date = Date(), latencyMs: Double? = nil) {
         self.name = name
         self.executionHostId = executionHostId
         self.status = status
@@ -34,6 +39,12 @@ public struct HostProbeResult: Codable, Equatable, Sendable {
         self.command = command
         self.timedOut = timedOut
         self.note = note
+        self.lastCheckedAt = lastCheckedAt
+        self.latencyMs = latencyMs
+    }
+
+    public func ageSeconds(now: Date = Date()) -> TimeInterval {
+        max(0, now.timeIntervalSince(lastCheckedAt))
     }
 }
 
@@ -229,7 +240,9 @@ public enum HostProbe {
                              runner: HostCommandRunner = ProcessHostCommandRunner(),
                              timeout: TimeInterval = defaultTimeout) async -> HostProbeResult {
         let argv = SSHCommand.probeArgv(for: host)
+        let started = Date()
         let result = await runner.run(argv, timeout: timeout)
+        let finished = Date()
         let (status, detail) = classify(result)
         return HostProbeResult(
             name: host.name,
@@ -241,7 +254,9 @@ public enum HostProbe {
             note: status == .unreachable
                 ? "Unreachable is loss of contact, not evidence that anything on "
                     + "\(host.name) stopped."
-                : nil)
+                : nil,
+            lastCheckedAt: finished,
+            latencyMs: finished.timeIntervalSince(started) * 1000)
     }
 
     private static func firstLine(_ text: String) -> String? {

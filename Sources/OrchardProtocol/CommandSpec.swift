@@ -113,9 +113,9 @@ public enum OrchardCommands {
         let capability = flag("dispatch-capability", "Dispatch capability secret", "secret")
         let run = flag("run", "Run identifier", "id")
         func command(_ name: String, _ summary: String, _ flags: [FlagSpec] = [],
-                     positionals: [String] = []) -> CommandSpec {
+                     positionals: [String] = [], notes: [String] = []) -> CommandSpec {
             CommandSpec(name: name, summary: summary, usage: "orchard \(name) [options]",
-                        flags: flags + [json], positionalArgs: positionals)
+                        flags: flags + [json], positionalArgs: positionals, notes: notes)
         }
         return [
             command("status", "Show runtime status"),
@@ -234,13 +234,19 @@ public enum OrchardCommands {
             // reachable|auth-required|unreachable and never waits on a human, because
             // BatchMode makes OpenSSH fail instead of prompting. Unreachable is loss of
             // contact, never evidence that anything on the host stopped.
+            // T45: `host list` also shows the last periodic probe and its age when a
+            // remote repo or remote pane has kept the producer awake.
             command("host", "Register and probe remote SSH hosts", [
                 flag("name", "Host name (an ~/.ssh/config alias, or your own label)", "name"),
                 flag("hostname", "Hostname or address to connect to", "host"),
                 flag("user", "Login user", "user"),
                 flag("port", "Port (default 22)", "n"),
                 flag("import", "With no name, list importable ~/.ssh/config hosts; with a name, import it"),
-            ], positionals: ["list|add|check", "name"]),
+            ], positionals: ["list|add|check", "name"],
+               notes: [
+                   "host list shows live status (reachable|auth-required|unreachable) and how long ago it was checked, when a remote repo or remote pane exists.",
+                   "Unreachable is loss of contact, never evidence that anything on the host stopped. A status change updates host presentation only.",
+               ]),
             command("reset", "Reset orchestration state", [flag("all", "Reset all"), flag("tasks", "Reset tasks"), flag("messages", "Reset messages")]),
         ]
     }()
