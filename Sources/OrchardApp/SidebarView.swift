@@ -197,6 +197,13 @@ struct SidebarView: View {
             .controlSize(.small)
             .help("Orchestration runs")
 
+            Button { store.showAutomations?() } label: {
+                Image(systemName: "clock.arrow.2.circlepath")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help("Scheduled automations")
+
             Menu {
                 Picker("Theme", selection: Binding(
                     get: { store.settings.themeName },

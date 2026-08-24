@@ -45,4 +45,17 @@ final class AutomationScheduleTests: XCTestCase {
             after: date("2026-08-21T10:01:00Z"), calendar: calendar),
             date("2026-08-24T10:00:00Z"))
     }
+
+    func testDueSkipsDisabledAutomations() {
+        var item = automation(.hourly, "00:15")
+        item.createdAt = date("2026-08-23T08:00:00Z")
+        item.enabled = false
+        let due = AutomationSchedule.due([item], since: date("2026-08-23T08:00:00Z"),
+                                         through: date("2026-08-23T12:40:00Z"), calendar: calendar)
+        XCTAssertTrue(due.isEmpty)
+        item.enabled = true
+        let enabled = AutomationSchedule.due([item], since: date("2026-08-23T08:00:00Z"),
+                                             through: date("2026-08-23T12:40:00Z"), calendar: calendar)
+        XCTAssertEqual(enabled.count, 1)
+    }
 }

@@ -88,6 +88,7 @@ final class AppStore: ObservableObject {
     var focusMainWindow: (() -> Void)?
     var showDashboard: (() -> Void)?
     var showOrchestration: (() -> Void)?
+    var showAutomations: (() -> Void)?
     var showSettings: (() -> Void)?
 
     private var shells: [UUID: DamsonSession] = [:]
@@ -274,6 +275,29 @@ final class AppStore: ObservableObject {
     func workerPaneExists(handle: String) -> Bool {
         if resolvedWorkerHandle(handle) != nil { return true }
         return agentMatching(handle: handle) != nil
+    }
+
+    /// Whether a workspace identity is currently projected in the sidebar.
+    func workspaceIdentityExists(_ identity: String) -> Bool {
+        for project in projects {
+            if let repoID = project.repoID,
+               "\(repoID)::\(project.repo.path)" == identity {
+                return true
+            }
+            for record in project.records {
+                if workspaceIdentity(for: record, in: project) == identity { return true }
+            }
+        }
+        return false
+    }
+
+    /// Focus a workspace by runtime identity (`repoId::path`). Returns false
+    /// when that checkout is no longer open in this app.
+    @discardableResult
+    func focusWorkspaceIdentity(_ identity: String) -> Bool {
+        guard selectWorkspace(identity: identity) else { return false }
+        focusMainWindow?()
+        return true
     }
 
     /// Focus the live worker pane when it exists in this app. Returns false
@@ -497,6 +521,8 @@ final class AppStore: ObservableObject {
             toggleFocusedViewMode()
         case .openDashboard:
             showDashboard?()
+        case .openAutomations:
+            showAutomations?()
         case .settings:
             showSettings?()
         }
