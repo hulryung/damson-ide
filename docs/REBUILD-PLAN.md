@@ -594,10 +594,9 @@ before/after measurement table in the worker_done for every change made.
 
 ### Wave 12+ backlog
 
-Intermittent single-test failure in full-suite runs (twice observed post-T45/T46
-merges, passes on rerun; suspected load-sensitive thresholds in the T46
-PerformanceAuditTests / socket-concurrency / watcher-burst tests) — catch the name
-and loosen the threshold or serialize the bench.
+Intermittent single-test failure in full-suite runs: likely root-caused by the
+accepted-socket O_NONBLOCK inheritance regression (fixed post-wave-11 — accepted
+connections now clear the flag); if a 1-failure run recurs, capture the test name.
 
 T39/T43 leftovers (need a real remote host to verify): sshd reverse-forward grant, real
 remote Claude POSTing through the tunnel, fixed-range port claim surviving to the
