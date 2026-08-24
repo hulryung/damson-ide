@@ -24,6 +24,9 @@ public final class OrchardRuntimeHost {
     public nonisolated let fileService: FileService
     public nonisolated let fileOpenCenter: FileOpenCenter
     public nonisolated let orchestration: LiveOrchestrationStore
+    /// Same worker-verb context the CLI `WorkerCommandHandler` uses, so the
+    /// in-app orchestration view cannot bypass terminal identity checks.
+    public nonisolated let workerRuntime: WorkerRuntimeContext
     public nonisolated let waitCenter: MessageWaitCenter
     /// T10: per-workspace embedded browser. WebKit-free here — the app attaches
     /// a `BrowserWebHost` over its WKWebViews; without one the verbs fail typed.
@@ -122,6 +125,7 @@ public final class OrchardRuntimeHost {
         let workerRuntime = WorkerRuntimeContext.live(cliCommand: cliCommand,
                                                       workspaces: workspaceService,
                                                       terminals: terminalService)
+        self.workerRuntime = workerRuntime
         let automationService = AutomationService(store: dataStore) { automation in
             switch automation.target {
             case .repo(let selector):

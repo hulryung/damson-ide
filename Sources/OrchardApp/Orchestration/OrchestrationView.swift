@@ -2,8 +2,9 @@ import AppKit
 import SwiftUI
 import OrchardRuntime
 
-/// Read-only window over the runtime's orchestration store: runs → tasks →
-/// dispatches/workers, plus a worker archive viewer. No mutation controls.
+/// Window over the runtime's orchestration store: runs → tasks →
+/// dispatches/workers, a worker archive viewer, and guarded mutations
+/// (release / retain / stop / gate-resolve) that use the CLI verb paths.
 struct OrchestrationView: View {
     @EnvironmentObject var store: AppStore
     @StateObject private var browser = OrchestrationBrowser()
@@ -26,6 +27,13 @@ struct OrchestrationView: View {
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: UInt64(OrchestrationBrowser.refreshInterval * 1_000_000_000))
                 await browser.refresh(from: store)
+            }
+        }
+        .sheet(item: $browser.pendingConfirm) { pending in
+            OrchestrationConfirmSheet(pending: pending, busy: browser.mutating) {
+                Task { await browser.confirmPending(store: store) }
+            } cancel: {
+                browser.pendingConfirm = nil
             }
         }
     }
@@ -62,7 +70,7 @@ struct OrchestrationView: View {
                 .font(Tokens.fontHeader)
                 .foregroundStyle(Tokens.textSecondary)
             Spacer()
-            Text("Observation only")
+            Text("Guarded controls")
                 .font(Tokens.fontPill)
                 .foregroundStyle(Tokens.textTertiary)
             if let lastRefreshed = browser.lastRefreshed {
@@ -81,7 +89,7 @@ struct OrchestrationView: View {
             Text("No orchestration runs")
                 .font(Tokens.fontRow)
                 .foregroundStyle(Tokens.textSecondary)
-            Text("Runs created through the orchard CLI appear here. This window never starts, stops, or releases workers.")
+            Text("Runs created through the orchard CLI appear here. Release, retain, stop, and gate-resolve use the same store verbs as the CLI.")
                 .font(Tokens.fontMeta)
                 .foregroundStyle(Tokens.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -214,6 +222,7 @@ struct OrchestrationView: View {
                         Text("Select a run, task, or dispatch.")
                             .font(Tokens.fontMeta)
                             .foregroundStyle(Tokens.textTertiary)
+                        sessionAudit
                     }
                 }
                 .padding(14)
@@ -230,6 +239,7 @@ struct OrchestrationView: View {
             labeled("Created", run.createdAt)
             labeled("Run", run.id)
             labeled("Tasks", run.counts.summary)
+            sessionAudit
         }
     }
 
@@ -251,6 +261,19 @@ struct OrchestrationView: View {
                 .font(Tokens.fontMeta)
                 .foregroundStyle(Tokens.textSecondary)
                 .textSelection(.enabled)
+            if !task.gates.isEmpty {
+                ForEach(task.gates) { gate in
+                    GateResolvePanel(
+                        gate: gate,
+                        freeform: $browser.freeformResolution,
+                        busy: browser.mutating,
+                        lastOutcome: browser.lastOutcome
+                    ) { resolution in
+                        Task { await browser.resolveGate(gateID: gate.id, resolution: resolution, store: store) }
+                    }
+                }
+            }
+            sessionAudit
         }
     }
 
@@ -267,6 +290,18 @@ struct OrchestrationView: View {
                 }
             }
             labeled("Dispatch", dispatch.id)
+            DispatchControlBar(
+                dispatch: dispatch,
+                enablement: browser.enablement(for: dispatch),
+                busy: browser.mutating,
+                lastOutcome: browser.lastOutcome
+            ) { action in
+                switch action {
+                case .release: browser.requestRelease(dispatch)
+                case .retain: Task { await browser.retain(dispatchID: dispatch.id, store: store) }
+                case .stop: browser.requestStop(dispatch)
+                }
+            }
             if let handle = dispatch.agentHandle {
                 labeled("Agent handle", handle)
                 if store.workerPaneExists(handle: handle) {
@@ -291,7 +326,12 @@ struct OrchestrationView: View {
                     .font(Tokens.fontMeta)
                     .foregroundStyle(Tokens.textTertiary)
             }
+            sessionAudit
         }
+    }
+
+    private var sessionAudit: some View {
+        OrchestrationAuditLog(entries: browser.audit)
     }
 
     private func labeled(_ title: String, _ value: String) -> some View {
@@ -408,5 +448,190 @@ struct StatusChip: View {
         case "release_pending", "release_unknown": return .yellow
         default: return Tokens.textSecondary
         }
+    }
+}
+
+enum DispatchControlAction {
+    case release, retain, stop
+}
+
+struct DispatchControlBar: View {
+    let dispatch: OrchestrationDispatchRow
+    let enablement: OrchestrationViewEnablement
+    let busy: Bool
+    let lastOutcome: OrchestrationViewMutationResult?
+    let onAction: (DispatchControlAction) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                if enablement.release {
+                    Button("Release") { onAction(.release) }
+                        .disabled(busy)
+                        .help("Archive output, then close the proven owned terminal")
+                }
+                if enablement.retain {
+                    Button("Retain") { onAction(.retain) }
+                        .disabled(busy)
+                        .help("Keep the worker terminal open")
+                }
+                if enablement.stop {
+                    Button("Stop", role: .destructive) { onAction(.stop) }
+                        .disabled(busy)
+                        .help("Fail this dispatch and close the worker if ownership is proven")
+                }
+            }
+            if let lastOutcome, lastOutcome.target == dispatch.id {
+                MutationOutcomeBanner(result: lastOutcome)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
+struct GateResolvePanel: View {
+    let gate: OrchestrationGateRow
+    @Binding var freeform: String
+    let busy: Bool
+    let lastOutcome: OrchestrationViewMutationResult?
+    let onResolve: (String) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Decision gate")
+                .font(Tokens.fontHeader)
+                .foregroundStyle(Tokens.textSecondary)
+            Text(gate.question)
+                .font(Tokens.fontRow)
+                .fixedSize(horizontal: false, vertical: true)
+            labeled("Gate", gate.id)
+            if gate.options.isEmpty {
+                HStack(spacing: 8) {
+                    TextField("Resolution", text: $freeform)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(busy)
+                    Button("Resolve") { onResolve(freeform) }
+                        .disabled(busy)
+                }
+            } else {
+                HStack(spacing: 8) {
+                    ForEach(gate.options, id: \.self) { option in
+                        Button(option) { onResolve(option) }
+                            .disabled(busy)
+                    }
+                }
+            }
+            if let lastOutcome, lastOutcome.target == gate.id {
+                MutationOutcomeBanner(result: lastOutcome)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Tokens.radius)
+                .fill(Tokens.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Tokens.radius)
+                .strokeBorder(Tokens.border)
+        )
+    }
+
+    private func labeled(_ title: String, _ value: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(title)
+                .font(Tokens.fontMeta)
+                .foregroundStyle(Tokens.textTertiary)
+                .frame(width: 110, alignment: .leading)
+            Text(value)
+                .font(Tokens.fontMono)
+                .textSelection(.enabled)
+        }
+    }
+}
+
+struct MutationOutcomeBanner: View {
+    let result: OrchestrationViewMutationResult
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(headline)
+                .font(Tokens.fontMeta)
+                .foregroundStyle(result.isRefusal ? Color.red : Tokens.textSecondary)
+            if let message = result.message, !message.isEmpty {
+                Text(message)
+                    .font(Tokens.fontMeta)
+                    .foregroundStyle(Tokens.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: Tokens.radius)
+                .fill((result.isRefusal ? Color.red : Tokens.textSecondary).opacity(0.12))
+        )
+    }
+
+    private var headline: String {
+        if let reason = result.displayReason {
+            return "\(result.action) → \(result.outcome) (\(reason))"
+        }
+        return "\(result.action) → \(result.outcome)"
+    }
+}
+
+struct OrchestrationAuditLog: View {
+    let entries: [OrchestrationViewMutationResult]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Session audit")
+                .font(Tokens.fontHeader)
+                .foregroundStyle(Tokens.textSecondary)
+            if entries.isEmpty {
+                Text("Mutations in this window are logged here for the app session.")
+                    .font(Tokens.fontMeta)
+                    .foregroundStyle(Tokens.textTertiary)
+            } else {
+                ForEach(Array(entries.enumerated()), id: \.offset) { _, entry in
+                    Text(OrchestrationViewControls.formatAudit(entry))
+                        .font(Tokens.fontMono)
+                        .textSelection(.enabled)
+                        .foregroundStyle(entry.isRefusal ? Color.red : Tokens.textSecondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .padding(.top, 8)
+    }
+}
+
+struct OrchestrationConfirmSheet: View {
+    let pending: OrchestrationPendingConfirm
+    let busy: Bool
+    let confirm: () -> Void
+    let cancel: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text(pending.title)
+                .font(.system(size: 13, weight: .semibold))
+            Text(pending.body)
+                .font(Tokens.fontMeta)
+                .foregroundStyle(Tokens.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack {
+                Spacer()
+                Button("Cancel", action: cancel)
+                    .keyboardShortcut(.cancelAction)
+                    .disabled(busy)
+                Button(pending.confirmLabel, role: .destructive, action: confirm)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(busy)
+            }
+        }
+        .padding(18)
+        .frame(width: 420)
     }
 }
