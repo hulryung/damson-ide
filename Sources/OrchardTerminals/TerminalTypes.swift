@@ -40,13 +40,20 @@ public struct TerminalCreateSpec: Sendable {
     /// What this pane's agent status can actually be read from, when that differs from
     /// the default for its engine. nil = the default; see `TerminalStatusDetection`.
     public let statusDetection: TerminalStatusDetection?
+    /// Where the work happens on the far side, for a pane whose host is not `local`
+    /// (T43). Deliberately separate from `cwd`, which is where the *local* `ssh` is
+    /// launched from: handing a remote path to a local `chdir` either fails or finds a
+    /// same-named local directory. Recorded so a restored or reconnected pane can say
+    /// which directory on which machine it belongs to without re-parsing its argv.
+    public let remoteCwd: String?
 
     public init(handle: String, paneKey: String, worktreeId: String?, cwd: String?,
                 engineID: String, prompt: String, title: String?,
                 executionHostId: String = "local",
                 initialCols: Int? = nil, initialRows: Int? = nil,
                 launchArgv: [String]? = nil, hookToken: String? = nil,
-                statusDetection: TerminalStatusDetection? = nil) {
+                statusDetection: TerminalStatusDetection? = nil,
+                remoteCwd: String? = nil) {
         self.handle = handle
         self.paneKey = paneKey
         self.worktreeId = worktreeId
@@ -60,7 +67,14 @@ public struct TerminalCreateSpec: Sendable {
         self.launchArgv = launchArgv
         self.hookToken = hookToken
         self.statusDetection = statusDetection
+        self.remoteCwd = remoteCwd
     }
+
+    /// Whether this pane's work runs on another machine. The raw id is compared
+    /// against `local` rather than parsed here: this module deliberately knows nothing
+    /// about the host registry, and every id that is not the literal `local` names a
+    /// host — including one this build cannot parse, which must never read as local.
+    public var isRemote: Bool { executionHostId != "local" }
 }
 
 /// Where one pane's agent status comes from, and what it therefore cannot report.

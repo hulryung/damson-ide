@@ -129,7 +129,11 @@ public struct TerminalCommandHandler: CommandHandler, @unchecked Sendable {
                     engineID: "shell",
                     prompt: SSHCommand.remoteShellCommandLine(for: record, command: remoteCommand),
                     title: title,
-                    executionHostId: host.rawValue)
+                    executionHostId: host.rawValue,
+                    // Where the work is, recorded separately from the local `cwd` the
+                    // pane deliberately does not have: a restored or reconnected pane
+                    // has to be able to say which directory on which machine it is.
+                    remoteCwd: path)
                 return try encodeJSON(summary)
             }
             if host.isLocal {
@@ -252,7 +256,8 @@ public struct TerminalCommandHandler: CommandHandler, @unchecked Sendable {
             executionHostId: executionHostId,
             launchArgv: plan.argv,
             hookToken: plan.hookToken,
-            statusDetection: plan.detection)
+            statusDetection: plan.detection,
+            remoteCwd: path)
     }
 
     /// `--host` defaults to `local`. An unparseable value is rejected rather than

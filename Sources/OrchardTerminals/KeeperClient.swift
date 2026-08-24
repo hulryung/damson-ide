@@ -44,6 +44,42 @@ public struct KeeperAdoptedPTY: Sendable {
     }
 }
 
+/// What a claim conversation established, beyond the fds it recovered.
+///
+/// The distinction the boot side needs is not "did I get this pane back" but *why not*.
+/// A keeper that ANSWERED and reported a pane as no longer alive observed the EOF
+/// itself: that is real evidence the child ended. A keeper that never answered — it
+/// crashed, it timed out, its socket is gone — tells us nothing at all. For a local
+/// pane the two collapse into the same outcome (the pane closes either way). For a
+/// remote one they are rule 2's whole distinction: evidence of an ending, versus loss
+/// of contact with the only process that could report one.
+///
+/// Subscript/`count`/`isEmpty` forward to the recovered panes, so a caller that only
+/// wants the fds reads exactly as it did before.
+public struct KeeperClaimOutcome: Sendable {
+    public let panes: [String: KeeperAdoptedPTY]
+    /// Whether a keeper answered the claim at all.
+    public let answered: Bool
+    /// Uuids an *answering* keeper accounted for as no longer alive — reported dead in
+    /// its inventory, absent from it entirely, or refused mid-claim. Empty when no
+    /// keeper answered, because then nothing was observed.
+    public let ended: Set<String>
+
+    public init(panes: [String: KeeperAdoptedPTY], answered: Bool, ended: Set<String>) {
+        self.panes = panes
+        self.answered = answered
+        self.ended = ended
+    }
+
+    public subscript(uuid: String) -> KeeperAdoptedPTY? { panes[uuid] }
+    public var isEmpty: Bool { panes.isEmpty }
+    public var count: Int { panes.count }
+
+    /// Whether the keeper positively accounted for this pane's child being gone, as
+    /// opposed to us never having heard from the keeper.
+    public func endingObserved(_ uuid: String) -> Bool { answered && ended.contains(uuid) }
+}
+
 /// The app side of the keeper handshake — Orchard's counterpart of damson's
 /// `SessionHandoff`, speaking the same public `KeeperProtocol` (DamsonControl).
 ///
@@ -157,7 +193,7 @@ public enum KeeperClient {
     /// whatever could be claimed (empty when the keeper is gone or held nothing
     /// useful). Panes the keeper holds that aren't in `wanted` are closed by the
     /// keeper at `end` — their records no longer exist in the saved state.
-    public static func claim(generation: String, wanted: [String]) -> [String: KeeperAdoptedPTY] {
+    public static func claim(generation: String, wanted: [String]) -> KeeperClaimOutcome {
         let path = KeeperPaths.socketPath(generation: generation)
         var sock: Int32 = -1
         for attempt in 0..<3 {
@@ -172,7 +208,8 @@ public enum KeeperClient {
         }
         guard sock >= 0 else {
             NSLog("orchard: no keeper answering for generation %@", generation)
-            return [:]
+            // Nothing was observed, so nothing is claimed about any held child.
+            return KeeperClaimOutcome(panes: [:], answered: false, ended: [])
         }
         defer { close(sock) }
         disableSIGPIPE(sock)
@@ -183,19 +220,27 @@ public enum KeeperClient {
     /// inventory → per-uuid claim/ack → end. Split out so tests can run it against
     /// `KeeperCore.serveClaim` on a socketpair.
     public static func claimConversation(socket: Int32, generation: String,
-                                         wanted: [String]) -> [String: KeeperAdoptedPTY] {
+                                         wanted: [String]) -> KeeperClaimOutcome {
         guard keeperWriteLine(fd: socket, KeeperClaimHello(generation: generation)),
               let invLine = keeperReadLine(fd: socket),
               let inventory = keeperDecode(KeeperInventory.self, invLine), inventory.ok else {
-            return [:]
+            // A rejected hello (wrong generation) is not an answer *about these panes*:
+            // whatever that keeper holds, it is not ours to conclude anything about.
+            return KeeperClaimOutcome(panes: [:], answered: false, ended: [])
         }
         let alive = Set(inventory.sessions.filter(\.alive).map(\.uuid))
+        // Everything we asked about that the keeper did not list as alive, it accounted
+        // for: reported dead, or already closed and dropped from its inventory.
+        var ended = Set(wanted.filter { !alive.contains($0) })
 
         var out: [String: KeeperAdoptedPTY] = [:]
         for uuid in wanted where alive.contains(uuid) {
             guard keeperWriteLine(fd: socket, KeeperClaimRequest(op: "claim", uuid: uuid)),
                   let grantLine = keeperReadLine(fd: socket),
                   let grant = keeperDecode(KeeperClaimGrant.self, grantLine), grant.ok else {
+                // The keeper refused the grant — typically "died during claim", the
+                // final drain finding EOF. That is still the keeper observing an end.
+                ended.insert(uuid)
                 continue
             }
             var fd: Int32 = -1
@@ -216,6 +261,6 @@ public enum KeeperClient {
         if !out.isEmpty {
             NSLog("orchard: adopted %d surviving pane(s)", out.count)
         }
-        return out
+        return KeeperClaimOutcome(panes: out, answered: true, ended: ended)
     }
 }

@@ -211,7 +211,11 @@ public enum OrchardCommands {
                 // T29/T32: a pane on a registered host. Opening one in a remote worktree
                 // needs no flag — the pane inherits the workspace's stamped host.
                 flag("host", "Execution host: local (default) or ssh:<name>", "id"),
-            ], positionals: ["list|create|read|send|wait|split|close|rename"]),
+                // T43: `reconnect` addresses a pane whose connection ended, and after a
+                // restart the handle a caller remembers belongs to a previous app run —
+                // the paneKey is the identity that survived.
+                flag("pane", "Durable pane key (terminal reconnect)", "paneKey"),
+            ], positionals: ["list|create|read|send|wait|split|close|rename|reconnect"]),
             // T10 embedded browser. Refs (@eN) come from the latest `snapshot` of a
             // page and are invalidated by any navigation (top-level or subframe) —
             // re-snapshot, don't guess. T21 session profiles: `tab profile

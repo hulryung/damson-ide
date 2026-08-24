@@ -1,11 +1,13 @@
 # Remote hosts (SSH execution boundary)
 
-Status: **stages 1–3 shipped** — T29 (wave 7): host registry, bounded connectivity probe,
+Status: **stages 1–4 shipped** — T29 (wave 7): host registry, bounded connectivity probe,
 remote shell panes. T32 (wave 8): remote repo registration, remote worktree
 list/create/rm over a bounded ssh runner, remote worktrees in the workspace registry,
 panes that open a login shell inside one. T39 (wave 10): remote agent panes with their
 hook channel carried over an SSH reverse tunnel, and supervised dispatch refused typed
-at the host boundary. Keeper interplay (stage 4) is staged below and out of scope.
+at the host boundary. T43 (wave 11): remote panes restored across an app restart with
+their host, directory, invocation and hook channel — and a reconnect affordance when the
+connection did not survive.
 
 This document is the contract for every later remote feature. It exists before the
 features do because the expensive mistakes here are *semantic*, not mechanical: what a
@@ -342,12 +344,68 @@ has nothing to resolve for a remote pane; and dispatch authority carrying the ho
 as `unverifiable` rather than being reaped) waits for the stage where a dispatch can
 legitimately live there at all.
 
-**Stage 4 — keeper interplay.** T23's keeper hands local PTY masters across an app
-restart. A remote pane's master is local too, so the mechanism transfers — but the
-restoration record must carry `executionHostId`, adoption must be fenced per host (§5),
-and a restored remote pane whose connection died during the restart is `unverifiable`:
-it reopens as an inspectable dead pane, never as a silently reconnected live one, and
-never as a local shell.
+**Stage 4 — remote pane restoration (T43, wave 11, done).** T23's keeper already hands
+local PTY masters across an app restart, and a remote pane's master is local too, so
+the `ssh` child survives unchanged. What T43 restores is everything on *this* side that
+the surviving fd cannot carry.
+
+- **The record carries the identity.** `KeeperPaneRecord.remote` holds the
+  `executionHostId`, the remote directory, the verbatim launch argv (or, for a
+  prompt-launched remote shell, its command line), the recorded `statusDetection`, and
+  the tunnel's two ports. The stamp lives *inside* that block and is not optional, so a
+  record either carries the whole remote identity or is a local pane — a pane adopted
+  without its stamp would come back claiming to be here while its child talks to
+  another machine. The block is optional, so a state file written before this stage
+  still decodes (it has no remote panes to describe) rather than failing and sending
+  every held child a SIGHUP.
+- **Adoption re-establishes the pane, and re-decides the channel.** The adopted spec
+  gets the host, the remote cwd, the argv, and the hook token back. The status channel
+  is decided at boot, not replayed: the surviving `ssh` is still forwarding
+  `-R <remote>:127.0.0.1:<local>` to the port the *previous* app instance's hook server
+  held, and nothing can re-point it — the child is not ours to reconfigure. So the
+  runtime's channel asks for that exact local port back (`HookServerChannel
+  .preferredPort`, set from the restoration state before anything binds). Got it →
+  `statusDetection: hooks` and the pane's token re-subscribes, so the far side's
+  already-installed config keeps landing. Lost it → the pane keeps running and degrades
+  to `fingerprint-only` with the port numbers in the limitation sentence, exactly like
+  T39's launch-time degradation. Losing the port is never a reason to close a working
+  pane.
+- **A connection that ended while the app was gone stays inspectable.** For a local
+  pane, a child that died while held closes the pane (T23's documented limit). A remote
+  pane is different in kind: what ended is a *connection*, and rule 2 says that is not
+  evidence about the far side. It is adopted disconnected, with **no exit status at
+  all** — a synthesized `0` would read through `verdictForPTYEnd` as "the remote command
+  exited cleanly", a death certificate nobody issued — so it reads `unverifiable`, and
+  it keeps the spec a reconnect relaunches from. Its readiness stack is deliberately not
+  wired for the same reason: driving a detector from a dead session manufactures exactly
+  that fake status.
+- **Reconnect is a decision, never a boot behaviour.** `terminal reconnect --terminal
+  <handle> | --pane <paneKey>` (RPC `terminal-reconnect`; a button on the pane in the
+  app) spawns a fresh `ssh` from the pane's own recorded spec under the same `paneKey`
+  with the next incarnation. Same host, same remote directory, same agent argv, same
+  hook token — the token is already written into a config file on the far side, and
+  reminting it would reopen the pane as a different, statusless agent. The one thing
+  rewritten is the forward's *local* end, re-pointed at the port this app instance
+  bound; with no hook server at all the `-R` is dropped entirely and the pane says it
+  is fingerprint-only, because an `-R` into nothing is a channel that silently swallows
+  every event. Typed refusals: a local pane, a pane that is still connected (reopening
+  would tear down a working connection to a machine we cannot see), and a host that has
+  left the registry — its panes stay inspectable (§5 rule 3), but a name the user
+  removed is not one Orchard dials again.
+- **All copy is verdict copy.** The pane says the connection ended, that whether
+  anything is still running there is unverifiable, and that reconnecting opens a *new*
+  connection rather than resuming the old one. The button says "Reconnect" and not
+  "Resume" or "Reattach" for the same reason.
+
+Verified with scripted-runner and keeper-fake tests only (`KeeperRemoteRestorationTests`,
+`RemotePaneReconnectTests`): record round-trip through its JSON, rebind vs typed
+degradation, ended-pane adoption, and reconnect spec fidelity. What still needs a real
+host: that `sshd` grants the same reverse forward again on a reconnect, and that a real
+Claude Code on the far side keeps POSTing through a forward whose local end was rebound
+under it by a new app instance. Still open by design: the keeper cannot hand back a dead
+pane's buffered output (a claim requires a live fd), so a restored ended pane has no
+scrollback; and adoption is not yet *fenced* per host in the §5 sense, because one
+runtime still holds one host's worth of panes.
 
 ## 7. Non-goals
 

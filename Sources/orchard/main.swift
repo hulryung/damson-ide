@@ -306,15 +306,22 @@ do {
                     params["_args"] = .array(rest)
                 }
             } else if method.hasPrefix("terminal-") {
-                guard rest.isEmpty else { throw CLIError.usage("usage: orchard terminal list|create|read|send|wait|split|close|rename [options]") }
+                guard rest.isEmpty else { throw CLIError.usage("usage: orchard terminal list|create|read|send|wait|split|close|rename|reconnect [options]") }
                 let verb = String(method.dropFirst("terminal-".count))
-                let known = ["list", "create", "read", "send", "wait", "split", "close", "rename"]
-                guard known.contains(verb) else { throw CLIError.usage("usage: orchard terminal list|create|read|send|wait|split|close|rename [options]") }
+                let known = ["list", "create", "read", "send", "wait", "split", "close",
+                             "rename", "reconnect"]
+                guard known.contains(verb) else { throw CLIError.usage("usage: orchard terminal list|create|read|send|wait|split|close|rename|reconnect [options]") }
                 if ["read", "send", "wait", "split", "close", "rename"].contains(verb), params["terminal"] == nil {
                     throw CLIError.usage("terminal \(verb) requires --terminal <handle>")
                 }
                 if verb == "wait", params["for"] == nil { throw CLIError.usage("terminal wait requires --for tui-idle|exit") }
                 if verb == "rename", params["title"] == nil { throw CLIError.usage("terminal rename requires --title <text>") }
+                // Either identity works, and after a restart only one of them can:
+                // a handle is minted per app run, the pane key is the durable name.
+                if verb == "reconnect", params["terminal"] == nil, params["pane"] == nil {
+                    throw CLIError.usage(
+                        "terminal reconnect requires --terminal <handle> or --pane <paneKey>")
+                }
                 if let timeout = params.removeValue(forKey: "timeout-ms") { params["timeoutMs"] = timeout }
                 if (verb == "list" || verb == "create"), params["cwd"] == nil {
                     params["cwd"] = .string(FileManager.default.currentDirectoryPath)
@@ -323,7 +330,7 @@ do {
         } else if method == "worktree" {
             throw CLIError.usage("usage: orchard worktree list|show|current|create|set|rm|ps [options]")
         } else if method == "terminal" {
-            throw CLIError.usage("usage: orchard terminal list|create|read|send|wait|split|close|rename [options]")
+            throw CLIError.usage("usage: orchard terminal list|create|read|send|wait|split|close|rename|reconnect [options]")
         } else if method == "host" {
             throw CLIError.usage("usage: orchard host list | orchard host add <name> [--hostname <h>] [--user <u>] [--port <n>] | orchard host add --import [<name>] | orchard host check <name>")
         }

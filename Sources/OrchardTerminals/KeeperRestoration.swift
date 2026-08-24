@@ -1,5 +1,76 @@
 import Foundation
 
+/// The SSH reverse tunnel a remote agent pane's hook channel travelled through, as it
+/// stood at handoff (docs/design/remote-hosts.md stage 3).
+///
+/// Both ports are recorded, and they answer different questions. `remotePort` is the
+/// listen port named by the hook config already written on the far side, so it is what
+/// a reconnect has to ask `sshd` for again. `localPort` is the port the *surviving*
+/// `ssh` is still forwarding to: that child outlived the app, its `-R` is unchanged,
+/// and binding that exact number again is the only way the next app instance keeps
+/// receiving this agent's hooks. Neither is re-derivable from a bare fd, which is why
+/// both live in the record rather than being reconstructed at boot.
+public struct KeeperTunnelRecord: Codable, Equatable, Sendable {
+    public var remotePort: UInt16
+    public var localPort: UInt16
+
+    public init(remotePort: UInt16, localPort: UInt16) {
+        self.remotePort = remotePort
+        self.localPort = localPort
+    }
+}
+
+/// What makes a restored pane a *remote* pane again: the host it runs on, where on that
+/// host it runs, how the connection is reopened, and what its status could be read from.
+///
+/// The execution host stamp lives inside this block and is **not** optional, because
+/// rule 1 of docs/design/remote-hosts.md says a host is never inferred: a record either
+/// carries the whole remote identity or it is a local pane. Adoption that kept the fd
+/// but lost the stamp would re-register an `ssh` pane as local — the one downgrade the
+/// host rules forbid, and the reason a pane can end up "restored" onto the wrong
+/// machine. Keeping the block optional (rather than adding a defaulted field to
+/// `KeeperPaneRecord`) also means a state file written by a build that predates stage 4
+/// still decodes: it has no remote panes to describe.
+public struct KeeperRemotePaneRecord: Codable, Equatable, Sendable {
+    /// `ssh:<name>` — the raw id, kept as a string so this module stays free of the
+    /// runtime's host registry (same reason `TerminalCreateSpec` does).
+    public var executionHostId: String
+    /// The directory the work is in *on the far side*. Never handed to a local
+    /// `chdir` — a remote path given to one either fails or finds a same-named local
+    /// directory — but recorded so a restored pane can say where it is and a reconnect
+    /// lands in the same place.
+    public var remoteCwd: String?
+    /// The pane's verbatim local argv (`ssh -tt [-R …] <dest> '<remote command>'`).
+    ///
+    /// Recorded unstripped, unlike `argv`: the agent invocation here sits inside a
+    /// single quoted argument bound for another machine's shell, so the local restart
+    /// stripper has no business rewriting it — and the `-R` it carries is the pane's
+    /// whole status channel.
+    public var launchArgv: [String]?
+    /// The `shell` engine's prompt-as-command-line, for the T29/T32 remote panes whose
+    /// launch lives in the prompt rather than in an argv. Without it a respawn of a
+    /// restored remote shell would quietly reopen as a *local* shell — the failure
+    /// `TerminalService.respawn` already guards against for live panes.
+    public var launchPrompt: String?
+    public var tunnel: KeeperTunnelRecord?
+    /// What this pane's status could be read from at handoff. Adoption re-decides it
+    /// (the tunnel's local port may not be rebindable), but a pane that was already
+    /// fingerprint-only keeps the limitation it was created with.
+    public var statusDetection: TerminalStatusDetection?
+
+    public init(executionHostId: String, remoteCwd: String? = nil,
+                launchArgv: [String]? = nil, launchPrompt: String? = nil,
+                tunnel: KeeperTunnelRecord? = nil,
+                statusDetection: TerminalStatusDetection? = nil) {
+        self.executionHostId = executionHostId
+        self.remoteCwd = remoteCwd
+        self.launchArgv = launchArgv
+        self.launchPrompt = launchPrompt
+        self.tunnel = tunnel
+        self.statusDetection = statusDetection
+    }
+}
+
 /// One pane's restoration record, persisted at clean-quit handoff and read back on the
 /// next boot to adopt the surviving PTY into the terminal registry under the SAME
 /// `paneKey` (with `incarnation` bumped by the adopter).
@@ -41,12 +112,17 @@ public struct KeeperPaneRecord: Codable, Equatable, Sendable {
     public var repoPath: String?
     /// The worktree directory the agent ran in (agent panes).
     public var worktreePath: String?
+    /// Everything that makes this a pane on another machine (T43). nil is a local
+    /// pane — and the *only* thing that reads as local, since a remote pane's record
+    /// carries its host stamp in here.
+    public var remote: KeeperRemotePaneRecord?
 
     public init(keeperUUID: String, paneKey: String, incarnation: Int,
                 worktreeId: String?, engineID: String, title: String?, cwd: String?,
                 argv: [String], preambleBase64: String, cols: Int, rows: Int,
                 hookToken: String? = nil, hookPort: UInt16? = nil,
-                repoPath: String? = nil, worktreePath: String? = nil) {
+                repoPath: String? = nil, worktreePath: String? = nil,
+                remote: KeeperRemotePaneRecord? = nil) {
         self.keeperUUID = keeperUUID
         self.paneKey = paneKey
         self.incarnation = incarnation
@@ -62,9 +138,16 @@ public struct KeeperPaneRecord: Codable, Equatable, Sendable {
         self.hookPort = hookPort
         self.repoPath = repoPath
         self.worktreePath = worktreePath
+        self.remote = remote
     }
 
     public var preamble: Data { Data(base64Encoded: preambleBase64) ?? Data() }
+
+    /// `local` or `ssh:<name>`. Local is the answer only when the record has no remote
+    /// block at all, which is the same as saying the pane never had a host to lose.
+    public var executionHostId: String { remote?.executionHostId ?? "local" }
+
+    public var isRemote: Bool { remote != nil }
 }
 
 /// Everything a boot needs to reclaim one handoff generation: which keeper to ask
