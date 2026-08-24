@@ -592,7 +592,36 @@ socket-server connection handling audit (thread growth under concurrent CLI load
 cap/reuse), file-watcher and port-sweep budgets under many workspaces, and a
 before/after measurement table in the worker_done for every change made.
 
-### Wave 12+ backlog
+### Wave 12 (T47–T50, parallel; merge order T48 → T49 → T47; T50 report-only)
+
+**T47 — Orchestration view controls.** Add guarded mutations to the T44 view:
+worker-release (enabled only for settled dispatches, confirm sheet naming exactly
+what closes), worker-retain/stop (stop confirms with the task title and warns the
+dispatch fails), gate-resolve (option picker), all through the same store/verb paths
+and refusal semantics as the CLI — a refusal renders the typed reason inline, never a
+silent no-op. Every mutation appends a local audit line in the view.
+
+**T48 — Automations UI.** App surface for T16: an Automations window (menu + sidebar
+entry) listing automations with enable state and next-fire time, a create/edit sheet
+with a trigger builder (hourly/daily/weekdays/weekly/cron field with validation
+preview), target picker (repo → fresh worktree, or existing workspace), provider and
+prompt fields, precheck command with its skip semantics explained, and a run-history
+pane per automation (fired/skipped/failed with timestamps and result links). Drives
+the existing runtime service only.
+
+**T49 — Vault: archive & transcript browser.** A cross-run browser for what workers
+left behind: every dispatch's archives (cleaned/raw terminal tails, transcript pins)
+listed by run/task/agent with a text filter, a reader pane reusing worker-read paths,
+and a retention policy (size/age caps configurable in Settings; prune runs whose
+archives exceed them, never the active run) with a dry-run preview before deletion.
+
+**T50 — Dogfood cycle 3 (report-only).** On the current build: hammer the socket with
+parallel CLI load (e.g. 20 concurrent status/list calls — the O_NONBLOCK regression
+class must stay dead), run the full live cycle again, verify the Orchestration window
+reflects the run live (screenshot evidence), confirm remote_unsupported guards, and
+write docs/reports/dogfood-3.md with comparisons to cycle 2 and any new findings.
+
+### Wave 13+ backlog
 
 Intermittent single-test failure in full-suite runs: likely root-caused by the
 accepted-socket O_NONBLOCK inheritance regression (fixed post-wave-11 — accepted
