@@ -229,11 +229,9 @@ public final class FileWatcher: @unchecked Sendable {
         }
     }
 
-    private static let callback: FSEventStreamCallback = { _, info, count, eventPaths, eventFlags, _ in
+    private static let callback: FSEventStreamCallback = { _, info, count, _, eventFlags, _ in
         guard let info else { return }
         let watcher = Unmanaged<FileWatcher>.fromOpaque(info).takeUnretainedValue()
-        let array = Unmanaged<CFArray>.fromOpaque(eventPaths).takeUnretainedValue()
-        _ = array as? [String] ?? (array as NSArray).compactMap { $0 as? String }
         var rootChanged = false
         for i in 0..<count {
             let flag = eventFlags[i]
