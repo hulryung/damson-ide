@@ -592,7 +592,16 @@ socket-server connection handling audit (thread growth under concurrent CLI load
 cap/reuse), file-watcher and port-sweep budgets under many workspaces, and a
 before/after measurement table in the worker_done for every change made.
 
-### Wave 12 (T47–T50, parallel; merge order T48 → T49 → T47; T50 report-only)
+### Wave 12 (T47–T50, parallel; T50 report-only) — MERGED 2026-08-25, 906 tests
+
+All four landed: T50 dogfood-3 report (socket load 20/20, cycle green, branch cleanup
+verified), T47 orchestration view controls, T48 Automations window (enabled flag with
+default-true decode; due/fireDue skip disabled), T49 Vault (archive browser/reader,
+live-run-protected prune that re-plans and deletes only the preview intersection).
+Merge order became arrival order T50 → T47 → T48 → T49; the only conflicts were
+additive Go-menu/AppStore unions between T48 and T49. Visual pass of the three new
+windows still pending (display was locked at wave end — AX reads and screenshots
+blocked; not a permission problem).
 
 **T47 — Orchestration view controls.** Add guarded mutations to the T44 view:
 worker-release (enabled only for settled dispatches, confirm sheet naming exactly
