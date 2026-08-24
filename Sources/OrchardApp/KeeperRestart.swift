@@ -1,6 +1,7 @@
 import AppKit
 import DamsonTerminal
 import Foundation
+import OrchardRuntime
 import OrchardTerminals
 
 /// T23 restart survival — the app-side quit/boot wiring around the keeper.
@@ -14,7 +15,8 @@ import OrchardTerminals
 /// their project's supervisor so status detection re-attaches.
 ///
 /// Deliberate limits (mirroring damson's docs/CLAUDE-ORCHESTRATION.md §3):
-/// a child that exited while held closes its pane (no respawn); Claude panes do NOT
+/// a LOCAL child that exited while held closes its pane (no respawn) — a remote pane
+/// instead comes back disconnected and reconnectable (T43); Claude panes do NOT
 /// auto-resume conversations (`/resume` stays human); a crash-quit writes nothing and
 /// the next boot is exactly today's fresh boot. App-owned plain shell tabs
 /// (`AppStore.shells`) have no registry identity and are not handed off.
@@ -89,21 +91,34 @@ enum KeeperRestart {
             guard let repoPath = pane.repoPath, let port = pane.hookPort else { continue }
             store.keeperHookPortHints[standardized(repoPath)] = port
         }
+        // T43: the surviving `ssh` of a remote agent pane is still forwarding
+        // `-R <remote>:127.0.0.1:<local>` to the port the PREVIOUS app instance's hook
+        // server held. Nothing can re-point that forward — the child is not ours to
+        // reconfigure — so the runtime's channel asks for that exact port back before
+        // it binds. Losing the race is survivable and typed (the pane degrades to
+        // fingerprint-only and says so); not asking would lose it every time.
+        runtime.hookChannel.preferredPort = state.panes
+            .compactMap { $0.remote?.tunnel?.localPort }
+            .first { $0 != 0 }
     }
 
     /// After `store.restore()` (projects exist, supervisors are up): claim the
     /// keeper's inventory and adopt each surviving pane. A pane whose child exited
-    /// while held is absent from the claim and simply closes — no respawn.
+    /// while held is absent from the claim: a local one simply closes (no respawn),
+    /// a remote one comes back as an ended connection that can be reopened.
     static func completeBoot(store: AppStore) {
         guard let state = pending else { return }
         pending = nil
         guard let runtime = store.runtime else { return }
         let claimed = KeeperClient.claim(generation: state.generation,
                                          wanted: state.panes.map(\.keeperUUID))
-        guard !claimed.isEmpty else { return }
 
         for pane in state.panes {
-            guard let adopted = claimed[pane.keeperUUID] else { continue }
+            guard let adopted = claimed[pane.keeperUUID] else {
+                adoptEndedRemotePane(pane, runtime: runtime, store: store,
+                                     endingObserved: claimed.endingObserved(pane.keeperUUID))
+                continue
+            }
             var config = store.settings.terminalConfig()
             config.cwd = pane.cwd
             config.argv = pane.argv
@@ -132,6 +147,43 @@ enum KeeperRestart {
                 NSLog("orchard: keeper adoption failed for pane %@: %@",
                       pane.paneKey, String(describing: error))
             }
+        }
+    }
+
+    /// A pane the keeper could not hand back: its child ended while we were gone.
+    ///
+    /// For a local pane this is T23's documented limit and the pane simply closes.
+    /// A remote pane is different in kind, not degree: what ended is a *connection*,
+    /// and the design's rule 2 says loss of contact is never evidence that anything on
+    /// the far side stopped. Closing it would erase the only local record that an
+    /// agent was started in a named directory on a named machine — and erase it
+    /// silently, as if nothing had been running. So it comes back inspectable,
+    /// disconnected, and reconnectable.
+    private static func adoptEndedRemotePane(_ pane: KeeperPaneRecord,
+                                             runtime: OrchardRuntimeHost,
+                                             store: AppStore,
+                                             endingObserved: Bool) {
+        guard pane.isRemote,
+              let host = ExecutionHostId(rawValue: pane.executionHostId) else { return }
+        var config = store.settings.terminalConfig()
+        config.cwd = pane.cwd
+        do {
+            _ = try runtime.terminalService.adoptEndedRemote(pane: pane, config: config)
+            // Which sentence the pane gets is decided here, because this is the only
+            // place that knows whether the keeper ANSWERED. A keeper that reported this
+            // child gone observed the ending; a keeper that never answered observed
+            // nothing, and claiming an ending we did not see would invent exactly the
+            // evidence rule 2 requires.
+            store.noteEndedRemotePane(
+                paneKey: pane.paneKey,
+                note: endingObserved
+                    ? RemotePaneRestoration.describeEndedWhileHeld(host: host)
+                    : RemotePaneRestoration.describeHoldUnverifiable(host: host))
+            NSLog("orchard: remote pane %@ restored without a connection (ending %@)",
+                  pane.paneKey, endingObserved ? "observed" : "unverifiable")
+        } catch {
+            NSLog("orchard: could not restore ended remote pane %@: %@",
+                  pane.paneKey, String(describing: error))
         }
     }
 

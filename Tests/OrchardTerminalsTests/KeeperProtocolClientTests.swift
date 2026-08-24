@@ -165,5 +165,46 @@ final class KeeperProtocolClientTests: XCTestCase {
     func testClaimWithNoKeeperAnsweringReturnsEmpty() {
         let out = KeeperClient.claim(generation: "nosuchgen", wanted: ["x"])
         XCTAssertTrue(out.isEmpty)
+        // And it says nothing about the panes it could not recover. A keeper that never
+        // answered observed nothing, so a remote pane's connection is `unverifiable`
+        // rather than ended (docs/design/remote-hosts.md rule 2).
+        XCTAssertFalse(out.answered)
+        XCTAssertTrue(out.ended.isEmpty)
+        XCTAssertFalse(out.endingObserved("x"))
+    }
+
+    /// A keeper that ANSWERS and does not list a pane as alive observed that child
+    /// ending itself — the one case where an unrecovered pane is evidence, not silence.
+    func testAnAnsweringKeeperAccountsForThePanesItNoLongerHolds() {
+        let (clientEnd, serverEnd) = socketPair()
+        let (readEnd, writeEnd) = nonBlockingPipe()
+        let keeper = KeeperCore()
+        keeper.adopt([
+            KeeperHeld(uuid: "alive-one", fd: readEnd, pid: 11, startSec: 0, startUsec: 0,
+                       buffer: Data(), alive: true),
+            // A child that reached EOF while held: the keeper closed its fd and knows it.
+            KeeperHeld(uuid: "dead-one", fd: -1, pid: 12, startSec: 0, startUsec: 0,
+                       buffer: Data(), alive: false),
+        ])
+
+        let served = expectation(description: "serveClaim finished")
+        DispatchQueue.global().async {
+            _ = keeper.serveClaim(conn: serverEnd, generation: "G")
+            served.fulfill()
+        }
+        let out = KeeperClient.claimConversation(
+            socket: clientEnd, generation: "G",
+            wanted: ["alive-one", "dead-one", "never-held"])
+        wait(for: [served], timeout: 5)
+
+        XCTAssertTrue(out.answered)
+        XCTAssertNotNil(out["alive-one"])
+        XCTAssertEqual(out.ended, ["dead-one", "never-held"])
+        XCTAssertTrue(out.endingObserved("dead-one"))
+        XCTAssertFalse(out.endingObserved("alive-one"))
+
+        if let fd = out["alive-one"]?.fd { close(fd) }
+        close(clientEnd); close(writeEnd)
+        keeper.closeAllHeld(reason: "test teardown")
     }
 }

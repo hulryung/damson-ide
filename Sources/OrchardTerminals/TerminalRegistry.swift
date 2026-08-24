@@ -21,8 +21,11 @@ public final class TerminalRecord {
     public var title: String?
     public let engine: AgentEngine
     public let createdAt = Date()
-    /// The create spec, retained so a respawn can re-run the factory for this pane.
-    let spec: TerminalCreateSpec
+    /// The create spec, retained so a respawn can re-run the factory for this pane —
+    /// and, for a remote pane, so a reconnect has the host, the remote directory and
+    /// the invocation to reopen the connection with (T43). Replaced whenever the pane
+    /// gets a new PTY, so it always describes the incarnation that is actually running.
+    private(set) var spec: TerminalCreateSpec
 
     public private(set) var session: TerminalSession
     public private(set) var agentSession: AgentSession
@@ -117,8 +120,14 @@ public final class TerminalRecord {
 
     /// Swap in a freshly spawned PTY for this pane (respawn): new handle, next
     /// incarnation, fresh sessions; the stream buffer and status record carry over.
-    func adopt(handle: String, session: TerminalSession, agentSession: AgentSession) {
+    /// `spec` replaces the recorded one when the new PTY was launched from a different
+    /// invocation than the last — a reconnect re-points the reverse tunnel at this
+    /// app instance's hook port, and the summary's `statusDetection` has to move with
+    /// it or the pane would keep advertising a channel it no longer has.
+    func adopt(handle: String, session: TerminalSession, agentSession: AgentSession,
+               spec: TerminalCreateSpec? = nil) {
         cancellables.removeAll()
+        if let spec { self.spec = spec }
         self.handle = handle
         self.incarnation += 1
         self.session = session

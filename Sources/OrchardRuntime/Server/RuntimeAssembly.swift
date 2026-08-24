@@ -218,6 +218,11 @@ public final class OrchardRuntimeHost {
                                                  hookChannel: hookChannel))
         registry.register(HostCommandHandler(registry: hostRegistry,
                                              liveness: hostLiveness))
+        // T43: reopening a remote pane's connection is a host-layer decision (typed
+        // refusals for local panes, live panes, and hosts that left the registry), so
+        // it registers its own verb rather than widening the terminal handler.
+        registry.register(RemotePaneReconnectHandler(service: terminalService,
+                                                     hosts: hostRegistry))
         registry.register(WorkspaceCommandHandler(service: workspaceService))
         registry.register(RepoRegistryHandler(service: workspaceService))
         registry.register(FileCommandHandler(files: fileService,

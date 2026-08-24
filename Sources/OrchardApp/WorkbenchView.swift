@@ -369,6 +369,14 @@ struct TerminalPane: View {
         }
     }
 
+    /// Identity for the terminal surface: the pane it shows, plus which PTY channel
+    /// it is showing. Both halves matter — the first keeps a tab's surface stable
+    /// across redraws, the second rebuilds it when a reconnect puts a new PTY behind
+    /// the same pane.
+    private var paneSurfaceID: String {
+        "\(tab.agentID ?? tab.id):\(store.paneGeneration[tab.id] ?? 0)"
+    }
+
     var body: some View {
         Group {
             if let session = store.damsonSession(for: tab, key: key, cwd: cwd) {
@@ -378,7 +386,11 @@ struct TerminalPane: View {
                     // TerminalFitHost snaps the surface to whole cells so the
                     // first row is never half-clipped (T30).
                     TerminalFitHost(session: session, isActive: tab.viewMode != .chat)
-                        .id(tab.agentID ?? tab.id)
+                        // The surface binds its session when it is built, so a pane
+                        // whose PTY was replaced under it (a reconnect) needs a new
+                        // identity — and deserves one: it is a different channel to
+                        // the same pane, not the old connection resumed.
+                        .id(paneSurfaceID)
                     if tab.isAgentTab, tab.viewMode == .chat {
                         ChatView(controller: store.chatController(for: tab)) {
                             Task { await store.submitChat(for: tab) }
@@ -387,14 +399,17 @@ struct TerminalPane: View {
                     // What the PTY ending proved, in verdict language: for a remote
                     // pane a dropped connection is never a report that the remote work
                     // stopped.
-                    if let note = store.connectionNotes[tab.id] {
-                        Text(note)
-                            .font(Tokens.fontRow)
-                            .padding(.horizontal, 10)
-                            .padding(.vertical, 6)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(Tokens.surface)
+                    if let note = store.connectionEndedNote(for: tab) {
+                        ConnectionEndedBanner(tab: tab, note: note)
                     }
+                }
+            } else if let note = store.connectionEndedNote(for: tab) {
+                // A pane restored with its connection already ended: there is no PTY
+                // to draw, and the tab says what ended rather than quietly opening a
+                // second connection in its place.
+                VStack(spacing: 0) {
+                    ConnectionEndedBanner(tab: tab, note: note)
+                    Spacer(minLength: 0)
                 }
             } else {
                 PlaceholderPane(
@@ -404,6 +419,40 @@ struct TerminalPane: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { store.prepareChat(for: tab) }
+    }
+}
+
+/// What a remote pane says when its connection ended, and the one action that can
+/// follow.
+///
+/// The copy is the verdict vocabulary's, verbatim: the connection ended, what is
+/// happening on the far side is unverifiable, and reconnecting opens a *new*
+/// connection rather than resuming the old one. The button says "Reconnect" for the
+/// same reason — "Resume" or "Reattach" would claim a continuity nobody can prove.
+private struct ConnectionEndedBanner: View {
+    @EnvironmentObject var store: AppStore
+    let tab: WorkbenchTab
+    let note: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(note)
+                .font(Tokens.fontRow)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if store.reconnectablePaneKey(for: tab) != nil {
+                Button(RemotePaneRestoration.reconnectActionTitle) {
+                    store.reconnectRemotePane(tab: tab)
+                }
+                .buttonStyle(.borderless)
+                .font(Tokens.fontRow)
+                .help("Open a new connection from this pane's recorded host, directory "
+                      + "and command. Any work left on the host is untouched.")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Tokens.surface)
     }
 }
 

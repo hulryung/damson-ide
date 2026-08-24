@@ -95,6 +95,19 @@ final class AppStore: ObservableObject {
     /// id. Published so the pane can say "the connection ended" instead of implying the
     /// remote work died — loss of contact is never evidence of death.
     @Published private(set) var connectionNotes: [UUID: String] = [:]
+    /// T43: the durable pane key behind each remote terminal tab, so a pane whose
+    /// connection ended can be reopened under the SAME pane identity instead of being
+    /// replaced by a second, unrelated connection sitting in the same tab.
+    private var remotePaneKeys: [UUID: String] = [:]
+    /// What a restored remote pane says about its connection, keyed by pane key. Set
+    /// at adoption (the only moment that knows whether the keeper answered), read when
+    /// a tab binds to the pane — which happens later, and in a view update.
+    private var endedPaneNotes: [String: String] = [:]
+    /// Bumped when a tab's PTY is replaced under it (a reconnect). The terminal
+    /// surface binds its session at construction, so the identity has to change for
+    /// the new PTY to be shown — and it *should* change: a reconnect is a different
+    /// channel to the same pane, not the old one resumed.
+    @Published private(set) var paneGeneration: [UUID: Int] = [:]
     private var cancellables = Set<AnyCancellable>()
     private let defaults = UserDefaults.standard
     /// Pre-T8 sidebar list. Imported once into the registry, then deleted.
@@ -1074,6 +1087,8 @@ final class AppStore: ObservableObject {
             session.terminate()
         }
         connectionNotes[tabID] = nil
+        remotePaneKeys[tabID] = nil
+        paneGeneration[tabID] = nil
         updateLayout(key) { node in
             _ = node.mutateGroup(groupID) { group in
                 guard group.tabs.count > 1 else { return }
@@ -1406,6 +1421,17 @@ final class AppStore: ObservableObject {
             shells[tab.id] = adopted
             return adopted
         }
+        // A pane restored from the keeper whose `ssh` ended while we were gone (T43).
+        // Opening a fresh connection here would be the wrong answer twice over: it
+        // would silently replace a pane the user has not been told about, and it would
+        // do it without them ever seeing that the previous connection ended. The tab
+        // shows the verdict and a Reconnect button instead.
+        if let ended = endedRemotePane(worktreeId: worktreeId, host: host, tabID: tab.id) {
+            // Only the (unpublished) binding is recorded here: this runs inside a view
+            // update, and the sentence the tab shows is derived on read instead.
+            remotePaneKeys[tab.id] = ended.paneKey
+            return nil
+        }
         guard let record = try? runtime?.hostRegistry.require(host: host) else {
             return nil
         }
@@ -1423,9 +1449,11 @@ final class AppStore: ObservableObject {
                     worktreeId: worktreeId, cwd: nil, engineID: "shell",
                     prompt: prompt, title: tab.title,
                     executionHostId: host.rawValue,
-                    initialCols: size.cols, initialRows: size.rows)
+                    initialCols: size.cols, initialRows: size.rows,
+                    remoteCwd: workspaceIsRemote ? remotePath(for: key) : nil)
                 if let session = runtime.terminalService.damsonSession(handle: summary.handle) {
                     attachConnectionNote(tabID: tab.id, host: host, session: session)
+                    remotePaneKeys[tab.id] = summary.paneKey
                     shells[tab.id] = session
                     return session
                 }
@@ -1461,6 +1489,86 @@ final class AppStore: ObservableObject {
                 self?.connectionNotes[tabID] =
                     HostLiveness.describeConnectionEnd(host: host, exitCode: code)
             }
+        }
+    }
+
+    /// A restored remote pane for this tab's workspace whose connection has ended.
+    ///
+    /// Matched on the workspace *and* the host, because two hosts can hold panes with
+    /// the same worktree id (design §5): adopting one host's dead pane into another
+    /// host's tab would offer to reconnect to the wrong machine.
+    private func endedRemotePane(worktreeId: String?, host: ExecutionHostId,
+                                 tabID: UUID) -> TerminalSummary? {
+        // A tab with no workspace identity has nothing to match on, and matching on
+        // "any dead remote pane" would hand it somebody else's connection.
+        guard let worktreeId,
+              let summary = runtime?.terminalService.endedRemotePane(worktreeId: worktreeId),
+              summary.executionHostId == host.rawValue else { return nil }
+        // One dead pane, one tab: whichever tab already claimed it keeps it, so two
+        // tabs can never offer to reconnect the same pane twice.
+        if let owner = remotePaneKeys.first(where: { $0.value == summary.paneKey })?.key,
+           owner != tabID { return nil }
+        return summary
+    }
+
+    /// Whether this tab is showing a remote pane whose connection ended and can be
+    /// reopened. The button appears only when there is a real pane behind it — an
+    /// affordance that might do nothing is worse than none.
+    func reconnectablePaneKey(for tab: WorkbenchTab) -> String? {
+        endedRemoteSummary(for: tab).map(\.paneKey)
+    }
+
+    /// What this tab's remote pane says about its connection, or nil when there is
+    /// nothing to say.
+    ///
+    /// The live verdict wins when the PTY ended during this app run —
+    /// `HostLiveness.describeConnectionEnd` had a status to read there, and it may say
+    /// the remote command itself exited. A pane restored with its connection already
+    /// gone has no status at all, which is the stronger `unverifiable`, and gets the
+    /// restart wording.
+    func connectionEndedNote(for tab: WorkbenchTab) -> String? {
+        if let note = connectionNotes[tab.id] { return note }
+        guard let summary = endedRemoteSummary(for: tab) else { return nil }
+        if let recorded = endedPaneNotes[summary.paneKey] { return recorded }
+        guard let host = ExecutionHostId(rawValue: summary.executionHostId) else { return nil }
+        return RemotePaneRestoration.describeEndedWhileHeld(host: host)
+    }
+
+    /// Record what a pane restored without a connection says about itself (T43). The
+    /// wording is decided by the boot path, which is the only place that knows whether
+    /// the keeper answered at all.
+    func noteEndedRemotePane(paneKey: String, note: String) {
+        endedPaneNotes[paneKey] = note
+    }
+
+    private func endedRemoteSummary(for tab: WorkbenchTab) -> TerminalSummary? {
+        guard let paneKey = remotePaneKeys[tab.id],
+              let summary = runtime?.terminalService.summary(paneKey: paneKey),
+              !summary.connected else { return nil }
+        return summary
+    }
+
+    /// Reopen the connection behind this tab: a fresh `ssh` from the pane's own
+    /// recorded spec, under the same pane key with the next incarnation. The tab then
+    /// binds the new PTY — a different channel to the same pane, which is why the
+    /// surface is rebuilt rather than re-pointed.
+    func reconnectRemotePane(tab: WorkbenchTab) {
+        guard let paneKey = reconnectablePaneKey(for: tab), let runtime else { return }
+        do {
+            let summary = try runtime.terminalService.reconnectRemote(paneKey: paneKey)
+            connectionNotes[tab.id] = nil
+            endedPaneNotes[paneKey] = nil
+            if let session = runtime.terminalService.damsonSession(handle: summary.handle) {
+                if let host = ExecutionHostId(rawValue: summary.executionHostId) {
+                    attachConnectionNote(tabID: tab.id, host: host, session: session)
+                }
+                shells[tab.id] = session
+            }
+            paneGeneration[tab.id, default: 0] += 1
+        } catch {
+            connectionNotes[tab.id] =
+                "Reconnect failed: \(String(describing: error)). Nothing on the host was "
+                    + "touched."
         }
     }
 

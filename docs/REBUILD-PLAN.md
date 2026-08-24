@@ -599,11 +599,13 @@ merges, passes on rerun; suspected load-sensitive thresholds in the T46
 PerformanceAuditTests / socket-concurrency / watcher-burst tests) — catch the name
 and loosen the threshold or serialize the bench.
 
-T39 leftovers (need a real remote host to verify): sshd reverse-forward grant, real
+T39/T43 leftovers (need a real remote host to verify): sshd reverse-forward grant, real
 remote Claude POSTing through the tunnel, fixed-range port claim surviving to the
-pane's ssh. Open by design: no HostLiveness live producer yet, remote provider
-transcripts unresolvable, keeper restoration of remote panes (SSH stage 4), app-side
-remote agent opening (CLI/RPC only today).
+pane's ssh, the same forward being granted again on a reconnect, and a remote agent
+still POSTing through a forward whose local end a new app instance rebound. Open by
+design: remote provider transcripts unresolvable, a restored ended pane has no
+scrollback (the keeper cannot hand back a dead pane's buffer), app-side remote *agent*
+opening (CLI/RPC only today; the app's reconnect button reaches remote shell panes).
 
 From dogfood cycle 2 (docs/reports/dogfood-2.md): archive chrome-stripping still
 collapses words (finding 4 partially fixed); worker send in a Swift-debug context
