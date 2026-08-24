@@ -108,6 +108,10 @@ public final class UnixSocketServer: @unchecked Sendable {
             }
             var noSignal: Int32 = 1
             setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
+            // BSD semantics: an accepted socket inherits the listener's O_NONBLOCK.
+            // serve() reads byte-wise and treats read() <= 0 as end-of-request, so a
+            // racing EAGAIN truncated requests into "invalid JSON". Block per-connection.
+            _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK)
             connectionQueue.addOperation { [weak self] in
                 guard let self else { Darwin.close(fd); return }
                 defer { self.releaseConnectionSlot(scheduleAccept: true); Darwin.close(fd) }
