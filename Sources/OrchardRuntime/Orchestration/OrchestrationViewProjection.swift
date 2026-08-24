@@ -55,6 +55,23 @@ public struct OrchestrationDispatchRow: Equatable, Sendable, Identifiable {
     }
 }
 
+public struct OrchestrationGateRow: Equatable, Sendable, Identifiable {
+    public let id: String
+    public let taskID: String
+    public let question: String
+    public let options: [String]
+    public let status: String
+
+    public init(id: String, taskID: String, question: String,
+                options: [String], status: String) {
+        self.id = id
+        self.taskID = taskID
+        self.question = question
+        self.options = options
+        self.status = status
+    }
+}
+
 public struct OrchestrationTaskRow: Equatable, Sendable, Identifiable {
     public let id: String
     public let status: String
@@ -63,9 +80,11 @@ public struct OrchestrationTaskRow: Equatable, Sendable, Identifiable {
     public let title: String
     public let spec: String
     public let dispatches: [OrchestrationDispatchRow]
+    public let gates: [OrchestrationGateRow]
 
     public init(id: String, status: String, deps: [String], displayName: String,
-                title: String, spec: String, dispatches: [OrchestrationDispatchRow]) {
+                title: String, spec: String, dispatches: [OrchestrationDispatchRow],
+                gates: [OrchestrationGateRow] = []) {
         self.id = id
         self.status = status
         self.deps = deps
@@ -73,6 +92,7 @@ public struct OrchestrationTaskRow: Equatable, Sendable, Identifiable {
         self.title = title
         self.spec = spec
         self.dispatches = dispatches
+        self.gates = gates
     }
 
     /// Prefer display name, then title, then a short spec — the outline label.
@@ -228,6 +248,13 @@ public enum OrchestrationProjection {
             hasArchive: hasArchive)
     }
 
+    public static func gateRow(
+        id: String, taskID: String, question: String, options: [String], status: String
+    ) -> OrchestrationGateRow {
+        OrchestrationGateRow(
+            id: id, taskID: taskID, question: question, options: options, status: status)
+    }
+
     public static func taskRow(
         id: String,
         status: String,
@@ -235,7 +262,8 @@ public enum OrchestrationProjection {
         displayName: String?,
         taskTitle: String?,
         spec: String,
-        dispatches: [OrchestrationDispatchRow]
+        dispatches: [OrchestrationDispatchRow],
+        gates: [OrchestrationGateRow] = []
     ) -> OrchestrationTaskRow {
         OrchestrationTaskRow(
             id: id,
@@ -244,7 +272,8 @@ public enum OrchestrationProjection {
             displayName: self.displayName(displayName: displayName, taskTitle: taskTitle, spec: spec),
             title: title(displayName: displayName, taskTitle: taskTitle, spec: spec),
             spec: spec,
-            dispatches: dispatches)
+            dispatches: dispatches,
+            gates: gates)
     }
 
     public static func runRow(
@@ -293,10 +322,12 @@ public enum OrchestrationProjection {
         runs: [OrchestrationRun],
         tasks: [OrchestrationTask],
         workers: [WorkerListRow],
-        archivedDispatchIDs: Set<String>
+        archivedDispatchIDs: Set<String>,
+        pendingGates: [OrchestrationGateRow] = []
     ) -> OrchestrationViewSnapshot {
         let tasksByRun = Dictionary(grouping: tasks, by: \.runID)
         let workersByTask = Dictionary(grouping: workers, by: \.taskID)
+        let gatesByTask = Dictionary(grouping: pendingGates, by: \.taskID)
         let rows = runs.map { run in
             let runTasks = (tasksByRun[run.id] ?? []).map { task in
                 let dispatches = (workersByTask[task.id] ?? []).map { worker in
@@ -316,7 +347,8 @@ public enum OrchestrationProjection {
                     displayName: task.displayName,
                     taskTitle: task.taskTitle,
                     spec: task.spec,
-                    dispatches: dispatches)
+                    dispatches: dispatches,
+                    gates: gatesByTask[task.id] ?? [])
             }
             return runRow(
                 id: run.id,
