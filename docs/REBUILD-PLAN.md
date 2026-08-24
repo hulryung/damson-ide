@@ -562,7 +562,37 @@ worker_done → worker-read → release → worktree rm), assert receipts at eac
 tear down cleanly. Must run without the GUI and leave nothing behind; wire it as an
 opt-in ci.sh stage (ORCHARD_CI_E2E=1) so plain unit runs stay fast.
 
-### Wave 11+ backlog
+### Wave 11 (T43–T46, parallel; merge order T45 → T46 → T43 → T44)
+
+**T43 — SSH stage 4: remote pane restoration.** The keeper already keeps the local
+`ssh` child alive across an app restart; make adoption restore the REST of a remote
+pane's identity: persist per-pane host/remote-cwd/agent-argv/tunnel state in the
+restoration record, re-attach engine identity and statusDetection (tunnel if its
+local listener can rebind, else typed fingerprint degradation) on adopt, and when the
+ssh child died while held, surface a reconnect affordance (fresh ssh from the same
+spec, new incarnation) worded in verdicts — the pane says the connection ended, never
+that remote work died.
+
+**T44 — In-app orchestration view.** A window/section (menu + sidebar entry) showing
+the runtime's own orchestration state read-only: runs → tasks (status, deps,
+titles) → dispatches/workers (dispatch status, worker state, terminal state), with a
+worker archive viewer (cleaned lines with a raw toggle) and jump-to-terminal for live
+workers. All reads through the in-process store/services; no mutations from this
+surface (release/stop stay CLI-only this wave).
+
+**T45 — Host liveness producer.** A periodic bounded prober (reuse HostProbe;
+configurable interval; runs only while remote repos/panes exist) that publishes
+per-host reachable|auth-required|unreachable + last-checked, feeding the sidebar host
+chips and Open Remote sheet live. Loss of reachability updates the chip only — never
+any workspace or worker state.
+
+**T46 — Runtime performance & robustness pass.** Measure, then fix: SQLite pragmas
+and index audit for the orchestration store (journal/synchronous, hot-query EXPLAIN),
+socket-server connection handling audit (thread growth under concurrent CLI load,
+cap/reuse), file-watcher and port-sweep budgets under many workspaces, and a
+before/after measurement table in the worker_done for every change made.
+
+### Wave 12+ backlog
 
 T39 leftovers (need a real remote host to verify): sshd reverse-forward grant, real
 remote Claude POSTing through the tunnel, fixed-range port claim surviving to the
