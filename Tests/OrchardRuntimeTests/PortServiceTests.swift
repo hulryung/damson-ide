@@ -95,6 +95,22 @@ final class PortServiceTests: XCTestCase {
         XCTAssertFalse(cwd?.isEmpty ?? true)
     }
 
+    func testPreparedAttributionBudgetAcrossManyWorkspaces() {
+        let probes = (0..<1_000).map {
+            PortWorkspaceProbe(id: "r::/repo/w\($0)", repoId: "r", displayName: "w\($0)", path: "/repo/w\($0)")
+        }
+        let paths = (0..<200).map { "/repo/w\($0)/Sources/App.swift" }
+        let beforeStart = ContinuousClock.now
+        for _ in 0..<5 { for path in paths { _ = PortAttribution.attribute(cwd: path, to: probes) } }
+        let before = beforeStart.duration(to: .now)
+        let prepared = PortAttribution.prepare(probes)
+        let afterStart = ContinuousClock.now
+        for _ in 0..<5 { for path in paths { _ = PortAttribution.attributePrepared(cwd: path, to: prepared) } }
+        let after = afterStart.duration(to: .now)
+        XCTAssertLessThan(after, before)
+        print("PERF port attribution before \(before), after \(after), workspaces=1000 listeners=200")
+    }
+
     private func withTimeout<T>(seconds: TimeInterval, _ work: @escaping () async -> T) async -> T? {
         await withTaskGroup(of: T?.self) { group in
             group.addTask { await work() }

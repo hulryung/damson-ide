@@ -93,6 +93,7 @@ public final class PortService: @unchecked Sendable {
 
         let output = await probe.listeningOutput()
         let raw = LsofParser.parse(output)
+        let preparedWorkspaces = PortAttribution.prepare(probes)
         var cwdCache: [Int32: String?] = [:]
         var attributed: [WorkspaceListeningPort] = []
         attributed.reserveCapacity(raw.count)
@@ -108,7 +109,7 @@ public final class PortService: @unchecked Sendable {
                     enriched.cwd = cwd
                 }
             }
-            guard let match = PortAttribution.attribute(cwd: enriched.cwd, to: probes) else {
+            guard let match = PortAttribution.attributePrepared(cwd: enriched.cwd, to: preparedWorkspaces) else {
                 continue
             }
             let bind = enriched.host

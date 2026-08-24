@@ -21,7 +21,12 @@ public final class UnixSocketServer: @unchecked Sendable {
     private let fileManager: FileManager
     private let dataDirectory: URL
     private let queue = DispatchQueue(label: "orchard.runtime.socket", attributes: .concurrent)
+    private let connectionQueue: OperationQueue
+    private let connectionLock = NSLock()
+    private var activeConnections = 0
+    internal private(set) var peakActiveConnectionCount = 0
     private var source: DispatchSourceRead?
+    public static let maximumConcurrentConnections = 16
 
     public init(registry: CommandRegistry, fileManager: FileManager = .default,
                 runtimeId: String = "rt_" + UUID().uuidString,
@@ -57,7 +62,12 @@ public final class UnixSocketServer: @unchecked Sendable {
         guard result == 0 else { Darwin.close(fd); throw UnixSocketServerError.bindFailed(errno) }
         chmod(socketURL.path, 0o600)
         guard Darwin.listen(fd, 32) == 0 else { Darwin.close(fd); throw UnixSocketServerError.listenFailed(errno) }
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
         socketFD = fd; self.registry = registry; self.fileManager = fileManager
+        connectionQueue = OperationQueue()
+        connectionQueue.name = "orchard.runtime.connections"
+        connectionQueue.maxConcurrentOperationCount = Self.maximumConcurrentConnections
+        connectionQueue.qualityOfService = .userInitiated
         self.dataDirectory = paths.data
         metadata = RuntimeMetadata(runtimeId: runtimeId, pid: getpid(), socketPath: socketURL.path,
                                    authToken: authToken, mode: mode, cliCommand: cliCommand)
@@ -89,9 +99,35 @@ public final class UnixSocketServer: @unchecked Sendable {
     }
 
     private func acceptAvailable() {
-        let fd = Darwin.accept(socketFD, nil, nil)
-        guard fd >= 0 else { return }
-        queue.async { [weak self] in self?.serve(fd); Darwin.close(fd) }
+        while true {
+            guard reserveConnectionSlot() else { return }
+            let fd = Darwin.accept(socketFD, nil, nil)
+            guard fd >= 0 else {
+                releaseConnectionSlot(scheduleAccept: false)
+                return
+            }
+            var noSignal: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSignal, socklen_t(MemoryLayout<Int32>.size))
+            connectionQueue.addOperation { [weak self] in
+                guard let self else { Darwin.close(fd); return }
+                defer { self.releaseConnectionSlot(scheduleAccept: true); Darwin.close(fd) }
+                self.serve(fd)
+            }
+        }
+    }
+
+    private func reserveConnectionSlot() -> Bool {
+        connectionLock.lock()
+        defer { connectionLock.unlock() }
+        guard activeConnections < Self.maximumConcurrentConnections else { return false }
+        activeConnections += 1
+        peakActiveConnectionCount = max(peakActiveConnectionCount, activeConnections)
+        return true
+    }
+
+    private func releaseConnectionSlot(scheduleAccept: Bool) {
+        connectionLock.lock(); activeConnections -= 1; connectionLock.unlock()
+        if scheduleAccept { queue.async { [weak self] in self?.acceptAvailable() } }
     }
 
     private func serve(_ fd: Int32) {
@@ -111,7 +147,7 @@ public final class UnixSocketServer: @unchecked Sendable {
         var response: RPCResponse?
         Task { response = await registry.route(request); semaphore.signal() }
         while semaphore.wait(timeout: .now() + 15) == .timedOut {
-            _ = Darwin.write(fd, Array("{\"_keepalive\":true}\n".utf8), 20)
+            _ = writeAll(Data("{\"_keepalive\":true}\n".utf8), to: fd)
         }
         let routed = response ?? .failure(id: request.id, error: RPCError(code: "internal_error", message: "handler returned no response"))
         write(RPCResponse(id: routed.id, ok: routed.ok, result: routed.result, error: routed.error,
@@ -120,6 +156,20 @@ public final class UnixSocketServer: @unchecked Sendable {
 
     private func write(_ response: RPCResponse, to fd: Int32) {
         guard var data = try? JSONEncoder.orchard.encode(response) else { return }
-        data.append(10); data.withUnsafeBytes { if let base = $0.baseAddress { _ = Darwin.write(fd, base, data.count) } }
+        data.append(10); _ = writeAll(data, to: fd)
+    }
+
+    @discardableResult
+    private func writeAll(_ data: Data, to fd: Int32) -> Bool {
+        data.withUnsafeBytes { bytes in
+            guard let base = bytes.baseAddress else { return true }
+            var offset = 0
+            while offset < bytes.count {
+                let sent = Darwin.send(fd, base.advanced(by: offset), bytes.count - offset, MSG_NOSIGNAL)
+                if sent <= 0 { return false }
+                offset += sent
+            }
+            return true
+        }
     }
 }

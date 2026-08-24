@@ -1,3 +1,4 @@
+import CoreServices
 import XCTest
 @testable import OrchardRuntime
 
@@ -45,6 +46,46 @@ final class FileWatcherTests: XCTestCase {
         XCTAssertEqual(renamed?.previousRelativePath, "src/old.swift")
         XCTAssertFalse(changes.contains { $0.relativePath.contains("..") })
         XCTAssertTrue(previous.keys.allSatisfy { !$0.hasPrefix("/") && !$0.contains("..") })
+    }
+
+    func testEventCallbackBudgetAvoidsUnusedPathMaterialization() {
+        let paths = (0..<10_000).map { "/workspace/Sources/file-\($0).swift" }
+        let flags = Array(repeating: UInt32(0), count: paths.count)
+        let beforeStart = ContinuousClock.now
+        var legacyBytes = 0
+        for _ in 0..<20 { legacyBytes += paths.reduce(0) { $0 + $1.utf8.count } }
+        let before = beforeStart.duration(to: .now)
+        let afterStart = ContinuousClock.now
+        var rootChanges = 0
+        for _ in 0..<20 {
+            for flag in flags where flag & UInt32(kFSEventStreamEventFlagRootChanged) != 0 {
+                rootChanges += 1
+            }
+        }
+        let after = afterStart.duration(to: .now)
+        XCTAssertGreaterThan(legacyBytes, 0)
+        XCTAssertEqual(rootChanges, 0)
+        XCTAssertLessThan(after, before)
+        print("PERF file-event callback before \(before), after \(after), events=10000 bursts=20")
+    }
+
+    func testIdleWatchersDoNotReconcileWithoutFilesystemChanges() async throws {
+        let counter = LockedCounter()
+        var watchers: [FileWatcher] = []
+        for index in 0..<20 {
+            let root = tmp.appendingPathComponent("idle-\(index)")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let watcher = FileWatcher(debounce: 0.02)
+            watcher.onReconciled = { _ in counter.increment() }
+            try watcher.start(root: root)
+            watchers.append(watcher)
+        }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        let settledCount = counter.value
+        try await Task.sleep(nanoseconds: 250_000_000)
+        watchers.forEach { $0.stop() }
+        XCTAssertEqual(counter.value, settledCount,
+                       "idle watchers should schedule no recurring reconciliation work")
     }
 
     func testReconcilerReportsInPlaceModification() throws {
@@ -217,6 +258,13 @@ final class FileWatcherTests: XCTestCase {
             return first ?? nil
         }
     }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    func increment() { lock.lock(); count += 1; lock.unlock() }
+    var value: Int { lock.lock(); defer { lock.unlock() }; return count }
 }
 
 /// One-shot handoff from the watcher queue onto the test task.
