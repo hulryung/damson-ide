@@ -623,6 +623,15 @@ write docs/reports/dogfood-3.md with comparisons to cycle 2 and any new findings
 
 ### Wave 13+ backlog
 
+From dogfood cycle 3: the "transient app exit" during the cycle matches a clean
+window-close (no crash log, metadata removed cleanly) —
+applicationShouldTerminateAfterLastWindowClosed is true, so closing the window kills
+the runtime and every supervised flow with it. An orchestrator hosting a runtime
+should keep running when its window closes (Dock icon reopens it); change that and
+have the status bar/menu show the runtime is still alive. Archive word-collapse
+persists in TUI frames (Taskcompleteanddispatchsettled) — a third cleaner pass or
+accepting raw-only for TUI frames.
+
 Intermittent single-test failure in full-suite runs: likely root-caused by the
 accepted-socket O_NONBLOCK inheritance regression (fixed post-wave-11 — accepted
 connections now clear the flag); if a 1-failure run recurs, capture the test name.
