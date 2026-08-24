@@ -152,6 +152,19 @@ contact, not evidence that anything on `<name>` stopped."* `auth-required` is ke
 distinct from `unreachable` because collapsing them sends a user to debug the network
 when the real problem is their key.
 
+### Periodic liveness producer (T45)
+
+A bounded sweep reuses `HostProbe` (same argv, same classification, **one probe per
+host per sweep**) on a configurable interval (default 30s,
+`ORCHARD_HOST_LIVENESS_INTERVAL`). The loop is fully idle — no `ssh` at all — unless
+at least one remote repo or remote pane exists. Reachability is published in memory
+(`status`, `lastCheckedAt`, `latencyMs`); it is never persisted on the host record.
+
+**A reachability change updates host presentation only.** It never mutates a
+workspace, worktree, terminal, or worker, and copy never implies remote work
+stopped. `orchard host list` shows the live status and its age; sidebar host chips
+and Open Remote render the same snapshot.
+
 ## 4. Remote terminals
 
 ```

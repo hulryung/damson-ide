@@ -34,6 +34,9 @@ public final class OrchardRuntimeHost {
     public nonisolated let portService: PortService
     /// T29: the registered remote hosts behind `ssh:<name>` execution host ids.
     public nonisolated let hostRegistry: HostRegistry
+    /// T45: periodic bounded host-reachability producer. Idle unless a remote repo
+    /// or remote pane exists; publishes presentation-only status through the registry.
+    public nonisolated let hostLiveness: HostLivenessService
     /// T39: the local end of the Tier-1 hook channel, used by remote agent panes whose
     /// hooks arrive through an SSH reverse tunnel. Binds lazily on first use, so a
     /// runtime that never opens one holds no listening socket.
@@ -185,6 +188,21 @@ public final class OrchardRuntimeHost {
             interval: PortService.intervalFromEnvironment())
         self.portService = portService
 
+        let hostRegistryForLiveness = self.hostRegistry
+        let workspaceServiceForLiveness = self.workspaceService
+        let terminalServiceForLiveness = terminalService
+        let hostLiveness = HostLivenessService(
+            hosts: { hostRegistryForLiveness.list() },
+            surface: {
+                await MainActor.run {
+                    HostLivenessSurface.collect(
+                        repos: workspaceServiceForLiveness.listRepos(),
+                        terminals: terminalServiceForLiveness.list())
+                }
+            },
+            interval: HostLivenessService.intervalFromEnvironment())
+        self.hostLiveness = hostLiveness
+
         var registry = CommandRegistry()
         registry.register(StatusHandler(runtimeId: runtimeId, mode: mode,
                                         cliCommand: cliCommand))
@@ -198,7 +216,8 @@ public final class OrchardRuntimeHost {
                                                  workspaces: workspaceService,
                                                  hosts: hostRegistry,
                                                  hookChannel: hookChannel))
-        registry.register(HostCommandHandler(registry: hostRegistry))
+        registry.register(HostCommandHandler(registry: hostRegistry,
+                                             liveness: hostLiveness))
         registry.register(WorkspaceCommandHandler(service: workspaceService))
         registry.register(RepoRegistryHandler(service: workspaceService))
         registry.register(FileCommandHandler(files: fileService,
@@ -212,6 +231,7 @@ public final class OrchardRuntimeHost {
         self.inMemory = InMemoryRuntimeServer(registry: registry, runtimeId: runtimeId)
         automationScheduler.start()
         portService.start()
+        hostLiveness.start()
     }
 
     /// Where the production runtime keeps its state; exposed so the app can build a
@@ -261,6 +281,7 @@ public final class OrchardRuntimeHost {
     public func shutdown() {
         automationScheduler.stop()
         portService.stop()
+        hostLiveness.stop()
         socketServer?.stop(fileManager: fileManager)
         socketServer = nil
     }

@@ -76,6 +76,41 @@ final class CLIFormattingTests: XCTestCase {
         XCTAssertFalse(output.contains("object(["), output)
     }
 
+    func testHostListShowsLiveStatusAndAge() {
+        let fixture: JSONValue = .object([
+            "hosts": .array([.object([
+                "name": .string("build"),
+                "target": .string("build"),
+                "source": .string("ssh-config"),
+                "executionHostId": .string("ssh:build"),
+                "status": .string("reachable"),
+                "ageSeconds": .number(12),
+                "latencyMs": .number(42),
+            ])]),
+            "totalCount": .number(1),
+        ])
+        let output = OrchardHumanFormatter.hostList(fixture)
+        XCTAssertTrue(output.contains("build"), output)
+        XCTAssertTrue(output.contains("ssh:build"), output)
+        XCTAssertTrue(output.contains("reachable"), output)
+        XCTAssertTrue(output.contains("12s ago"), output)
+        XCTAssertFalse(output.localizedCaseInsensitiveContains("stopped"), output)
+        XCTAssertFalse(output.localizedCaseInsensitiveContains("died"), output)
+    }
+
+    func testHostListWithoutStatusStaysARegistryRow() {
+        let fixture: JSONValue = .object([
+            "hosts": .array([.object([
+                "name": .string("build"),
+                "target": .string("build"),
+                "source": .string("ssh-config"),
+                "executionHostId": .string("ssh:build"),
+            ])]),
+        ])
+        let output = OrchardHumanFormatter.hostList(fixture)
+        XCTAssertEqual(output, "build  build  ssh-config  ssh:build")
+    }
+
     func testJSONFallbackIsJSONNotASwiftDump() throws {
         let result: JSONValue = .object([
             "type": .string("worker_done"),

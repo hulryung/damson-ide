@@ -114,6 +114,39 @@ public enum OrchardHumanFormatter {
         }
         return lines.joined(separator: "\n")
     }
+
+    /// `orchard host list` without `--json`. Live status + age when the periodic
+    /// producer (or a `host check`) has published; otherwise the registry row only.
+    public static func hostList(_ result: JSONValue?) -> String {
+        let hosts = result?.objectValue?["hosts"]?.arrayValue ?? []
+        if hosts.isEmpty { return "No hosts registered. Try: orchard host add --import" }
+        return hosts.map { item -> String in
+            let host = item.objectValue ?? [:]
+            let name = host["name"]?.stringValue ?? "?"
+            let target = host["target"]?.stringValue ?? ""
+            let source = host["source"]?.stringValue ?? "manual"
+            let id = host["executionHostId"]?.stringValue ?? "ssh:\(name)"
+            var parts = ["\(name)  \(target)  \(source)  \(id)"]
+            if let status = host["status"]?.stringValue {
+                parts.append(status)
+                if let age = host["ageSeconds"]?.numberValue {
+                    parts.append(ageLabel(seconds: age))
+                }
+            }
+            return parts.joined(separator: "  ")
+        }.joined(separator: "\n")
+    }
+
+    public static func ageLabel(seconds: Double) -> String {
+        let s = max(0, Int(seconds.rounded()))
+        if s < 5 { return "just now" }
+        if s < 60 { return "\(s)s ago" }
+        let minutes = s / 60
+        if minutes < 60 { return "\(minutes)m ago" }
+        let hours = minutes / 60
+        if hours < 48 { return "\(hours)h ago" }
+        return "\(hours / 24)d ago"
+    }
 }
 
 public enum GuideTopicFormatter {

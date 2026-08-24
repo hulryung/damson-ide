@@ -16,6 +16,7 @@ final class HostHandlerTests: XCTestCase {
     private var tmp: URL!
     private var store: OrchardDataStore!
     private var registry: HostRegistry!
+    private var liveness: HostLivenessService!
     private var server: InMemoryRuntimeServer!
     /// Every create spec the terminal factory saw, so tests can assert on launch argv.
     private var specs: [TerminalCreateSpec] = []
@@ -35,11 +36,18 @@ final class HostHandlerTests: XCTestCase {
             self?.specs.append(spec)
             return ScriptedTerminalSession()
         })
+        liveness = HostLivenessService(
+            hosts: { [registry] in registry!.list() },
+            surface: { HostLivenessSurface() },
+            runner: StubRunner(result: HostCommandResult(exitCode: 0)),
+            probeTimeout: 1,
+            interval: 60)
         var commands = CommandRegistry()
         commands.register(HostCommandHandler(
             registry: registry,
             runner: StubRunner(result: HostCommandResult(exitCode: 0)),
-            probeTimeout: 1))
+            probeTimeout: 1,
+            liveness: liveness))
         commands.register(TerminalCommandHandler(service: service, hosts: registry))
         server = InMemoryRuntimeServer(registry: commands, runtimeId: "rt_hosts")
     }
@@ -90,6 +98,45 @@ final class HostHandlerTests: XCTestCase {
         XCTAssertTrue(checked.ok)
         XCTAssertEqual(checked.result?.objectValue?["status"]?.stringValue, "reachable")
         XCTAssertEqual(checked.result?.objectValue?["executionHostId"]?.stringValue, "ssh:box")
+        XCTAssertNotNil(checked.result?.objectValue?["lastCheckedAt"])
+        XCTAssertNotNil(checked.result?.objectValue?["latencyMs"])
+    }
+
+    func testListShowsLiveStatusAndAgeAfterACheck() async {
+        _ = await call("host-add", ["name": .string("box"), "hostname": .string("10.0.0.5")])
+        _ = await call("host-check", ["name": .string("box")])
+        let listed = await call("host-list")
+        let hosts = listed.result?.objectValue?["hosts"]?.arrayValue ?? []
+        XCTAssertEqual(hosts.count, 1)
+        XCTAssertEqual(hosts[0].objectValue?["status"]?.stringValue, "reachable")
+        XCTAssertNotNil(hosts[0].objectValue?["lastCheckedAt"])
+        XCTAssertNotNil(hosts[0].objectValue?["ageSeconds"])
+        XCTAssertNotNil(hosts[0].objectValue?["latencyMs"])
+        XCTAssertEqual(liveness.status(for: "box")?.status, .reachable)
+    }
+
+    func testCheckDoesNotMutateARemoteTerminal() async throws {
+        _ = await call("host-add", ["import": .bool(true), "name": .string("build")])
+        let created = await call("terminal-create", ["host": .string("ssh:build")])
+        XCTAssertTrue(created.ok, "\(String(describing: created.error))")
+        let before = await call("terminal-list")
+        let beforeRows = before.result?.objectValue?["terminals"]?.arrayValue ?? []
+        XCTAssertEqual(beforeRows.count, 1)
+        let beforeHost = beforeRows[0].objectValue?["executionHostId"]?.stringValue
+        let beforeHandle = beforeRows[0].objectValue?["handle"]?.stringValue
+        let beforeConnected = beforeRows[0].objectValue?["connected"]?.boolValue
+        let dataBefore = store.load()
+
+        _ = await call("host-check", ["name": .string("build")])
+        XCTAssertEqual(liveness.status(for: "build")?.status, .reachable)
+
+        let after = await call("terminal-list")
+        let afterRows = after.result?.objectValue?["terminals"]?.arrayValue ?? []
+        XCTAssertEqual(afterRows.count, 1)
+        XCTAssertEqual(afterRows[0].objectValue?["executionHostId"]?.stringValue, beforeHost)
+        XCTAssertEqual(afterRows[0].objectValue?["handle"]?.stringValue, beforeHandle)
+        XCTAssertEqual(afterRows[0].objectValue?["connected"]?.boolValue, beforeConnected)
+        XCTAssertEqual(store.load(), dataBefore)
     }
 
     func testRemoteTerminalSpawnsSSHAndStampsTheHost() async throws {

@@ -97,7 +97,7 @@ func formatHuman(method: String, result: JSONValue?) -> String {
         }
         return lines.joined(separator: "\n")
     case "host-list":
-        return formatHostList(result)
+        return OrchardHumanFormatter.hostList(result)
     case "host-add":
         return formatHostAdd(result)
     case "host-check":
@@ -151,19 +151,6 @@ func formatTerminalList(_ result: JSONValue?) -> String {
     }.joined(separator: "\n")
 }
 
-func formatHostList(_ result: JSONValue?) -> String {
-    let hosts = result?.objectValue?["hosts"]?.arrayValue ?? []
-    if hosts.isEmpty { return "No hosts registered. Try: orchard host add --import" }
-    return hosts.map { item -> String in
-        let host = item.objectValue ?? [:]
-        let name = host["name"]?.stringValue ?? "?"
-        let target = host["target"]?.stringValue ?? ""
-        let source = host["source"]?.stringValue ?? "manual"
-        let id = host["executionHostId"]?.stringValue ?? "ssh:\(name)"
-        return "\(name)  \(target)  \(source)  \(id)"
-    }.joined(separator: "\n")
-}
-
 func formatHostAdd(_ result: JSONValue?) -> String {
     let object = result?.objectValue
     if let imported = object?["imported"]?.objectValue {
@@ -190,6 +177,9 @@ func formatHostCheck(_ result: JSONValue?) -> String {
     let status = object["status"]?.stringValue ?? "unreachable"
     let detail = object["detail"]?.stringValue ?? ""
     var lines = ["\(name): \(status)" + (detail.isEmpty ? "" : " — \(detail)")]
+    if let latency = object["latencyMs"]?.numberValue {
+        lines.append("  latency: \(Int(latency.rounded()))ms")
+    }
     if let command = object["command"]?.stringValue { lines.append("  probe: \(command)") }
     if let note = object["note"]?.stringValue, !note.isEmpty { lines.append("  \(note)") }
     return lines.joined(separator: "\n")
