@@ -224,6 +224,8 @@ struct ServicesSettingsTab: View {
                 SettingsFootnote(
                     "Master switch for the in-process scheduler. Individual automations stay in orchard-data.json.")
             }
+
+            ArchiveRetentionSettings(settings: settings)
         }
         .formStyle(.grouped)
         .task { await loadProfiles() }
@@ -240,6 +242,45 @@ struct ServicesSettingsTab: View {
         profiles = await service.listProfiles()
         if !profiles.contains(where: { $0.id == settings.defaultBrowserProfileID }) {
             settings.defaultBrowserProfileID = BrowserProfile.defaultProfile.id
+        }
+    }
+}
+
+/// T49 retention caps for worker archives. Setting a cap never deletes anything on
+/// its own: the Vault window previews exactly what a cap would remove, and only a
+/// confirmed prune deletes — and only from runs with no live dispatches.
+struct ArchiveRetentionSettings: View {
+    @ObservedObject var settings: OrchardSettings
+
+    var body: some View {
+        Section("Worker archives") {
+            Stepper(value: $settings.archiveMaxTotalMB, in: 0...20_480, step: 64) {
+                HStack {
+                    Text("Keep at most")
+                    Spacer()
+                    Text(settings.archiveMaxTotalMB == 0
+                         ? "everything"
+                         : "\(settings.archiveMaxTotalMB) MB")
+                        .monospacedDigit()
+                        .foregroundStyle(Tokens.textSecondary)
+                }
+            }
+            Stepper(value: $settings.archiveMaxAgeDays, in: 0...730, step: 1) {
+                HStack {
+                    Text("Keep for at most")
+                    Spacer()
+                    Text(settings.archiveMaxAgeDays == 0
+                         ? "forever"
+                         : "\(settings.archiveMaxAgeDays) day\(settings.archiveMaxAgeDays == 1 ? "" : "s")")
+                        .monospacedDigit()
+                        .foregroundStyle(Tokens.textSecondary)
+                }
+            }
+            SettingsFootnote(
+                "Caps on the terminal tails and transcript pins released workers leave behind. "
+                + "0 means keep forever. Nothing is deleted on a timer — open Go ▸ Vault and prune, "
+                + "which always previews what it would delete first and never touches a run that "
+                + "still has live dispatches.")
         }
     }
 }

@@ -88,6 +88,8 @@ final class AppStore: ObservableObject {
     var focusMainWindow: (() -> Void)?
     var showDashboard: (() -> Void)?
     var showOrchestration: (() -> Void)?
+    /// Opens the T49 Vault window (Go ▸ Vault).
+    var showVault: (() -> Void)?
     var showSettings: (() -> Void)?
 
     private var shells: [UUID: DamsonSession] = [:]
