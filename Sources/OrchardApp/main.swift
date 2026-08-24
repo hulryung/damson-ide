@@ -30,6 +30,7 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
     private var dashboardWindow: NSWindow?
     private var orchestrationWindow: NSWindow?
     private var automationsWindow: NSWindow?
+    private var vaultWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         MainActor.assumeIsolated {
@@ -55,6 +56,9 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
             }
             store.showAutomations = { [weak self] in
                 MainActor.assumeIsolated { self?.showAutomations(nil) }
+            }
+            store.showVault = { [weak self] in
+                MainActor.assumeIsolated { self?.showVault(nil) }
             }
             store.showSettings = { [weak self] in
                 MainActor.assumeIsolated { self?.showSettings(nil) }
@@ -195,6 +199,28 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    @MainActor @objc func showVault(_ sender: Any?) {
+        if let vaultWindow {
+            vaultWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+        let hosting = NSHostingController(
+            rootView: VaultView()
+                .environmentObject(store)
+                .preferredColorScheme(.dark))
+        let win = NSWindow(contentViewController: hosting)
+        win.title = "Vault"
+        win.setContentSize(NSSize(width: 1080, height: 640))
+        win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        win.appearance = NSAppearance(named: .darkAqua)
+        win.isReleasedWhenClosed = false
+        win.center()
+        win.makeKeyAndOrderFront(nil)
+        vaultWindow = win
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     @MainActor @objc func zoomAllIn(_ sender: Any?) { surfaces().forEach { $0.zoomIn(nil) } }
     @MainActor @objc func zoomAllOut(_ sender: Any?) { surfaces().forEach { $0.zoomOut(nil) } }
     @MainActor @objc func resetAllZoom(_ sender: Any?) { surfaces().forEach { $0.resetZoom(nil) } }
@@ -273,6 +299,9 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
         let autos = NSMenuItem(title: "Automations", action: #selector(showAutomations(_:)), keyEquivalent: "")
         autos.target = self
         goMenu.addItem(autos)
+        let vault = NSMenuItem(title: "Vault", action: #selector(showVault(_:)), keyEquivalent: "")
+        vault.target = self
+        goMenu.addItem(vault)
         goMenu.addItem(.separator())
         for (index, item) in [
             ("Terminal", #selector(showTerminalTab(_:))),

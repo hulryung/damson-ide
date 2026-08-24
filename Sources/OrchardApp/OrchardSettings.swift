@@ -105,6 +105,25 @@ final class OrchardSettings: ObservableObject {
         }
     }
 
+    /// Vault retention (T49): total megabytes of pinned worker output to keep.
+    /// 0 keeps everything forever. Nothing enforces this on a timer — the Vault
+    /// window previews and applies it on request.
+    @Published var archiveMaxTotalMB: Int {
+        didSet { defaults.set(archiveMaxTotalMB, forKey: Keys.archiveMaxTotalMB) }
+    }
+
+    /// Vault retention: age ceiling in days for a pinned archive. 0 = keep forever.
+    @Published var archiveMaxAgeDays: Int {
+        didSet { defaults.set(archiveMaxAgeDays, forKey: Keys.archiveMaxAgeDays) }
+    }
+
+    /// The two caps as the runtime's retention rule sees them.
+    var archiveRetentionPolicy: ArchiveRetentionPolicy {
+        ArchiveRetentionPolicy(
+            maxTotalBytes: archiveMaxTotalMB * 1024 * 1024,
+            maxAgeDays: archiveMaxAgeDays)
+    }
+
     var onTerminalConfigChange: (() -> Void)?
     var onSubsystemSettingsChange: (() -> Void)?
 
@@ -126,6 +145,8 @@ final class OrchardSettings: ObservableObject {
         static let portsSweep = "orchard.settings.portsSweepInterval"
         static let defaultBrowserProfile = "orchard.settings.defaultBrowserProfile"
         static let automationsEnabled = "orchard.settings.automationsEnabled"
+        static let archiveMaxTotalMB = "orchard.settings.archiveMaxTotalMB"
+        static let archiveMaxAgeDays = "orchard.settings.archiveMaxAgeDays"
     }
 
     init() {
@@ -158,6 +179,10 @@ final class OrchardSettings: ObservableObject {
         defaultBrowserProfileID = d.string(forKey: Keys.defaultBrowserProfile)
             ?? BrowserProfile.defaultProfile.id
         automationsEnabled = (d.object(forKey: Keys.automationsEnabled) as? Bool) ?? true
+        archiveMaxTotalMB = (d.object(forKey: Keys.archiveMaxTotalMB) as? Int)
+            ?? ArchiveRetentionPolicy.defaultMaxTotalBytes / (1024 * 1024)
+        archiveMaxAgeDays = (d.object(forKey: Keys.archiveMaxAgeDays) as? Int)
+            ?? ArchiveRetentionPolicy.defaultMaxAgeDays
     }
 
     var theme: DamsonTheme {

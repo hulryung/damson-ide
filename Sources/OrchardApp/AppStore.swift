@@ -89,6 +89,7 @@ final class AppStore: ObservableObject {
     var showDashboard: (() -> Void)?
     var showOrchestration: (() -> Void)?
     var showAutomations: (() -> Void)?
+    var showVault: (() -> Void)?
     var showSettings: (() -> Void)?
 
     private var shells: [UUID: DamsonSession] = [:]
