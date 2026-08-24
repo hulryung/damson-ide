@@ -594,6 +594,11 @@ before/after measurement table in the worker_done for every change made.
 
 ### Wave 12+ backlog
 
+Intermittent single-test failure in full-suite runs (twice observed post-T45/T46
+merges, passes on rerun; suspected load-sensitive thresholds in the T46
+PerformanceAuditTests / socket-concurrency / watcher-burst tests) — catch the name
+and loosen the threshold or serialize the bench.
+
 T39 leftovers (need a real remote host to verify): sshd reverse-forward grant, real
 remote Claude POSTing through the tunnel, fixed-range port claim surviving to the
 pane's ssh. Open by design: no HostLiveness live producer yet, remote provider
