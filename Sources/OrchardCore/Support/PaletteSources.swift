@@ -75,6 +75,7 @@ public enum PaletteCommand: String, CaseIterable, Sendable, Identifiable {
     case newWorktree
     case toggleChat
     case openDashboard
+    case openAutomations
     case settings
 
     public var id: String { "cmd:\(rawValue)" }
@@ -84,6 +85,7 @@ public enum PaletteCommand: String, CaseIterable, Sendable, Identifiable {
         case .newWorktree: return "New Worktree"
         case .toggleChat: return "Toggle Chat"
         case .openDashboard: return "Open Dashboard"
+        case .openAutomations: return "Open Automations"
         case .settings: return "Settings"
         }
     }
@@ -95,6 +97,7 @@ public enum PaletteCommand: String, CaseIterable, Sendable, Identifiable {
         case .newWorktree: return "plus.square"
         case .toggleChat: return "bubble.left.and.bubble.right"
         case .openDashboard: return "rectangle.split.3x1"
+        case .openAutomations: return "clock.arrow.2.circlepath"
         case .settings: return "gearshape"
         }
     }
@@ -104,7 +107,8 @@ public enum PaletteCommand: String, CaseIterable, Sendable, Identifiable {
         case .newWorktree: return ["new worktree", "create", "compose", "command-n"]
         case .toggleChat: return ["toggle chat", "chat view", "terminal overlay"]
         case .openDashboard: return ["open dashboard", "agents", "kanban"]
-        case .settings: return ["settings", "preferences", "ports", "browser", "automations"]
+        case .openAutomations: return ["automations", "schedule", "cron", "scheduled"]
+        case .settings: return ["settings", "preferences", "ports", "browser"]
         }
     }
 }

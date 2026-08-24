@@ -233,6 +233,8 @@ public enum OrchardCommands {
                 flag("workspace", "Workspace selector; reuses its agent terminal", "selector"),
                 flag("precheck", "Bounded shell command; nonzero skips the run", "command"),
                 flag("timeout", "Precheck timeout seconds (1...300)", "n"),
+                flag("enabled", "Enable the automation (default on create)"),
+                flag("disabled", "Disable the automation"),
             ], positionals: ["list|show|create|edit|remove|run|runs"]),
             // T29 remote hosts. `host check` is bounded: it reports
             // reachable|auth-required|unreachable and never waits on a human, because

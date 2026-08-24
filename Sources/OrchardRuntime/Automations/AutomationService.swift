@@ -15,6 +15,7 @@ public actor AutomationService {
     public static let historyLimit = 500
     private let store: OrchardDataStore
     private let fire: AutomationFire
+    private var changeContinuations: [UUID: AsyncStream<Void>.Continuation] = [:]
 
     public init(store: OrchardDataStore, fire: @escaping AutomationFire) {
         self.store = store; self.fire = fire
@@ -26,6 +27,32 @@ public actor AutomationService {
         store.load().automationRuns.filter { automationId == nil || $0.automationId == automationId! }
             .sorted { $0.startedAt > $1.startedAt }
     }
+
+    /// List rows + next-fire labels. Observation only.
+    public func viewSnapshot(now: Date = Date(), calendar: Calendar = .utc) -> AutomationViewSnapshot {
+        let data = store.load()
+        return AutomationProjection.snapshot(
+            automations: data.automations, runs: data.automationRuns, now: now, calendar: calendar)
+    }
+
+    /// Next `count` slots from `AutomationSchedule.nextFire`. Empty when invalid.
+    public func nextFires(for automation: Automation, count: Int = 3, after date: Date = Date(),
+                          calendar: Calendar = .utc) -> [Date] {
+        AutomationProjection.nextFires(for: automation, count: count, after: date, calendar: calendar)
+    }
+
+    /// Yields immediately, then again after create/replace/remove/run persist.
+    public func changes() -> AsyncStream<Void> {
+        let id = UUID()
+        let (stream, continuation) = AsyncStream<Void>.makeStream()
+        continuation.yield(())
+        changeContinuations[id] = continuation
+        continuation.onTermination = { @Sendable [weak self] _ in
+            Task { await self?.removeChangeContinuation(id) }
+        }
+        return stream
+    }
+
     @discardableResult public func create(_ automation: Automation) throws -> Automation {
         try AutomationSchedule.validate(automation)
         guard !automation.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -38,6 +65,7 @@ public actor AutomationService {
         try store.modify { data in
             data.automations.append(automation)
         }
+        notifyChanges()
         return automation
     }
     @discardableResult public func replace(_ automation: Automation) throws -> Automation {
@@ -45,12 +73,30 @@ public actor AutomationService {
         var found = false
         try store.modify { data in if let i = data.automations.firstIndex(where: { $0.id == automation.id }) { data.automations[i] = automation; found = true } }
         if !found { throw AutomationScheduleError.invalid("automation not found") }
+        notifyChanges()
         return automation
     }
+
+    /// Live enable/disable. Disabled items are skipped by `due`/`fireDue`.
+    @discardableResult public func setEnabled(_ id: String, enabled: Bool) throws -> Automation {
+        guard var item = show(id) else { throw AutomationScheduleError.invalid("automation not found") }
+        item.enabled = enabled
+        return try replace(item)
+    }
+
     public func remove(_ id: String) throws -> Bool {
         var removed = false
         try store.modify { data in let before = data.automations.count; data.automations.removeAll { $0.id == id || $0.name == id }; removed = data.automations.count != before }
+        if removed { notifyChanges() }
         return removed
+    }
+
+    private func removeChangeContinuation(_ id: UUID) {
+        changeContinuations.removeValue(forKey: id)
+    }
+
+    private func notifyChanges() {
+        for continuation in changeContinuations.values { continuation.yield(()) }
     }
 
     @discardableResult public func run(_ automation: Automation, scheduledAt: Date = Date()) async -> AutomationRun {
@@ -93,12 +139,15 @@ public actor AutomationService {
     }
 
     private func persist(_ run: AutomationRun) {
-        try? store.modify { data in
-            data.automationRuns.append(run)
-            if data.automationRuns.count > Self.historyLimit {
-                data.automationRuns.removeFirst(data.automationRuns.count - Self.historyLimit)
+        do {
+            try store.modify { data in
+                data.automationRuns.append(run)
+                if data.automationRuns.count > Self.historyLimit {
+                    data.automationRuns.removeFirst(data.automationRuns.count - Self.historyLimit)
+                }
             }
-        }
+            notifyChanges()
+        } catch {}
     }
 
     private static func precheck(_ command: String, timeout: Int) async -> (exitCode: Int32, timedOut: Bool) {

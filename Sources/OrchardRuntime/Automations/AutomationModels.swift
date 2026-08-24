@@ -38,17 +38,56 @@ public struct Automation: Codable, Equatable, Identifiable, Sendable {
     public var target: AutomationTarget
     public var precheck: String?
     public var precheckTimeoutSeconds: Int
+    /// Per-item pause. Default true so pre-T48 orchard-data.json still loads.
+    public var enabled: Bool
     public var createdAt: Date
 
     public init(id: String = "auto_" + UUID().uuidString.lowercased(), name: String,
                 trigger: AutomationTrigger, time: String, day: Int? = nil,
                 provider: String, prompt: String, target: AutomationTarget,
                 precheck: String? = nil, precheckTimeoutSeconds: Int = 30,
-                createdAt: Date = Date()) {
+                enabled: Bool = true, createdAt: Date = Date()) {
         self.id = id; self.name = name; self.trigger = trigger; self.time = time
         self.day = day; self.provider = provider; self.prompt = prompt; self.target = target
         self.precheck = precheck; self.precheckTimeoutSeconds = max(1, min(precheckTimeoutSeconds, 300))
-        self.createdAt = createdAt
+        self.enabled = enabled; self.createdAt = createdAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, trigger, time, day, provider, prompt, target
+        case precheck, precheckTimeoutSeconds, enabled, createdAt
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        name = try c.decode(String.self, forKey: .name)
+        trigger = try c.decode(AutomationTrigger.self, forKey: .trigger)
+        time = try c.decode(String.self, forKey: .time)
+        day = try c.decodeIfPresent(Int.self, forKey: .day)
+        provider = try c.decode(String.self, forKey: .provider)
+        prompt = try c.decode(String.self, forKey: .prompt)
+        target = try c.decode(AutomationTarget.self, forKey: .target)
+        precheck = try c.decodeIfPresent(String.self, forKey: .precheck)
+        precheckTimeoutSeconds = try c.decodeIfPresent(Int.self, forKey: .precheckTimeoutSeconds) ?? 30
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        createdAt = try c.decode(Date.self, forKey: .createdAt)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(trigger, forKey: .trigger)
+        try c.encode(time, forKey: .time)
+        try c.encodeIfPresent(day, forKey: .day)
+        try c.encode(provider, forKey: .provider)
+        try c.encode(prompt, forKey: .prompt)
+        try c.encode(target, forKey: .target)
+        try c.encodeIfPresent(precheck, forKey: .precheck)
+        try c.encode(precheckTimeoutSeconds, forKey: .precheckTimeoutSeconds)
+        try c.encode(enabled, forKey: .enabled)
+        try c.encode(createdAt, forKey: .createdAt)
     }
 }
 

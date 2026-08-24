@@ -41,4 +41,35 @@ final class AutomationServiceTests: XCTestCase {
         let data = try JSONBridge.decoder.decode(OrchardData.self, from: json)
         XCTAssertEqual(data.automations, []); XCTAssertEqual(data.automationRuns, [])
     }
+
+    func testAutomationDecodesWithoutEnabledDefaultsTrue() throws {
+        let json = Data("""
+        {"id":"auto_1","name":"n","trigger":"daily","time":"12:00","provider":"codex","prompt":"go","target":{"type":"repo","selector":"r"},"precheckTimeoutSeconds":30,"createdAt":0}
+        """.utf8)
+        let item = try JSONBridge.decoder.decode(Automation.self, from: json)
+        XCTAssertTrue(item.enabled)
+        XCTAssertEqual(item.name, "n")
+    }
+
+    func testAutomationDecodesEnabledFalse() throws {
+        let json = Data("""
+        {"id":"auto_1","name":"n","trigger":"daily","time":"12:00","provider":"codex","prompt":"go","target":{"type":"repo","selector":"r"},"precheckTimeoutSeconds":30,"enabled":false,"createdAt":0}
+        """.utf8)
+        let item = try JSONBridge.decoder.decode(Automation.self, from: json)
+        XCTAssertFalse(item.enabled)
+    }
+
+    func testSetEnabledTogglesLiveAndPersists() async throws {
+        let (service, root) = try fixture { _ in AutomationFireReceipt() }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let item = Automation(name: "daily", trigger: .daily, time: "12:00", provider: "codex",
+                              prompt: "go", target: .repo("repo"))
+        _ = try await service.create(item)
+        let paused = try await service.setEnabled(item.id, enabled: false)
+        XCTAssertFalse(paused.enabled)
+        let stored = await service.show(item.id)
+        XCTAssertEqual(stored?.enabled, false)
+        let resumed = try await service.setEnabled(item.id, enabled: true)
+        XCTAssertTrue(resumed.enabled)
+    }
 }

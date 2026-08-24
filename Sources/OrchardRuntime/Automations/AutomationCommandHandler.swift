@@ -50,6 +50,15 @@ public struct AutomationCommandHandler: CommandHandler {
             provider: try string("provider", existing?.provider), prompt: try string("prompt", existing?.prompt),
             target: target, precheck: p["precheck"]?.stringValue ?? existing?.precheck,
             precheckTimeoutSeconds: p["timeout"]?.intValue ?? existing?.precheckTimeoutSeconds ?? 30,
+            enabled: try enabledFlag(p, existing: existing?.enabled),
             createdAt: existing?.createdAt ?? Date())
+    }
+    private func enabledFlag(_ p: [String: JSONValue], existing: Bool?) throws -> Bool {
+        let on = p["enabled"]?.boolValue == true
+        let off = p["disabled"]?.boolValue == true
+        if on && off { throw AutomationScheduleError.invalid("use either --enabled or --disabled") }
+        if on { return true }
+        if off { return false }
+        return existing ?? true
     }
 }

@@ -12,6 +12,9 @@ final class PaletteSourcesTests: XCTestCase {
 
         let settings = PaletteSources.rank(query: "pref", candidates: commands)
         XCTAssertEqual(settings.first?.id, PaletteCommand.settings.id)
+
+        let automations = PaletteSources.rank(query: "cron", candidates: commands)
+        XCTAssertEqual(automations.first?.id, PaletteCommand.openAutomations.id)
     }
 
     func testCatalogPutsWorkspacesAgentsCommandsThenFiles() {
@@ -27,7 +30,7 @@ final class PaletteSourcesTests: XCTestCase {
             workspaceTitle: "fix-parser",
             includeFiles: true)
         XCTAssertEqual(catalog.map(\.kind), [
-            .workspace, .agent, .command, .command, .command, .command, .file, .file,
+            .workspace, .agent, .command, .command, .command, .command, .command, .file, .file,
         ])
     }
 

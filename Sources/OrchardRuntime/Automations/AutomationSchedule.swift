@@ -81,6 +81,7 @@ public enum AutomationSchedule {
     public static func due(_ automations: [Automation], since: Date, through now: Date,
                            lastRuns: [String: Date] = [:], calendar: Calendar = .utc) -> [(Automation, Date)] {
         automations.compactMap { automation in
+            guard automation.enabled else { return nil }
             let lower = max(since, lastRuns[automation.id] ?? automation.createdAt)
             guard let slot = try? nextFire(for: automation, after: lower, calendar: calendar), slot <= now else { return nil }
             var latest = slot
