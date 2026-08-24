@@ -190,6 +190,13 @@ struct SidebarView: View {
             .controlSize(.small)
             .help("Agent dashboard")
 
+            Button { store.showOrchestration?() } label: {
+                Image(systemName: "list.bullet.indent")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help("Orchestration runs")
+
             Menu {
                 Picker("Theme", selection: Binding(
                     get: { store.settings.themeName },

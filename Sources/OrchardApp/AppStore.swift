@@ -84,6 +84,7 @@ final class AppStore: ObservableObject {
 
     var focusMainWindow: (() -> Void)?
     var showDashboard: (() -> Void)?
+    var showOrchestration: (() -> Void)?
     var showSettings: (() -> Void)?
 
     private var shells: [UUID: DamsonSession] = [:]
@@ -249,6 +250,77 @@ final class AppStore: ObservableObject {
             bindAgentTab(agent, key: .projectRoot(project.id))
         }
         focusMainWindow?()
+    }
+
+    /// Whether this app currently hosts a pane for `handle` (live registry or
+    /// a supervisor-bound agent). Jump-to-terminal is offered only then.
+    func workerPaneExists(handle: String) -> Bool {
+        if resolvedWorkerHandle(handle) != nil { return true }
+        return agentMatching(handle: handle) != nil
+    }
+
+    /// Focus the live worker pane when it exists in this app. Returns false
+    /// when the handle is not a pane we can show — never invents a terminal.
+    @discardableResult
+    func focusWorkerTerminal(handle: String) -> Bool {
+        if let agent = agentMatching(handle: handle) {
+            focus(agentID: agent.id)
+            return true
+        }
+        guard let resolved = resolvedWorkerHandle(handle),
+              let summary = try? runtime?.terminalService.summary(handle: resolved),
+              let worktreeId = summary.worktreeId,
+              selectWorkspace(identity: worktreeId) else {
+            return false
+        }
+        focusMainWindow?()
+        return true
+    }
+
+    private func resolvedWorkerHandle(_ handle: String) -> String? {
+        guard let service = runtime?.terminalService else { return nil }
+        do {
+            _ = try service.summary(handle: handle)
+            return handle
+        } catch TerminalServiceError.handleStale(_, let replacement) {
+            return replacement
+        } catch {
+            return nil
+        }
+    }
+
+    private func agentMatching(handle: String) -> AgentSession? {
+        let resolved = resolvedWorkerHandle(handle)
+        for project in projects {
+            for agent in project.agents.agents {
+                if agent.terminalHandle == handle { return agent }
+                if let resolved, agent.terminalHandle == resolved { return agent }
+                if let paneKey = agent.paneKey,
+                   runtime?.terminalService.liveHandle(forPaneKey: paneKey) == handle
+                    || runtime?.terminalService.liveHandle(forPaneKey: paneKey) == resolved {
+                    return agent
+                }
+            }
+        }
+        return nil
+    }
+
+    @discardableResult
+    private func selectWorkspace(identity: String) -> Bool {
+        for project in projects {
+            if let repoID = project.repoID,
+               "\(repoID)::\(project.repo.path)" == identity {
+                selectProjectRoot(project)
+                return true
+            }
+            for record in project.records {
+                if workspaceIdentity(for: record, in: project) == identity {
+                    select(record, in: project)
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     // MARK: - Live status (observation-only)

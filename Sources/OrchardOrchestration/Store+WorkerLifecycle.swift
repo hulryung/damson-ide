@@ -671,17 +671,36 @@ public enum WorkerTerminalListState: String, CaseIterable, Sendable {
 
     public static func derive(workerState: String, agentTerminalHandle: String?,
                               resource: WorkerTerminalResource?) -> WorkerTerminalListState? {
-        guard let resource else {
+        derive(
+            workerState: workerState,
+            agentTerminalHandle: agentTerminalHandle,
+            releaseState: resource?.releaseState.rawValue,
+            ownershipState: resource?.ownershipState.rawValue)
+    }
+
+    /// Primitive form of `derive` for observation (the in-app orchestration view
+    /// and its tests) so callers never have to construct a resource row.
+    public static func derive(
+        workerState: String,
+        agentTerminalHandle: String?,
+        releaseState: String?,
+        ownershipState: String?
+    ) -> WorkerTerminalListState? {
+        guard releaseState != nil || ownershipState != nil else {
             return agentTerminalHandle != nil ? .retained : nil
         }
-        switch resource.releaseState {
-        case .released: return .released
-        case .unknown: return .releaseUnknown
-        case .requested, .releasing: return .releasePending
-        case .retained: return .retained
-        case .notRequested: break
+        switch releaseState {
+        case WorkerTerminalReleaseState.released.rawValue: return .released
+        case WorkerTerminalReleaseState.unknown.rawValue: return .releaseUnknown
+        case WorkerTerminalReleaseState.requested.rawValue,
+             WorkerTerminalReleaseState.releasing.rawValue: return .releasePending
+        case WorkerTerminalReleaseState.retained.rawValue: return .retained
+        case WorkerTerminalReleaseState.notRequested.rawValue, .none: break
+        default: break
         }
-        if resource.ownershipState != .owned { return .retained }
+        if let ownershipState, ownershipState != WorkerTerminalOwnershipState.owned.rawValue {
+            return .retained
+        }
         if workerState == WorkerDispatchState.succeeded.rawValue
             || workerState == WorkerDispatchState.failed.rawValue {
             return .reclaimable
