@@ -216,6 +216,12 @@ final class LiveOrchestrationAdapterTests: XCTestCase {
         // Same registry T4's workspace service reads — one store, no sidecar.
         let stored = await MainActor.run { [host] in host!.workspaceService.listRepos() }
         XCTAssertEqual(stored.map(\.id), [repoID])
+
+        let removed = await perform("repo-remove", ["repo": .string(repoID)])
+        XCTAssertTrue(removed.ok, String(describing: removed.error))
+        XCTAssertEqual(removed.result?.field("removed")?.boolValue, true)
+        let after = await perform("repo-list")
+        XCTAssertEqual(after.result?.field("count")?.numberValue, 0)
     }
 
     // MARK: - reset

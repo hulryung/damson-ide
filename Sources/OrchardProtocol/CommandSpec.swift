@@ -43,18 +43,27 @@ public struct FlagSpec: Codable, Equatable, Sendable {
     /// accepted spelling — so closed flags enumerate here and agents read the list
     /// out of `agent-context` instead of guessing. nil means "open value".
     public let allowedValues: [String]?
+    /// Alternate spellings accepted by the parser and stored under `name`.
+    /// Dogfood-4: `dispatch-show` takes `--id` while worker verbs take `--dispatch`.
+    public let aliases: [String]
 
     public init(name: String, summary: String, valueHint: String? = nil, required: Bool = false,
-                allowedValues: [String]? = nil) {
+                allowedValues: [String]? = nil, aliases: [String] = []) {
         self.name = name
         self.summary = summary
         self.valueHint = valueHint
         self.required = required
         self.allowedValues = allowedValues
+        self.aliases = aliases
+    }
+
+    /// True when `token` is this flag's canonical name or one of its aliases.
+    public func matches(_ token: String) -> Bool {
+        name == token || aliases.contains(token)
     }
 
     private enum CodingKeys: String, CodingKey {
-        case name, summary, valueHint, required, allowedValues
+        case name, summary, valueHint, required, allowedValues, aliases
     }
 
     public init(from decoder: Decoder) throws {
@@ -64,6 +73,7 @@ public struct FlagSpec: Codable, Equatable, Sendable {
         valueHint = try values.decodeIfPresent(String.self, forKey: .valueHint)
         required = try values.decodeIfPresent(Bool.self, forKey: .required) ?? false
         allowedValues = try values.decodeIfPresent([String].self, forKey: .allowedValues)
+        aliases = try values.decodeIfPresent([String].self, forKey: .aliases) ?? []
     }
 }
 
@@ -93,11 +103,19 @@ public struct AgentContextDocument: Codable, Equatable, Sendable {
     }
 }
 
+extension CommandSpec {
+    /// Canonical flag for a `--token`, including aliases (`--dispatch` → `--id`).
+    public func flag(named token: String) -> FlagSpec? {
+        flags.first { $0.matches(token) }
+    }
+}
+
 /// The complete command vocabulary shared by parsing, help, and agent discovery.
 public enum OrchardCommands {
     private static func flag(_ name: String, _ summary: String, _ value: String? = nil,
-                             required: Bool = false) -> FlagSpec {
-        FlagSpec(name: name, summary: summary, valueHint: value, required: required)
+                             required: Bool = false, aliases: [String] = []) -> FlagSpec {
+        FlagSpec(name: name, summary: summary, valueHint: value, required: required,
+                 aliases: aliases)
     }
 
     public static let all: [CommandSpec] = {
@@ -142,7 +160,9 @@ public enum OrchardCommands {
             command("task-list", "List tasks", [flag("status", "Filter status", "status"), flag("ready", "Ready tasks only"), flag("brief", "Brief output"), from, run]),
             command("task-update", "Update a task", [flag("id", "Task identifier", "id", required: true), flag("status", "New status", "status", required: true), flag("result", "Result JSON", "json"), retry]),
             command("dispatch", "Dispatch a task", [flag("task", "Task identifier", "id", required: true), flag("to", "Terminal handle", "handle", required: true), flag("inject", "Inject preamble"), flag("dry-run", "Preview only"), flag("return-preamble", "Return preamble"), from, retry]),
-            command("dispatch-show", "Show a dispatch", [flag("id", "Dispatch identifier", "id", required: true)]),
+            command("dispatch-show", "Show a dispatch", [
+                flag("id", "Dispatch identifier", "id", required: true, aliases: ["dispatch"])
+            ]),
             command("gate-create", "Create a decision gate", [flag("task", "Task identifier", "id", required: true), flag("question", "Question", "text", required: true), flag("options", "Options JSON", "json"), from, retry]),
             command("gate-resolve", "Resolve a decision gate", [flag("id", "Gate identifier", "id", required: true), flag("resolution", "Resolution", "text", required: true), retry]),
             command("gate-list", "List decision gates", [flag("task", "Task identifier", "id"), flag("status", "Gate status", "status")]),
@@ -157,7 +177,16 @@ public enum OrchardCommands {
             // T32: `repo add --host ssh:<name>` registers a checkout that lives on a
             // registered host. The remote path is probed over a bounded ssh run before
             // the record exists, so a repo record is never a claim nobody checked.
-            command("repo", "Manage registered repositories", [flag("path", "Repository path", "path"), flag("repo", "Repository selector", "selector"), flag("display-name", "Display name", "text"), flag("base-ref", "Default base ref for new worktrees", "ref"), flag("host", "Execution host: local (default) or ssh:<name>", "id")], positionals: ["list|add|show"]),
+            command("repo", "Manage registered repositories", [
+                flag("path", "Repository path", "path"),
+                flag("repo", "Repository selector", "selector"),
+                flag("display-name", "Display name", "text"),
+                flag("base-ref", "Default base ref for new worktrees", "ref"),
+                flag("host", "Execution host: local (default) or ssh:<name>", "id"),
+            ], positionals: ["list|add|show|remove"], notes: [
+                "repo remove drops the registry row and orchard-data owned by the repo.",
+                "It refuses while extra worktrees or automations still reference the repo (typed repo_in_use, naming them). There is no --force.",
+            ]),
             command("worktree", "List worktrees or show agent/shell processes and listening ports", [
                 flag("repo", "Repository selector", "selector"),
                 flag("worktree", "Worktree selector", "selector"),
@@ -235,7 +264,7 @@ public enum OrchardCommands {
                 flag("timeout", "Precheck timeout seconds (1...300)", "n"),
                 flag("enabled", "Enable the automation (default on create)"),
                 flag("disabled", "Disable the automation"),
-            ], positionals: ["list|show|create|edit|remove|run|runs"]),
+            ], positionals: ["list|show|create|edit|remove|run|runs|due|fire-due"]),
             // T29 remote hosts. `host check` is bounded: it reports
             // reachable|auth-required|unreachable and never waits on a human, because
             // BatchMode makes OpenSSH fail instead of prompting. Unreachable is loss of
@@ -271,7 +300,7 @@ public enum CommandGroup: String, Codable, CaseIterable, Sendable {
     case gate         // gate-create/resolve/list
     case terminal     // terminal list/create/read/send/wait/split/close/rename
     case worktree     // worktree list/show/current/create/set/rm/ps
-    case repo         // repo list/add/show
+    case repo         // repo list/add/show/remove
     case file         // file open/diff/open-changed/search
     case browser      // browser goto/…/tab (wave 2)
     case host         // host list/add/check (T29 remote hosts)

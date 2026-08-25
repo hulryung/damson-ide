@@ -189,4 +189,75 @@ final class CLIFormattingTests: XCTestCase {
         let parsed = try JSONDecoder().decode(JSONValue.self, from: Data(output.utf8))
         XCTAssertEqual(parsed.objectValue?["type"]?.stringValue, "worker_done")
     }
+
+    // MARK: - T61 dogfood-4 help / flag nits + typed-error exit
+
+    func testAutomationsHelpListsDueAndFireDue() throws {
+        let spec = try XCTUnwrap(OrchardCommands.all.first { $0.name == "automations" })
+        XCTAssertTrue(spec.positionalArgs.contains { $0.contains("due") && $0.contains("fire-due") },
+                      spec.positionalArgs.joined(separator: ","))
+        let help = CommandHelpRenderer.render(spec)
+        XCTAssertTrue(help.contains("due"), help)
+        XCTAssertTrue(help.contains("fire-due"), help)
+    }
+
+    func testDispatchShowAcceptsDispatchAsAliasOfId() throws {
+        let spec = try XCTUnwrap(OrchardCommands.all.first { $0.name == "dispatch-show" })
+        let id = try XCTUnwrap(spec.flag(named: "id"))
+        XCTAssertEqual(id.name, "id")
+        XCTAssertTrue(id.required)
+        XCTAssertEqual(spec.flag(named: "dispatch")?.name, "id")
+        let help = CommandHelpRenderer.render(spec)
+        XCTAssertTrue(help.contains("--id <id>"), help)
+        XCTAssertTrue(help.contains("alias: --dispatch"), help)
+        XCTAssertFalse(spec.flags.map(\.name).contains("force"))
+    }
+
+    func testRepoHelpAdvertisesRemoveAndRefusesForce() throws {
+        let spec = try XCTUnwrap(OrchardCommands.all.first { $0.name == "repo" })
+        XCTAssertTrue(spec.positionalArgs.contains { $0.contains("remove") },
+                      spec.positionalArgs.joined(separator: ","))
+        XCTAssertFalse(spec.flags.map(\.name).contains("force"), spec.flags.map(\.name).joined(separator: ","))
+        let help = CommandHelpRenderer.render(spec)
+        XCTAssertTrue(help.contains("list|add|show|remove"), help)
+        XCTAssertTrue(help.contains("repo_in_use") || help.contains("no --force"), help)
+    }
+
+    func testRepoRemoveHumanFace() {
+        let removed: JSONValue = .object([
+            "removed": .bool(true),
+            "displayName": .string("Named"),
+            "id": .string("abc"),
+        ])
+        XCTAssertEqual(OrchardHumanFormatter.repoRemove(removed), "Removed repo 'Named'.")
+        let nested: JSONValue = .object([
+            "removed": .bool(true),
+            "repo": .object(["displayName": .string("Nested")]),
+        ])
+        XCTAssertEqual(OrchardHumanFormatter.repoRemove(nested), "Removed repo 'Nested'.")
+        let kept: JSONValue = .object([
+            "removed": .bool(false),
+            "displayName": .string("Named"),
+        ])
+        XCTAssertEqual(OrchardHumanFormatter.repoRemove(kept), "Repo 'Named' was not removed.")
+    }
+
+    func testTypedErrorEnvelopeExitsNonZeroEvenWhenJSONPrinted() {
+        let ok = RPCResponse.success(id: "1", result: .object(["removed": .bool(true)]))
+        XCTAssertEqual(CLIEnvelopeExit.status(for: ok), 0)
+        let typed = RPCResponse.failure(
+            id: "1",
+            error: RPCError(code: "transcript_unavailable", message: "provider_session_unavailable"))
+        XCTAssertEqual(CLIEnvelopeExit.status(for: typed), 1)
+        XCTAssertEqual(CLIEnvelopeExit.usage, 64)
+    }
+
+    func testFlagSpecDecodesWithoutAliases() throws {
+        let json = #"{"name":"id","summary":"Dispatch identifier","valueHint":"id","required":true}"#
+        let flag = try JSONDecoder().decode(FlagSpec.self, from: Data(json.utf8))
+        XCTAssertEqual(flag.name, "id")
+        XCTAssertEqual(flag.aliases, [])
+        XCTAssertTrue(flag.matches("id"))
+        XCTAssertFalse(flag.matches("dispatch"))
+    }
 }

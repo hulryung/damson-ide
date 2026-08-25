@@ -53,6 +53,7 @@ final class DispatchErgonomicsTests: XCTestCase {
         let flag = try JSONDecoder().decode(FlagSpec.self, from: Data(json.utf8))
         XCTAssertEqual(flag.name, "agent")
         XCTAssertNil(flag.allowedValues)
+        XCTAssertEqual(flag.aliases, [])
     }
 
     // MARK: - The injected CLI command (dogfood-1 finding 2)
