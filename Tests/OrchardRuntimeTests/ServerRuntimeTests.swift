@@ -39,25 +39,54 @@ final class ServerRuntimeTests: XCTestCase {
             DispatchQueue.global(qos: .userInitiated).async {
                 let lock = NSLock()
                 var failures: [String] = []
-                DispatchQueue.concurrentPerform(iterations: 50) { _ in
-                    do {
-                        if try !client.call("status", [:]).ok {
-                            lock.lock(); failures.append("non-ok response"); lock.unlock()
+                let clients = OperationQueue()
+                // Keep the load at the behavior under test. Letting all 50 clients
+                // race connect() also tests the kernel's finite listen backlog, whose
+                // overflow is allowed to reject a connection before Orchard sees it.
+                clients.maxConcurrentOperationCount = UnixSocketServer.maximumConcurrentConnections
+                for _ in 0..<50 {
+                    clients.addOperation {
+                        do {
+                            if try !client.call("status", [:]).ok {
+                                lock.lock(); failures.append("non-ok response"); lock.unlock()
+                            }
+                        } catch {
+                            lock.lock(); failures.append(String(describing: error)); lock.unlock()
                         }
-                    } catch {
-                        lock.lock(); failures.append(String(describing: error)); lock.unlock()
                     }
                 }
+                clients.waitUntilAllOperationsAreFinished()
                 continuation.resume(returning: failures)
             }
         }
         XCTAssertTrue(failures.isEmpty, failures.joined(separator: ", "))
         for _ in 0..<50 { try abruptClose(socketPath: server.metadata.socketPath) }
-        XCTAssertTrue(try client.call("status", [:]).ok)
-        let finalFDs = try FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count
+        XCTAssertTrue(try waitForHealthyStatus(client))
+        let finalFDs = try waitForOpenFDCount(atMost: baselineFDs + 2)
         XCTAssertLessThanOrEqual(server.peakActiveConnectionCount, UnixSocketServer.maximumConcurrentConnections)
         XCTAssertLessThanOrEqual(finalFDs, baselineFDs + 2, "abrupt clients leaked descriptors")
         print("PERF socket calls=50 completed=50 peak=\(server.peakActiveConnectionCount) cap=\(UnixSocketServer.maximumConcurrentConnections) fdDelta=\(finalFDs - baselineFDs)")
+    }
+
+    private func waitForOpenFDCount(atMost limit: Int) throws -> Int {
+        let deadline = Date().addingTimeInterval(2)
+        var count = try FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count
+        while count > limit, Date() < deadline {
+            usleep(10_000)
+            count = try FileManager.default.contentsOfDirectory(atPath: "/dev/fd").count
+        }
+        return count
+    }
+
+    private func waitForHealthyStatus(_ client: NDJSONClient) throws -> Bool {
+        let deadline = Date().addingTimeInterval(2)
+        while true {
+            do {
+                return try client.call("status", [:]).ok
+            } catch where Date() < deadline {
+                usleep(10_000)
+            }
+        }
     }
 
     private func abruptClose(socketPath: String) throws {
