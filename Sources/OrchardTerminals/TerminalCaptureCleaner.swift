@@ -10,10 +10,28 @@ import Foundation
 /// times. The real dogfood-1 archive was 1,594 lines for roughly 275 lines of
 /// content.
 ///
-/// This is deliberately lossy — a repaint stream cannot be reconstructed into the
-/// exact frames a human saw — which is why the caller MUST keep the untouched
-/// capture alongside the cleaned one (`worker-read --raw` serves it). Every drop is
-/// counted in `Report` so a reader can tell how much was removed.
+/// **The fidelity rule (T52).** Cleaning drops chrome; it never rewrites text. Every
+/// line this emits is one captured line with its chrome taken off — same characters,
+/// same word boundaries — with exactly one exception, spelled out below, that is
+/// backed by another paint of the *same* characters. Dogfood cycle 3 found the Vault
+/// reader showing lines the earlier passes had invented spaces into
+/// (`term_f 91112 a 8-b 4 ac-…` for `term_f91112a8-b4ac-…`, `dogfood-t 50-20260825`,
+/// `Git Hub`), because those passes guessed where the TUI's missing spaces belonged.
+/// A guess that is right is unremarkable and a guess that is wrong is unreadable, so
+/// the guessing is gone: when a captured line cannot be improved truthfully it is
+/// passed through as captured.
+///
+/// That means some archives stay hard to read, and that is the honest outcome. A wide
+/// paste reaches the stream buffer with its empty cells never emitted, so the *raw*
+/// line already says `Tipsforgettingstarted`, and the T50 capture even lost letters
+/// before Orchard saw it (`paste gain to expad` for "paste again to expand",
+/// `coorinator` for "coordinator"). No cleaner can restore what the capture never
+/// carried; inventing it is how you get a readable archive that says the wrong thing.
+///
+/// Stripping is still lossy at *line* granularity — a repaint stream cannot be
+/// reconstructed into the exact frames a human saw — which is why the caller MUST
+/// keep the untouched capture alongside the cleaned one (`worker-read --raw` serves
+/// it). Every drop is counted in `Report` so a reader can tell how much was removed.
 public enum TerminalCaptureCleaner {
 
     /// The cleaned lines plus a per-reason tally of what was dropped. The counts are
@@ -34,6 +52,10 @@ public enum TerminalCaptureCleaner {
         public var escapeRemnantLines: Int
         /// Swift debug dumps of `JSONValue` (dogfood-2: `orchard send` without `--json`).
         public var debugDumpLines: Int
+        /// Emitted lines whose spacing came from another capture line with exactly the
+        /// same characters (see `spacingIndex`). The only text rewrite the cleaner
+        /// performs, counted so a reader can see how often it fired.
+        public var respacedLines: Int
 
         public var inputLineCount: Int {
             lines.count + separatorLines + spinnerLines + duplicateLines
@@ -42,7 +64,8 @@ public enum TerminalCaptureCleaner {
 
         public init(lines: [String], separatorLines: Int = 0, spinnerLines: Int = 0,
                     duplicateLines: Int = 0, blankLines: Int = 0,
-                    escapeRemnantLines: Int = 0, debugDumpLines: Int = 0) {
+                    escapeRemnantLines: Int = 0, debugDumpLines: Int = 0,
+                    respacedLines: Int = 0) {
             self.lines = lines
             self.separatorLines = separatorLines
             self.spinnerLines = spinnerLines
@@ -50,6 +73,7 @@ public enum TerminalCaptureCleaner {
             self.blankLines = blankLines
             self.escapeRemnantLines = escapeRemnantLines
             self.debugDumpLines = debugDumpLines
+            self.respacedLines = respacedLines
         }
     }
 
@@ -100,6 +124,11 @@ public enum TerminalCaptureCleaner {
     private static let progressLine = try! NSRegularExpression(
         pattern: "^[A-Za-z]{0,24}…")
 
+    /// Shortest run of characters whose spacing may be taken from another capture
+    /// line. Below this a collision is plausible (`12` and `1 2` are not obviously
+    /// the same text), and the gain is not worth the doubt.
+    static let respacingKeyFloor = 8
+
     /// Clean one captured tail.
     public static func clean(_ input: [String],
                              duplicateWindow: Int = TerminalCaptureCleaner.duplicateWindow) -> Report {
@@ -109,9 +138,9 @@ public enum TerminalCaptureCleaner {
         var maskedWindow: [String] = []
         var suffixWindow: [String] = []
         var lastEmittedWasBlank = true
-        // Well-spaced originals, used to rehydrate lines the TUI concatenated without
-        // emitting the space cells. The raw capture is the source of truth for spacing.
-        let corpus = input.map { squeezeSpace(normalize($0).line) }.filter { $0.contains(" ") }
+        // Where the TUI painted the same characters twice, once with its space cells
+        // and once without, the spaced paint is the one to show.
+        let spacing = spacingIndex(input)
 
         for raw in input {
             let (normalized, hadRemnant) = normalize(raw)
@@ -133,7 +162,6 @@ public enum TerminalCaptureCleaner {
                 continue
             }
             var flattened = flattenSpinners(normalized)
-            flattened = segment(flattened, corpus: corpus)
             if isSwiftDebugDump(flattened) {
                 report.debugDumpLines += 1
                 continue
@@ -142,20 +170,17 @@ public enum TerminalCaptureCleaner {
                 report.spinnerLines += 1
                 continue
             }
+            if let respaced = spacing[squeezeKey(flattened)],
+               spaceCount(respaced) > spaceCount(flattened) {
+                flattened = respaced
+                report.respacedLines += 1
+            }
             let squeezed = squeezeKey(flattened)
-            // An exact repeat, or the same letters with worse/equal spacing, is a
-            // repaint of the same frame. A later copy with *more* spaces replaces
-            // the collapsed original — the raw capture's spaced paint is kept.
-            if let existingIndex = window.firstIndex(of: flattened)
-                ?? squeezedWindow.firstIndex(of: squeezed) {
-                let existing = window[existingIndex]
-                if spaceCount(flattened) > spaceCount(existing) {
-                    if let lineIndex = report.lines.lastIndex(of: existing) {
-                        report.lines[lineIndex] = flattened
-                    }
-                    window[existingIndex] = flattened
-                    squeezedWindow[existingIndex] = squeezed
-                }
+            // An exact repeat, or the same letters with different spacing, is a
+            // repaint of the same frame. Both copies have already been respaced to
+            // the best paint the capture holds, so the first one emitted is the one
+            // to keep.
+            if window.contains(flattened) || squeezedWindow.contains(squeezed) {
                 report.duplicateLines += 1
                 continue
             }
@@ -244,18 +269,6 @@ public enum TerminalCaptureCleaner {
         return squeezeSpace(replaced)
     }
 
-    /// Restore word boundaries a TUI stream buffer dropped (empty cells never
-    /// became space characters). Uses the raw capture as the spacing source of
-    /// truth when a better-spaced copy of the same letters exists; otherwise
-    /// splits glued `--flags` and camelCase runs.
-    static func segment(_ line: String, corpus: [String]) -> String {
-        var value = splitGluedFlags(line)
-        if looksCollapsed(value) {
-            value = splitCamelCase(value)
-        }
-        return rehydrateSpacing(value, corpus: corpus)
-    }
-
     static func isSwiftDebugDump(_ line: String) -> Bool {
         line.contains("OrchardProtocol.JSONValue")
             || (line.contains("object([") && line.contains("JSONValue"))
@@ -268,9 +281,13 @@ public enum TerminalCaptureCleaner {
         if !line.contains(where: { $0.isLetter }) { return true }
         // A progress line ("Levitating… (11s · ↓ 490 tokens)").
         if matches(progressLine, line) { return true }
-        // A torn frame fragment: too short to be a sentence, and what is left is the
-        // tail of a word the next repaint finished ("tg5", "an9", "Li3").
-        if line.count <= 4 { return true }
+        // A torn frame fragment: the tail of a word the next repaint finished, with
+        // the spinner's frame counter still glued to it (`tg5`, `an9`, `Li3`). The
+        // counter digit is what separates these from a real short line of output —
+        // `ok`, `PASS` and `done` are content and must survive (T52).
+        if line.count <= 4, !line.contains(" "), line.contains(where: { $0.isNumber }) {
+            return true
+        }
         return false
     }
 
@@ -298,6 +315,30 @@ public enum TerminalCaptureCleaner {
 
     // MARK: - Spacing
 
+    /// The best-spaced paint of each distinct run of characters in the capture.
+    ///
+    /// This is the cleaner's only text rewrite, and it is not a guess: the
+    /// replacement is another line of the *same capture* holding exactly the same
+    /// characters in the same order, so the spaces it restores are ones the terminal
+    /// really painted. Anything weaker — splicing a well-spaced fragment into the
+    /// middle of a collapsed line, splitting `camelCase` runs, breaking before a
+    /// `--flag` — invents boundaries the capture never had, which is what produced
+    /// `term_f 91112 a 8-…` and `dogfood-t 50-20260825` in the Vault (T52).
+    static func spacingIndex(_ input: [String]) -> [String: String] {
+        var index: [String: String] = [:]
+        for raw in input {
+            let candidate = flattenSpinners(normalize(raw).line)
+            guard candidate.contains(" ") else { continue }
+            let key = squeezeKey(candidate)
+            guard key.count >= respacingKeyFloor else { continue }
+            if let existing = index[key], spaceCount(existing) >= spaceCount(candidate) {
+                continue
+            }
+            index[key] = candidate
+        }
+        return index
+    }
+
     static func squeezeSpace(_ line: String) -> String {
         line.split(separator: " ", omittingEmptySubsequences: true)
             .joined(separator: " ")
@@ -309,137 +350,6 @@ public enum TerminalCaptureCleaner {
 
     private static func spaceCount(_ line: String) -> Int {
         line.reduce(0) { $0 + ($1.isWhitespace ? 1 : 0) }
-    }
-
-    /// A line with no spaces and a run of letters was concatenated from TUI cells.
-    /// Lines that already have spaces (real command output, identifiers like
-    /// `OrchardTerminals`) are left alone so camelCase splitting cannot rewrite them.
-    static func looksCollapsed(_ line: String) -> Bool {
-        let letters = line.reduce(0) { $0 + ($1.isLetter ? 1 : 0) }
-        return letters >= 10 && spaceCount(line) == 0
-    }
-
-    /// `orchardsend--from` → `orchardsend --from`. The TUI paints `--flag` as its
-    /// own cells and the stream buffer concatenates them onto the previous token.
-    static func splitGluedFlags(_ line: String) -> String {
-        guard line.contains("--") else { return line }
-        var out = ""
-        var index = line.startIndex
-        while index < line.endIndex {
-            if line[index] == "-",
-               line.index(after: index) < line.endIndex,
-               line[line.index(after: index)] == "-",
-               let last = out.last, last.isLetter || last.isNumber || last == ")" {
-                out.append(" ")
-            }
-            out.append(line[index])
-            index = line.index(after: index)
-        }
-        return out
-    }
-
-    /// `Updateavailable!Run` → `Update available! Run`. Only applied to collapsed
-    /// lines so a camelCase identifier in real command output is left alone.
-    static func splitCamelCase(_ line: String) -> String {
-        var out = ""
-        var previous: Character?
-        for character in line {
-            if let previous {
-                let boundary =
-                    (previous.isLowercase && character.isUppercase)
-                    || (previous.isLetter && character.isNumber)
-                    || (previous.isNumber && character.isLetter)
-                if boundary { out.append(" ") }
-            }
-            out.append(character)
-            previous = character
-        }
-        return out
-    }
-
-    /// Prefer a better-spaced copy of the same letters from the raw capture.
-    static func rehydrateSpacing(_ line: String, corpus: [String]) -> String {
-        let compact = squeezeKey(line)
-        guard compact.count >= 8 else { return line }
-        var best = line
-        var bestSpaces = spaceCount(line)
-        for spaced in corpus {
-            let spacedCompact = squeezeKey(spaced)
-            if spacedCompact == compact {
-                let spaces = spaceCount(spaced)
-                if spaces > bestSpaces {
-                    best = spaced
-                    bestSpaces = spaces
-                }
-            } else if compact.count >= 12, spacedCompact.contains(compact) {
-                if let extracted = extractSpaced(from: spaced, matching: compact) {
-                    let spaces = spaceCount(extracted)
-                    if spaces > bestSpaces {
-                        best = extracted
-                        bestSpaces = spaces
-                    }
-                }
-            } else if spacedCompact.count >= 16, compact.contains(spacedCompact) {
-                if let spliced = replaceCompactSubstring(
-                    in: best, compactNeedle: spacedCompact, with: spaced) {
-                    let spaces = spaceCount(spliced)
-                    if spaces > bestSpaces {
-                        best = spliced
-                        bestSpaces = spaces
-                    }
-                }
-            }
-        }
-        return best
-    }
-
-    /// Walk `spaced`, skipping its whitespace, and copy the span whose letters
-    /// equal `compact` — keeping the original spaces.
-    static func extractSpaced(from spaced: String, matching compact: String) -> String? {
-        guard !compact.isEmpty else { return nil }
-        var compactIndex = compact.startIndex
-        var start: String.Index?
-        var pendingSpace = false
-        var result = ""
-        for index in spaced.indices {
-            let character = spaced[index]
-            if character.isWhitespace {
-                if start != nil { pendingSpace = true }
-                continue
-            }
-            if compactIndex < compact.endIndex, character == compact[compactIndex] {
-                if start == nil { start = index }
-                if pendingSpace { result.append(" "); pendingSpace = false }
-                result.append(character)
-                compactIndex = compact.index(after: compactIndex)
-                if compactIndex == compact.endIndex { return result }
-            } else if start != nil {
-                return nil
-            }
-        }
-        return nil
-    }
-
-    static func replaceCompactSubstring(in line: String, compactNeedle: String,
-                                        with spaced: String) -> String? {
-        let compactLine = squeezeKey(line)
-        guard let range = compactLine.range(of: compactNeedle) else { return nil }
-        let startOffset = compactLine.distance(from: compactLine.startIndex, to: range.lowerBound)
-        let endOffset = compactLine.distance(from: compactLine.startIndex, to: range.upperBound)
-        var seen = 0
-        var startIndex: String.Index?
-        var endIndex: String.Index?
-        for index in line.indices {
-            if line[index].isWhitespace { continue }
-            if seen == startOffset { startIndex = index }
-            seen += 1
-            if seen == endOffset {
-                endIndex = line.index(after: index)
-                break
-            }
-        }
-        guard let startIndex, let endIndex else { return nil }
-        return String(line[line.startIndex..<startIndex]) + spaced + String(line[endIndex...])
     }
 
     // MARK: - Regex helpers
