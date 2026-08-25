@@ -46,4 +46,15 @@ final class HookStatusPayloadTests: XCTestCase {
         let clipped = HookStatusFields.parse(object: ["last_assistant_message": huge])
         XCTAssertEqual(clipped.lastAssistantMessage?.count, agentStatusAssistantMessageMax)
     }
+
+    func testParsesInteractivePrompt() {
+        let fields = HookStatusFields.parse(jsonString:
+            #"{"state":"waiting","interactivePrompt":"Approve deploy?"}"#)
+        XCTAssertEqual(fields.interactivePrompt, "Approve deploy?")
+        XCTAssertTrue(fields.hasValues)
+
+        let huge = String(repeating: "q", count: agentStatusInteractivePromptMax + 20)
+        let clipped = HookStatusFields.parse(object: ["interactive_prompt": huge])
+        XCTAssertEqual(clipped.interactivePrompt?.count, agentStatusInteractivePromptMax)
+    }
 }

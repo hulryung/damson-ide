@@ -91,6 +91,9 @@ public struct AgentStatusSnapshot: Codable, Equatable, Sendable {
     public let toolName: String?
     /// Exact provider session reported by the latest hook (for transcript pinning).
     public let providerSessionID: String?
+    /// Raw pending-question payload (`AskUserQuestion` / approval). Dashboard
+    /// cards surface a short `askSummary` from this when the bucket is attention.
+    public let interactivePrompt: String?
 
     public init(state: AgentStatusState, prompt: String, updatedAt: Double,
                 stateStartedAt: Double, agentType: String, paneKey: String,
@@ -100,7 +103,8 @@ public struct AgentStatusSnapshot: Codable, Equatable, Sendable {
                 stateHistory: [AgentStateHistoryRecord] = [],
                 lastAssistantMessage: String? = nil,
                 lastCompletedAssistantMessage: String? = nil,
-                toolName: String? = nil, providerSessionID: String? = nil) {
+                toolName: String? = nil, providerSessionID: String? = nil,
+                interactivePrompt: String? = nil) {
         self.state = state
         self.prompt = prompt
         self.updatedAt = updatedAt
@@ -117,6 +121,7 @@ public struct AgentStatusSnapshot: Codable, Equatable, Sendable {
         self.lastCompletedAssistantMessage = lastCompletedAssistantMessage
         self.toolName = toolName
         self.providerSessionID = providerSessionID
+        self.interactivePrompt = interactivePrompt
     }
 }
 
@@ -144,6 +149,7 @@ final class AgentStatusTracker {
     var lastCompletedAssistantMessage = ""
     var lastToolName = ""
     var providerSessionID = ""
+    var interactivePrompt = ""
 
     /// Fold hook/OSC chat fields into the factual record. Returns true when a
     /// field actually changed so callers can publish even without a state flip —
@@ -170,6 +176,10 @@ final class AgentStatusTracker {
         }
         if let sessionID = fields.providerSessionID, sessionID != providerSessionID {
             providerSessionID = sessionID
+            changed = true
+        }
+        if let ask = fields.interactivePrompt, ask != interactivePrompt {
+            interactivePrompt = ask
             changed = true
         }
         if changed { updatedAt = Date() }
@@ -216,6 +226,7 @@ final class AgentStatusTracker {
             lastCompletedAssistantMessage: lastCompletedAssistantMessage.isEmpty
                 ? nil : lastCompletedAssistantMessage,
             toolName: lastToolName.isEmpty ? nil : lastToolName,
-            providerSessionID: providerSessionID.isEmpty ? nil : providerSessionID)
+            providerSessionID: providerSessionID.isEmpty ? nil : providerSessionID,
+            interactivePrompt: interactivePrompt.isEmpty ? nil : interactivePrompt)
     }
 }

@@ -14,22 +14,27 @@ public struct HookStatusFields: Equatable, Sendable {
     /// Provider-owned conversation identifier. Claude lifecycle hooks call this
     /// `session_id`; retaining it lets orchestration prove and pin the exact JSONL.
     public var providerSessionID: String?
+    /// Pending AskUserQuestion / approval payload. Dashboard cards project this
+    /// into `askSummary` only while the agent is in the attention bucket.
+    public var interactivePrompt: String?
 
     public init(prompt: String? = nil, lastAssistantMessage: String? = nil,
                 toolName: String? = nil, toolInput: String? = nil,
-                providerSessionID: String? = nil) {
+                providerSessionID: String? = nil,
+                interactivePrompt: String? = nil) {
         self.prompt = prompt
         self.lastAssistantMessage = lastAssistantMessage
         self.toolName = toolName
         self.toolInput = toolInput
         self.providerSessionID = providerSessionID
+        self.interactivePrompt = interactivePrompt
     }
 
     /// True when at least one optional field is present. Empty payloads are a no-op
     /// so a keyword-only OSC (`9999;idle`) does not look like new chat evidence.
     public var hasValues: Bool {
         prompt != nil || lastAssistantMessage != nil || toolName != nil || toolInput != nil
-            || providerSessionID != nil
+            || providerSessionID != nil || interactivePrompt != nil
     }
 
     /// Overlay non-nil incoming fields. Omission means "no new info", not "clear"
@@ -44,6 +49,9 @@ public struct HookStatusFields: Equatable, Sendable {
         if let toolInput = other.toolInput { self.toolInput = toolInput }
         if let providerSessionID = other.providerSessionID {
             self.providerSessionID = providerSessionID
+        }
+        if let interactivePrompt = other.interactivePrompt {
+            self.interactivePrompt = interactivePrompt
         }
     }
 
@@ -72,7 +80,10 @@ public struct HookStatusFields: Equatable, Sendable {
                             max: agentStatusToolInputMax),
             providerSessionID: clip(
                 firstString(object, keys: ["session_id", "sessionId", "provider_session_id"]),
-                max: agentStatusProviderSessionIDMax))
+                max: agentStatusProviderSessionIDMax),
+            interactivePrompt: clip(
+                firstString(object, keys: ["interactivePrompt", "interactive_prompt"]),
+                max: agentStatusInteractivePromptMax))
     }
 }
 
@@ -82,6 +93,9 @@ public let agentStatusAssistantMessageMax = 8_000
 public let agentStatusToolNameMax = 60
 public let agentStatusToolInputMax = 160
 public let agentStatusProviderSessionIDMax = 256
+/// Orca `AGENT_STATUS_INTERACTIVE_PROMPT_MAX_LENGTH` — generous so AskUserQuestion
+/// JSON survives; the dashboard then clips to a short `askSummary`.
+public let agentStatusInteractivePromptMax = 16_000
 
 private func firstString(_ object: [String: Any], keys: [String]) -> String? {
     for key in keys {
