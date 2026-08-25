@@ -735,6 +735,40 @@ and the harness. Owns: scripts/e2e-headless.sh, Sources/OrchardRuntime/Automatio
 Tests/** for automations, docs. Does not touch WorkerVerbs.swift,
 OrchardTerminals, or OrchardApp.
 
+### Wave 15 (T57–T59, parallel)
+
+**T57 — Dogfood cycle 4 (report + fixture pin).** On the current build, via the CLI
+only (the app is the user's; never launch/quit it, never touch terminals/worktrees you
+did not create): run a full supervised cycle (repo → run/task → claude worker →
+settlement → archive → release → worktree rm --delete-branch), then verify the T54
+capture fix on YOUR OWN worker's archive — worker-read cleaned output must show no
+joined words, no dropped characters, chrome off; extract that archive from a COPY of
+orchestration.db (redact capability tokens) and pin it as the fourth fixture with a
+test case asserting its cleaned shape (T54 follow-up §6). Also exercise automations
+live: create a due-now automation on a temp repo via the CLI, watch fireDue produce a
+run-history row, then delete it. Report docs/reports/dogfood-4.md with a findings
+table. Owns: docs/reports/dogfood-4.md, Tests/OrchardTerminalsTests/Fixtures/**, ONE
+new test file for the fixture. Does not modify production sources.
+
+**T58 — Stream ring capacity vs paint-heavy TUIs.** T54 §6 flags the stream ring
+under a 10fps spinner row: measure how long a paint-heavy session stays within the
+ring before terminal_tail loses early output, decide and implement the right bound
+(size, byte budget, or collector-aware retention), with a test that a sustained
+spinner does not evict recent real output. Owns:
+Sources/OrchardTerminals/TerminalStreamBuffer.swift (+ collector touchpoints if
+strictly needed), its tests, docs note. Does not touch fixtures, WorkerVerbs, or
+OrchardApp.
+
+**T59 — Keeper-adopted pane fit.** Since wave 7: keeper-ADOPTED panes bypass the T30
+cell-snap/top-align fit — the first row renders half-clipped after app relaunch until
+a manual resize. Route adopted panes through the same fit path as fresh spawns (T30's
+fix in Sources/OrchardApp/TerminalPaneHost.swift is the model; adoption happens via
+KeeperRestart/TerminalRegistry). Add a regression test where the fit decision is
+extractable; document what needs a human visual pass after relaunch. Owns:
+Sources/OrchardApp/TerminalPaneHost.swift, Sources/OrchardApp/KeeperRestart.swift,
+minimal OrchardTerminals adoption touchpoints if strictly needed, matching tests.
+Does not touch TerminalStreamBuffer.swift, fixtures, or main.swift.
+
 ### Wave 13+ backlog
 
 T52 follow-ups: (a) Report.respacedLines exists but the runtime's chromeStripped
