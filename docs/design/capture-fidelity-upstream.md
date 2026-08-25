@@ -169,22 +169,29 @@ fixtures; the receipt wire (T55 owns the `respacedLines` addition); damson.
 
 ## 5. Consequences for readers
 
-A `terminal_tail` archive of an agent TUI now holds rows as they were shown. What
-remains repetitive is real: a spinner row that ticks ten times a second contributes
-one whole row per tick, and a status bar contributes a row whenever its token count
-changes. Those are the cleaner's `spinnerLines` / digit-masked `duplicateLines`, which
-now see rows they can recognise instead of fragments. The cleaner's "never rewrite"
-rule stands; it simply has far less to hide.
+A `terminal_tail` archive of an agent TUI now holds rows as they were shown. A status
+bar still contributes a row whenever its token count changes (those are the cleaner's
+digit-masked `duplicateLines`). Spinner/progress ticks no longer stack one-per-frame:
+T58 coalesces them in the stream ring so a thinking phase occupies one retained line,
+updated in place. The cleaner's "never rewrite" rule stands; it simply has far less
+to hide, and `spinnerLines` on a post-T58 capture counts the thinking *phases*, not
+every 10 fps glyph.
 
 `worker-read --raw` remains the untouched capture. It is now worth reading.
 
-## 6. Follow-ups (not in T54)
+## 6. Follow-ups
 
-- **Ring capacity under a fast spinner.** `TerminalStreamBuffer` keeps 10,000 lines; a
-  10 fps spinner row fills that in about 17 minutes and evicts the transcript behind
-  it — the same exposure the pre-T54 fragments had, now with readable lines. Either a
-  larger ring for agent panes, or an archive at release that pairs the stream with the
-  grid's scrollback (which is what the user can scroll to).
+- **Ring capacity under a fast spinner — done in T58.** Measurement, uncoalesced: a
+  10 fps spinner row fills the 10_000-line ring in 1_000 s (~16.7 min) and fills a
+  `terminal_tail` archive of the newest 2_000 lines (WorkerVerbs at release) in 200 s
+  (~3.3 min), evicting the transcript behind it. A larger ring or a byte budget only
+  delays that. Bound chosen: collector-aware retention *inside the buffer* (no
+  collector change). `appendCapturedRow` overwrites the most recent spinner/progress
+  tick at the tail (walking back through blanks only, window of 8) so a sustained
+  spinner occupies one slot and cannot evict recent real output. Printed CR-stacked
+  fragments still stack. Cursors do not shift — the replace is in place at the
+  existing absolute index. Tests: `TerminalStreamBufferTests` (`testSustainedSpinnerDoesNotEvictRecentRealOutput`
+  and neighbours).
 - **A post-T54 live fixture.** The three pinned captures are pre-T54; the next dogfood
   cycle should pin a fourth so the cleaner is measured against the new shape and the
   archive-readability row in the dogfood report can be closed on evidence.

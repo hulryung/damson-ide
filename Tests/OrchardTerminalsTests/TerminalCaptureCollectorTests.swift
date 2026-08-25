@@ -120,9 +120,29 @@ final class TerminalCaptureCollectorTests: XCTestCase {
                           screen: ["Working", "✶ Improvising… (5s · ↓ 195 tokens)"])
         XCTAssertEqual(try stream(), [
             "Working",
-            "✢ Improvising… (4s · ↓ 181 tokens)",
             "✶ Improvising… (5s · ↓ 195 tokens)",
-        ], "each frame contributes its changed row in full; the unchanged row is not repeated")
+        ], "each frame contributes its changed row in full; spinner ticks coalesce to the latest")
+    }
+
+    func testSustainedSpinnerDoesNotEvictRecentRealOutput() throws {
+        session.emitPaint([cup(1, 1), .text("REAL: git clone done")],
+                          screen: ["REAL: git clone done", "✢ Thinking… (1s · ↓ 10 tokens)"])
+        for i in 2...40 {
+            let glyph = i % 2 == 0 ? "✶" : "✢"
+            session.emitPaint(
+                [cup(2, 1), .text(glyph)],
+                screen: ["REAL: git clone done",
+                         "\(glyph) Thinking… (\(i)s · ↓ \(i * 10) tokens)"])
+        }
+        session.emitPaint([cup(3, 1), .text("REAL: all tests passed")],
+                          screen: ["REAL: git clone done",
+                                   "✶ Thinking… (40s · ↓ 400 tokens)",
+                                   "REAL: all tests passed"])
+        XCTAssertEqual(try stream(), [
+            "REAL: git clone done",
+            "✶ Thinking… (40s · ↓ 400 tokens)",
+            "REAL: all tests passed",
+        ])
     }
 
     func testTornRepaintIsCapturedAsTheWholeRow() throws {

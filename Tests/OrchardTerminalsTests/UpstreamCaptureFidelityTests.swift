@@ -160,7 +160,7 @@ final class UpstreamCaptureFidelityTests: XCTestCase {
             "✢ Improvising… (4s · ↓ 181 tokens · thought for 1s)",
             "paste again to expand",
             "✶ Improvising… (5s · ↓ 195 tokens · thought for 1s)",
-        ], "each frame adds its changed rows, whole; the unchanged row is not repeated")
+        ], "each frame adds its changed rows, whole; a real row between ticks keeps both spinner slots")
     }
 
     func testFrameSplitAcrossChunksIsNotCapturedTorn() throws {
@@ -181,10 +181,8 @@ final class UpstreamCaptureFidelityTests: XCTestCase {
         backend.feed(renderer.frame(["transcript line", "✶ Working… (3s · ↓ 63 tokens)"]))
         XCTAssertEqual(try stream(), [
             "transcript line",
-            "✢ Working… (1s · ↓ 10 tokens)",
-            "✳ Working… (2s · ↓ 25 tokens)",
             "✶ Working… (3s · ↓ 63 tokens)",
-        ], "the unchanged transcript row is not repeated; each tick is one readable line")
+        ], "the unchanged transcript row is not repeated; spinner ticks coalesce to the latest whole row")
         // …whereas the text events for the two repaints were digits and glyphs.
         XCTAssertEqual(Array(legacyLines().suffix(2)), ["✳225", "✶363"])
     }
