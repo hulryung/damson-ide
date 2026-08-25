@@ -30,6 +30,10 @@ struct WorkbenchView: View {
             Divider()
             SplitContainer(key: key, node: node)
         }
+        // A worktree can be left mid-merge by an agent, a script, or the user's own
+        // terminal — none of which tell the app. Asking git when the workbench opens is
+        // what makes the conflict tab appear at all.
+        .task(id: key) { await store.refreshConflicts(for: key) }
     }
 
     @ViewBuilder
@@ -269,6 +273,8 @@ struct TabGroupPane: View {
                     EditorPane(tab: tab, key: key)
                 case .browser:
                     BrowserPane(key: key)
+                case .conflicts:
+                    ConflictReviewHost(key: key)
                 }
             }
         } else {
@@ -277,6 +283,10 @@ struct TabGroupPane: View {
     }
 
     private func badge(for tab: WorkbenchTab) -> String? {
+        if tab.kind == .conflicts {
+            let count = store.conflictSummary(for: key).fileCount
+            return count > 0 ? "\(count)" : nil
+        }
         guard tab.kind == .diff, case .worktree(let id) = key,
               let record = store.selectedRecord, record.id == id,
               record.status.stat.fileCount > 0

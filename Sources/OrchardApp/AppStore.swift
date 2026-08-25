@@ -1101,6 +1101,61 @@ final class AppStore: ObservableObject {
         return unsupportedReason(affordance, for: key)
     }
 
+    // MARK: - Conflict review (T68)
+
+    /// Last known conflict state per workbench. Cached rather than recomputed on every
+    /// view update: each summary is two git subprocesses, and the tab strip reads it on
+    /// every redraw.
+    @Published private(set) var conflictSummaries: [WorkbenchKey: GitConflictSummary] = [:]
+    /// Conflict tabs Orchard opened on its own. Tracked so it can take back exactly those
+    /// and no others — a tab the user opened is the user's to close.
+    private var autoConflictTabs: [WorkbenchKey: UUID] = [:]
+    private let conflictService = GitConflictService()
+
+    func conflictSummary(for key: WorkbenchKey?) -> GitConflictSummary {
+        guard let key else { return .none }
+        return conflictSummaries[key] ?? .none
+    }
+
+    /// Re-read the worktree's unmerged state and open (or retract) its conflict tab.
+    /// Git runs off the main actor — a conflicted repo is exactly when the user is
+    /// clicking around, and a stuttering tab strip is the last thing that helps.
+    func refreshConflicts(for key: WorkbenchKey) async {
+        guard !isRemote(key), let root = workspaceRoot(for: key) else {
+            conflictSummaries[key] = .none
+            return
+        }
+        let service = conflictService
+        let summary = await Task.detached(priority: .utility) {
+            service.summary(worktree: root)
+        }.value
+        conflictSummaries[key] = summary
+        syncConflictTab(for: key, summary: summary)
+    }
+
+    /// A worktree that is mid-merge grows a conflict tab without being asked — the tab is
+    /// added but never selected, because stealing the pane out from under someone mid-typing
+    /// is worse than a badge they have to notice. When the conflicts are gone the tab is
+    /// retracted, unless it is the tab they are currently reading.
+    private func syncConflictTab(for key: WorkbenchKey, summary: GitConflictSummary) {
+        let existing = ensureLayout(for: key).findTab(kind: .conflicts)
+        if summary.isActive {
+            guard existing == nil,
+                  let groupID = ensureLayout(for: key).firstGroupID() else { return }
+            let tab = WorkbenchTab(kind: .conflicts)
+            updateLayout(key) { node in
+                _ = node.mutateGroup(groupID) { group in group.tabs.append(tab) }
+            }
+            autoConflictTabs[key] = tab.id
+            return
+        }
+        guard let existing, autoConflictTabs[key] == existing.tabID,
+              ensureLayout(for: key).selectedTab(in: existing.groupID)?.id != existing.tabID
+        else { return }
+        closeTab(existing.tabID, in: existing.groupID, key: key)
+        autoConflictTabs[key] = nil
+    }
+
     func updateLayout(_ key: WorkbenchKey, _ body: (inout SplitNode) -> Void) {
         var node = ensureLayout(for: key)
         body(&node)
