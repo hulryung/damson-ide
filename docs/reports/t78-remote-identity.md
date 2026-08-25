@@ -101,3 +101,19 @@ create + `env | grep ORCHARD` is the remaining acceptance check.
   pane lists the five variables, then `$ORCHARD_CLI_COMMAND status` inside it.
 - Supervised remote dispatch is still refused typed; identity is necessary but
   not sufficient for that (the far side still has no lifecycle worker contract).
+
+## Live acceptance (run by the coordinator, 2026-08-25)
+
+The worker could not run this itself — workers may not launch or quit the app, and the
+running instance predated this change. After merging the branch, rebuilding the release
+binary and relaunching (runtimeId `rt_678cb3ca-a52e-4f46-9a5b-0ac362a93b95`):
+
+| Check | Result |
+|---|---|
+| Fresh remote pane on `damson-ide-remote` | `executionHostId: ssh:orchard-loopback`, connected |
+| `env \| grep -c ORCHARD_` inside that pane | **5** |
+| Identity values | `HANDLE=term_d9a6532b-…` (matches the pane's own handle), `PANE=tab_bf3133…`, `CLI=orchard` |
+| `$ORCHARD_CLI_COMMAND status --json` **inside** the remote pane | `ok: true` — the remote side reached the runtime |
+
+Before this change the same probe printed nothing (docs/reports/remote-verification.md),
+so a remote agent had no way to identify itself or call back.
