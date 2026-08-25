@@ -422,6 +422,52 @@ final class AppStore: ObservableObject {
         }
     }
 
+    /// UI-free kanban board for the agent dashboard. Caps each bucket so a huge
+    /// fleet cannot blank the popout (inventory §6).
+    func dashboardBoard() -> DashboardBoard {
+        var inputs: [DashboardCardInput] = []
+        for project in projects {
+            for agent in project.agents.agents {
+                inputs.append(dashboardInput(for: agent, in: project))
+            }
+        }
+        return DashboardProjection.board(from: inputs)
+    }
+
+    func dashboardInput(for agent: AgentSession, in project: ProjectSession) -> DashboardCardInput {
+        let snapshot = agentStatusByID[agent.id]
+        let paneKey = snapshot?.paneKey ?? agent.paneKey ?? "agent:\(agent.id.uuidString)"
+        let parsed = DashboardProjection.parsePaneKey(paneKey)
+        let worktree = agent.worktree.flatMap { project.record(id: $0.id) }
+        let status = worktree.map { statusAppearance(for: $0.id) }
+        let finishedAtMs = agent.task?.finishedAt.map { $0.timeIntervalSince1970 * 1000 }
+        return DashboardCardInput(
+            paneKey: paneKey,
+            agentType: agentTypeName(for: agent),
+            snapshot: snapshot,
+            runtime: agent.state,
+            unseen: unread.isUnread(agent: agent.id),
+            taskTitle: agent.task.flatMap { $0.title.isEmpty ? nil : $0.title },
+            taskPrompt: agent.task.flatMap { $0.prompt.isEmpty ? nil : $0.prompt },
+            parentPaneKey: nil,
+            workspaceName: workspaceName(for: agent, in: project),
+            workspaceStatusId: status?.id,
+            workspaceStatusLabel: status?.label,
+            repoId: project.repoID,
+            worktreeId: snapshot?.worktreeId
+                ?? worktree.flatMap { workspaceIdentity(for: $0, in: project) },
+            tabId: parsed?.tabId,
+            leafId: parsed?.leafId,
+            agentID: agent.id,
+            startedAtMs: agent.startedAt.timeIntervalSince1970 * 1000,
+            finishedAtMs: finishedAtMs,
+            interactivePrompt: snapshot?.interactivePrompt)
+    }
+
+    func focus(dashboardCard card: DashboardCard) {
+        focus(agentID: card.focus.agentID)
+    }
+
     func dashboardBucket(for agent: AgentSession) -> DashboardBucket {
         let unseen = unread.isUnread(agent: agent.id)
         if let snapshot = agentStatusByID[agent.id] {

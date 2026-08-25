@@ -3,19 +3,17 @@ import OrchardCore
 import OrchardTerminals
 
 /// Agent dashboard: kanban buckets attention | working | done | idle, fed by
-/// the live `AgentStatusSnapshot` stream. Click-to-focus routes through the
+/// the UI-free `DashboardBoard` projection. Click-to-focus routes through the
 /// store so the main workbench selects that workspace and binds the agent's
 /// terminal tab. Observation-only — never writes orchestration state.
 struct AgentDashboardView: View {
     @EnvironmentObject var store: AppStore
 
-    /// Bound so a huge fleet can't blank the popout (inventory §6).
-    private let capPerBucket = 40
-
     var body: some View {
+        let board = store.dashboardBoard()
         HStack(alignment: .top, spacing: 8) {
             ForEach(DashboardBucket.allCases) { bucket in
-                dashboardColumn(bucket)
+                dashboardColumn(bucket, board: board)
             }
         }
         .padding(10)
@@ -23,29 +21,17 @@ struct AgentDashboardView: View {
         .frame(minWidth: 880, minHeight: 420)
     }
 
-    private func cards(in bucket: DashboardBucket) -> [DashboardCard] {
-        var items: [DashboardCard] = []
-        for project in store.projects {
-            for agent in project.agents.agents {
-                if store.dashboardBucket(for: agent) == bucket {
-                    items.append(DashboardCard(project: project, agent: agent))
-                }
-            }
-        }
-        return items
-    }
-
-    private func dashboardColumn(_ bucket: DashboardBucket) -> some View {
-        let all = cards(in: bucket)
-        let visible = Array(all.prefix(capPerBucket))
-        let overflow = max(0, all.count - visible.count)
+    private func dashboardColumn(_ bucket: DashboardBucket, board: DashboardBoard) -> some View {
+        let visible = board.cards(in: bucket)
+        let total = board.total(in: bucket)
+        let overflow = board.overflow(in: bucket)
         return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text(bucket.title)
                     .font(Tokens.fontHeader)
                     .foregroundStyle(Tokens.textSecondary)
                 Spacer()
-                Text("\(all.count)")
+                Text("\(total)")
                     .font(Tokens.fontPill)
                     .foregroundStyle(Tokens.textTertiary)
                     .monospacedDigit()
@@ -73,60 +59,74 @@ struct AgentDashboardView: View {
     }
 }
 
-struct DashboardCard: Identifiable {
-    let id: UUID
-    let project: ProjectSession
-    let agent: AgentSession
-
-    @MainActor
-    init(project: ProjectSession, agent: AgentSession) {
-        self.id = agent.id
-        self.project = project
-        self.agent = agent
-    }
-}
-
 struct DashboardCardView: View {
     @EnvironmentObject var store: AppStore
     let card: DashboardCard
 
-    private var dot: DashboardDotState {
-        store.displayDotState(for: card.agent)
-    }
+    private var dot: DashboardDotState { card.displayDotState }
 
-    /// Done cards stay highlighted until the user focuses them (AppStore unread).
-    private var highlighted: Bool { dot == .done }
+    /// Done cards stay highlighted until the user focuses them (card.unseen).
+    private var highlighted: Bool { card.isHighlighted }
 
     private var workspaceStatus: WorkspaceStatusAppearance? {
-        card.agent.worktree.map { store.statusAppearance(for: $0.id) }
+        guard let id = card.workspaceStatusId else { return nil }
+        return WorkspaceStatusAppearance.resolve(id: id, vocabulary: store.statusVocabulary)
+    }
+
+    private var timeColumn: Date {
+        Date(timeIntervalSince1970: card.timeColumnMs / 1000)
     }
 
     var body: some View {
         Button {
-            store.focus(agentID: card.agent.id)
+            store.focus(dashboardCard: card)
         } label: {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     Text(DashboardProjection.glyph(for: dot))
                         .font(.system(size: 12, weight: .semibold, design: .monospaced))
                         .foregroundStyle(dot.color)
-                    Text(store.agentTypeName(for: card.agent))
+                    Text(card.agentType)
                         .font(Tokens.fontRow)
                         .lineLimit(1)
                     Spacer(minLength: 4)
-                    ElapsedLabel(since: store.stateStartedAt(for: card.agent))
+                    ElapsedLabel(since: timeColumn)
                         .font(.system(size: 9))
                         .foregroundStyle(Tokens.textTertiary)
                 }
-                Text(store.workspaceName(for: card.agent, in: card.project))
+                Text(card.workspaceName)
                     .font(Tokens.fontMeta)
                     .foregroundStyle(Tokens.textSecondary)
                     .lineLimit(1)
-                if let line = store.detailLine(for: card.agent) {
-                    Text(line)
+                if !card.task.isEmpty {
+                    Text(card.task)
+                        .font(Tokens.fontMeta)
+                        .foregroundStyle(Tokens.textSecondary)
+                        .lineLimit(2)
+                }
+                if let user = card.lastUserMessage, user != card.task {
+                    Text(user)
                         .font(Tokens.fontMeta)
                         .foregroundStyle(Tokens.textTertiary)
                         .lineLimit(2)
+                }
+                if let agent = card.lastAgentMessage {
+                    Text(agent)
+                        .font(Tokens.fontMeta)
+                        .foregroundStyle(Tokens.textTertiary)
+                        .lineLimit(2)
+                }
+                if let ask = card.askSummary {
+                    Text(ask)
+                        .font(Tokens.fontMeta)
+                        .foregroundStyle(Color.orange)
+                        .lineLimit(2)
+                }
+                if let parent = card.parentPaneKey {
+                    Text("child of \(parent)")
+                        .font(Tokens.fontPill)
+                        .foregroundStyle(Tokens.textTertiary)
+                        .lineLimit(1)
                 }
                 if let status = workspaceStatus {
                     Text(status.label)
@@ -146,6 +146,12 @@ struct DashboardCardView: View {
             )
         }
         .buttonStyle(.plain)
-        .help("Focus this agent")
+        .help(helpText)
+    }
+
+    private var helpText: String {
+        var parts = ["Focus this agent"]
+        if !card.paneKey.isEmpty { parts.append(card.paneKey) }
+        return parts.joined(separator: " · ")
     }
 }
