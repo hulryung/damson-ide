@@ -1047,7 +1047,36 @@ does not reach KeyCaptureView; use System Events key codes). Also diff
 or allowedValues drifted. Report docs/reports/visual-pass-w19.md. Owns only that
 report.
 
-### Wave 21 (T75–T77, parallel) — closing the remaining backlog
+### Wave 21 (T75–T78) — MERGED 2026-08-26, 1199 tests, e2e + ci.sh PASS
+
+The backlog is closed. T75: byte-exact file round-trips outside the conflict path
+(preview decodes only when the bytes round-trip, non-UTF-8 opens read-only, save
+refusals are typed and shown, dirty tracking is byte-level) and ensureExcluded now
+works in bytes AND writes to `--git-path info/exclude` — in a linked worktree the
+old `--git-dir` path was one git never reads, so AgentSupervisor's
+`.claude/settings.local.json` rule had never taken effect. T76: named and fixed the
+socket load test's backlog/FD-sampling race. T77: worktree subverbs, a `project`
+group, and `worker-read --limit`'s honest `hasOlder`; skills/artifacts/computer
+declared out of scope. T78: remote panes now carry the five ORCHARD_* variables
+through the ssh command line — verified live (see below), which also unblocked the
+reverse-forward hook grant (`statusDetection=hooks`, tunnelPort 47110).
+
+Coordinator work in this wave: verified the whole remote stack over a REAL SSH
+transport without a second machine (user-space sshd on 127.0.0.1:2222 — see
+docs/reports/remote-verification.md), which is what exposed T78's defect; ran T78's
+live acceptance after merging (a worker may not relaunch the app); closed T75's two
+handoffs (the FileWatcher microbenchmark now counts path materializations instead of
+racing the wall clock — it was the second flake, 3 failures in 40 isolated runs; and
+GitConflicts' decode refuses anything that does not re-encode byte-for-byte, so a
+UTF-8 BOM is no longer silently stripped on resolve).
+
+**New gap found during teardown:** a remote repo cannot be unregistered once its
+worktrees have been enumerated — `repo remove` refuses with `repo_in_use` naming
+worktrees that live on the far side, and there is no registry-only forget. Removing
+them with `worktree rm` would delete the remote's real worktrees, which is not what
+un-registering a remote view should mean. The row had to be pruned from
+orchard-data.json by hand (app stopped, file backed up). Needs a `repo remove
+--forget` (registry-only, remote repos) or an automatic drop of remote worktree rows.
 
 **T75 — File-content fidelity outside the conflict path.** T72's audit found the same
 decode-then-write defect it fixed for conflicts still living in the editor path:
