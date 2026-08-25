@@ -69,7 +69,9 @@ public enum OrchestrationContract {
     `auto` may substitute one for the other, and it names `source` and
     `fallbackReason` when it does; on a live worker `auto` always answers with
     bounded, cursor-paged terminal output (newest 200 lines unless `--limit` is
-    set; `--cursor` pages older lines). A released terminal archive keeps two
+    set; `--cursor` pages older lines). `hasOlder` is true when lines exist
+    before this window; `truncated` means the requested cursor was below the
+    retained ring, not that older lines exist. A released terminal archive keeps two
     faces: the
     chrome-stripped readable text served by default (with a `chromeStripped` tally)
     and the untouched capture behind `--raw`.

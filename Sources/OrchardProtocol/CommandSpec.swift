@@ -95,6 +95,26 @@ public enum OrchardAgentEngines {
 /// archived terminal windows share this bound; `--cursor` pages older lines.
 public enum WorkerReadPaging {
     public static let defaultLimit = 200
+
+    /// True when lines exist before this window that the caller can still request.
+    /// Distinct from `truncated`, which means the requested cursor was below the
+    /// retained ring (those older lines are gone).
+    public static func hasOlder(startCursor: Int, oldestCursor: Int) -> Bool {
+        startCursor > oldestCursor
+    }
+}
+
+/// Documented `worktree` subverbs (inventory §7). `ps` is served by the ports
+/// handler; the rest live on the workspace handler. `remove`/`delete` map to `rm`.
+public enum WorktreeSubcommands {
+    public static let all = ["list", "show", "current", "create", "set", "rm", "ps"]
+    public static let rmAliases = ["remove", "delete"]
+}
+
+/// Documented `project` subverbs. Host-setup verbs from Orca (`setups`,
+/// `setup-clone`, …) are not part of this surface.
+public enum ProjectSubcommands {
+    public static let all = ["list", "show", "current"]
 }
 
 /// The shape `orchard agent-context --json` serializes — a pure local read that works
@@ -151,7 +171,9 @@ public enum OrchardCommands {
                         usage: "orchard guide [list | get <topic>] [--json]",
                         flags: [json], positionalArgs: ["list | get <topic>"],
                         examples: ["orchard guide", "orchard guide get orchestration",
-                                   "orchard guide get conflicts"],
+                                   "orchard guide get conflicts",
+                                   "orchard guide get worktree",
+                                   "orchard guide get project"],
                         notes: ["With no arguments, lists the available topics."]),
             command("version", "Print the CLI version"),
             command("run-create", "Create an orchestration run", [flag("objective", "Run objective", "text", required: true), from, retry]),
@@ -183,7 +205,8 @@ public enum OrchardCommands {
                 flag("limit", "Maximum lines to return (default \(WorkerReadPaging.defaultLimit))", "n"),
             ], notes: [
                 "Without --limit, worker-read returns the newest \(WorkerReadPaging.defaultLimit) lines.",
-                "Use --limit and --cursor to page older output. truncated describes the requested window, not whether older lines exist.",
+                "hasOlder is true when lines exist before this window; page them with --cursor <startCursor> or --cursor <oldestCursor>.",
+                "truncated means the requested cursor was below the retained ring (those older lines are gone), not that hasOlder is true.",
             ]),
             command("worker-stop", "Stop a worker", [flag("dispatch", "Dispatch identifier", "id", required: true), retry]),
             command("worker-abandon", "Abandon uncertain worker resources", [flag("dispatch", "Dispatch identifier", "id", required: true), retry]),
@@ -204,36 +227,82 @@ public enum OrchardCommands {
                 "It refuses while extra worktrees or automations still reference the repo (typed repo_in_use, naming them). There is no --force.",
                 "A successful remove also rmdirs the empty ~/Orchard/worktrees/<repo>/ container (never recursively).",
             ]),
-            command("worktree", "List worktrees or show agent/shell processes and listening ports", [
-                flag("repo", "Repository selector", "selector"),
-                flag("worktree", "Worktree selector", "selector"),
-                flag("limit", "Maximum results", "n"),
-                flag("name", "Worktree name", "name"),
-                flag("display-name", "Display name", "text"),
-                flag("base-branch", "Git base", "ref"),
-                flag("comment", "Comment", "text"),
-                flag("issue", "Linked issue", "text"),
-                flag("pr", "Linked pull request", "text"),
-                // T64: `worktree set --status` is the board column (cardStatus).
-                // `--workspace-status` is the Orca-shaped alias; both store as `status`.
-                flag("status",
-                     "Board column: todo|in-progress|in-review|completed or a custom id",
-                     "status",
-                     aliases: ["workspace-status"]),
-                flag("parent-worktree", "Parent worktree", "selector"),
-                flag("no-parent", "Do not nest under a parent"),
-                flag("force", "Force remove a dirty worktree"),
-                flag("delete-branch", "After a successful removal, delete the worktree's branch (git branch -d)"),
-                flag("force-branch", "Force-delete an unmerged branch (git branch -D); implies --delete-branch"),
-                flag("cwd", "Working directory for resolution", "path"),
-                flag("pinned", "Pinned"),
-                flag("unread", "Unread"),
-                flag("archived", "Archived"),
-            ], positionals: ["list|show|current|create|set|rm|ps"], notes: [
-                "worktree set --status <id> writes the user-authored board column (todo, in-progress, in-review, completed, or a custom vocabulary id).",
-                "Board column is distinct from derived live status (active|working|permission|done|inactive).",
-                "worktree rm rmdirs ~/Orchard/worktrees/<repo>/ when that container is empty; it never deletes recursively.",
-            ]),
+            CommandSpec(
+                name: "worktree",
+                summary: "List, inspect, create, update, or remove worktrees; ps shows live processes and ports",
+                usage: "orchard worktree list|show|current|create|set|rm|ps [options]",
+                flags: [
+                    flag("repo", "Repository selector", "selector"),
+                    flag("worktree", "Worktree selector", "selector"),
+                    flag("limit", "Maximum results", "n"),
+                    flag("name", "Worktree name", "name"),
+                    flag("display-name", "Display name", "text"),
+                    flag("base-branch", "Git base", "ref"),
+                    flag("comment", "Comment", "text"),
+                    flag("issue", "Linked issue", "text"),
+                    flag("pr", "Linked pull request", "text"),
+                    // T64: `worktree set --status` is the board column (cardStatus).
+                    // `--workspace-status` is the Orca-shaped alias; both store as `status`.
+                    flag("status",
+                         "Board column: todo|in-progress|in-review|completed or a custom id",
+                         "status",
+                         aliases: ["workspace-status"]),
+                    flag("parent-worktree", "Parent worktree", "selector"),
+                    flag("no-parent", "Do not nest under a parent"),
+                    flag("force", "Force remove a dirty worktree"),
+                    flag("delete-branch", "After a successful removal, delete the worktree's branch (git branch -d)"),
+                    flag("force-branch", "Force-delete an unmerged branch (git branch -D); implies --delete-branch"),
+                    flag("cwd", "Working directory for resolution", "path"),
+                    flag("pinned", "Pinned"),
+                    flag("unread", "Unread"),
+                    flag("archived", "Archived"),
+                    enumerated("agent", "Launch this agent in the new worktree's first terminal", "agent",
+                               OrchardAgentEngines.acceptedIdentifiers),
+                    flag("prompt", "Initial prompt sent to --agent", "text"),
+                    flag("run-hooks", "Run the repo's orchard.yaml setup script after create"),
+                    json,
+                ],
+                positionalArgs: ["list|show|current|create|set|rm|ps"],
+                examples: [
+                    "orchard worktree list [--repo <selector>]",
+                    "orchard worktree show --worktree <selector>",
+                    "orchard worktree current",
+                    "orchard worktree create --repo <selector> --name <name>",
+                    "orchard worktree set --worktree <selector> --status in-review",
+                    "orchard worktree rm --worktree <selector> [--force] [--delete-branch]",
+                    "orchard worktree ps [--limit <n>]",
+                ],
+                notes: [
+                    "Subverbs: list, show, current, create, set, rm (aliases: remove, delete), ps.",
+                    "worktree current resolves the current directory to the enclosing managed workspace.",
+                    "create infers --repo from the current worktree when omitted.",
+                    "worktree set --status <id> writes the user-authored board column (todo, in-progress, in-review, completed, or a custom vocabulary id).",
+                    "Board column is distinct from derived live status (active|working|permission|done|inactive).",
+                    "worktree rm rmdirs ~/Orchard/worktrees/<repo>/ when that container is empty; it never deletes recursively.",
+                    "worktree ps is the compact process+ports listing; workspace-ports is the ports-only view.",
+                ]),
+            CommandSpec(
+                name: "project",
+                summary: "List and show registered projects (repos) and their worktrees",
+                usage: "orchard project list|show|current [options]",
+                flags: [
+                    flag("project", "Project selector (repo id, name, or path)", "selector",
+                         aliases: ["repo"]),
+                    flag("cwd", "Working directory for project current", "path"),
+                    json,
+                ],
+                positionalArgs: ["list|show|current"],
+                examples: [
+                    "orchard project list",
+                    "orchard project show --project <selector>",
+                    "orchard project current",
+                ],
+                notes: [
+                    "A project is a registered repo. project list is the grouping view; repo add|remove is how checkouts join or leave the registry.",
+                    "project show --project <selector> returns the repo record plus its worktrees.",
+                    "project current resolves the current directory to the enclosing project's repo.",
+                    "Host-setup verbs (setups, setup-clone, setup-create, …) are not implemented: register a checkout with repo add, including --host ssh:<name> for a remote.",
+                ]),
             command("workspace-ports", "List listening TCP ports attributed to workspaces", [
                 flag("repo", "Repository selector", "selector"),
                 flag("worktree", "Worktree selector", "selector"),
@@ -360,6 +429,7 @@ public enum CommandGroup: String, Codable, CaseIterable, Sendable {
     case gate         // gate-create/resolve/list
     case terminal     // terminal list/create/read/send/wait/split/close/rename
     case worktree     // worktree list/show/current/create/set/rm/ps
+    case project      // project list/show/current
     case repo         // repo list/add/show/remove
     case file         // file open/diff/open-changed/search
     case conflicts    // conflicts list/show/take/resolve/stage

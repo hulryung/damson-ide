@@ -123,6 +123,7 @@ extension LiveOrchestrationStore {
                         "content": .string(content),
                         "transcriptPath": .string(path),
                         "truncated": .bool(truncated),
+                        "hasOlder": .bool(false),
                         "status": .object([
                             "worker": .string(workerState),
                             "terminal": .string(summary.connected ? "running" : "exited"),
@@ -136,13 +137,20 @@ extension LiveOrchestrationStore {
             }
 
             let page = try await runtime.readTerminal(summary.handle, cursor, limit)
+            let oldest = page.oldestCursor ?? 0
+            let start = Self.readWindowStart(
+                cursor: cursor, oldest: oldest, next: page.nextCursor,
+                returned: page.returnedLineCount)
             var result: [String: JSONValue] = [
                 "dispatchId": .string(dispatchID),
                 "source": .string("terminal"),
                 "archived": .bool(false),
                 "lines": .array(page.lines.map(JSONValue.string)),
                 "returnedLineCount": .number(Double(page.returnedLineCount)),
+                "startCursor": .number(Double(start)),
                 "truncated": .bool(page.truncated),
+                "hasOlder": .bool(WorkerReadPaging.hasOlder(startCursor: start,
+                                                            oldestCursor: oldest)),
                 "status": .object([
                     "worker": .string(workerState),
                     "terminal": .string(page.status),
@@ -154,10 +162,21 @@ extension LiveOrchestrationStore {
                 result["fallbackReason"] = .string("provider_transcript_not_pinned")
             }
             if let next = page.nextCursor { result["nextCursor"] = .number(Double(next)) }
-            if let oldest = page.oldestCursor { result["oldestCursor"] = .number(Double(oldest)) }
+            if let oldestCursor = page.oldestCursor {
+                result["oldestCursor"] = .number(Double(oldestCursor))
+            }
             if let latest = page.latestCursor { result["latestCursor"] = .number(Double(latest)) }
             return .object(result)
         }
+    }
+
+    /// Start of the returned window. Tail reads (`cursor` omitted) are the newest
+    /// `limit` lines, so start is reconstructed from `nextCursor - returned`.
+    static func readWindowStart(cursor: Int?, oldest: Int, next: Int?,
+                                returned: Int) -> Int {
+        if let cursor { return max(oldest, cursor) }
+        if let next, returned > 0 { return max(oldest, next - returned) }
+        return oldest
     }
 
     /// The typed refusal a `--source transcript` request gets when no provider
@@ -205,6 +224,7 @@ extension LiveOrchestrationStore {
                 "content": content.field("content") ?? content,
                 "transcriptPath": content.field("path") ?? .null,
                 "truncated": content.field("truncated") ?? .bool(false),
+                "hasOlder": .bool(false),
                 "status": .object([
                     "worker": .string(workerState),
                     "terminal": .string("archived"),
@@ -241,6 +261,8 @@ extension LiveOrchestrationStore {
                 "nextCursor": .number(Double(end)),
                 "totalLines": .number(Double(lines.count)),
                 "truncated": content.field("truncated") ?? .bool(false),
+                "hasOlder": .bool(WorkerReadPaging.hasOlder(startCursor: start,
+                                                            oldestCursor: 0)),
                 "status": .object([
                     "worker": .string(workerState),
                     "terminal": .string("archived"),

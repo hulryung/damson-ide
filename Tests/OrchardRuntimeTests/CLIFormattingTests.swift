@@ -225,6 +225,10 @@ final class CLIFormattingTests: XCTestCase {
         XCTAssertTrue(help.contains("--limit"), help)
         XCTAssertTrue(help.contains("default \(WorkerReadPaging.defaultLimit)"), help)
         XCTAssertTrue(help.contains("newest \(WorkerReadPaging.defaultLimit) lines"), help)
+        XCTAssertTrue(help.contains("hasOlder"), help)
+        XCTAssertTrue(help.contains("truncated means the requested cursor was below the retained ring"), help)
+        XCTAssertTrue(WorkerReadPaging.hasOlder(startCursor: 31, oldestCursor: 0))
+        XCTAssertFalse(WorkerReadPaging.hasOlder(startCursor: 0, oldestCursor: 0))
     }
 
     func testDispatchShowAcceptsDispatchAsAliasOfId() throws {
@@ -360,5 +364,115 @@ final class CLIFormattingTests: XCTestCase {
         XCTAssertEqual(
             OrchardHumanFormatter.conflictsStage(.object(["path": .string("file.txt")])),
             "Staged file.txt.")
+    }
+
+    func testWorktreeHelpEnumeratesSubverbsAndCreateFlags() throws {
+        let spec = try XCTUnwrap(OrchardCommands.all.first { $0.name == "worktree" })
+        XCTAssertEqual(spec.positionalArgs, ["list|show|current|create|set|rm|ps"])
+        XCTAssertEqual(spec.usage, "orchard worktree list|show|current|create|set|rm|ps [options]")
+        for verb in WorktreeSubcommands.all {
+            XCTAssertTrue(spec.positionalArgs.contains { $0.contains(verb) }, verb)
+            XCTAssertTrue(spec.examples.contains { $0.contains("worktree \(verb)") },
+                          spec.examples.joined(separator: "\n"))
+        }
+        XCTAssertNotNil(spec.flag(named: "agent")?.allowedValues)
+        XCTAssertEqual(spec.flag(named: "agent")?.allowedValues, OrchardAgentEngines.acceptedIdentifiers)
+        XCTAssertNotNil(spec.flag(named: "prompt"))
+        XCTAssertNotNil(spec.flag(named: "run-hooks"))
+        let help = CommandHelpRenderer.render(spec)
+        XCTAssertTrue(help.contains("aliases: remove, delete"), help)
+        XCTAssertTrue(help.contains("create infers --repo"), help)
+        XCTAssertTrue(WorktreeGuide.content.contains("worktree current"), WorktreeGuide.content)
+        XCTAssertTrue(WorktreeGuide.content.contains("worktree ps"), WorktreeGuide.content)
+    }
+
+    func testWorktreeShowAndCreateHumanFaces() {
+        let shown: JSONValue = .object([
+            "worktree": .object([
+                "displayName": .string("apricot"),
+                "branch": .string("ci/apricot"),
+                "hostId": .string("local"),
+                "path": .string("/home/ci/worktrees/apricot"),
+                "id": .string("repo::/home/ci/worktrees/apricot"),
+                "workspaceStatus": .string("in-review"),
+                "comment": .string("from rpc"),
+            ]),
+        ])
+        let showOut = OrchardHumanFormatter.worktreeShow(shown)
+        XCTAssertTrue(showOut.contains("apricot  ci/apricot  local"), showOut)
+        XCTAssertTrue(showOut.contains("/home/ci/worktrees/apricot"), showOut)
+        XCTAssertTrue(showOut.contains("status  in-review"), showOut)
+        XCTAssertTrue(showOut.contains("comment  from rpc"), showOut)
+
+        let created: JSONValue = .object([
+            "worktree": .object([
+                "displayName": .string("rpc-one"),
+                "branch": .string("daekeun-kang/rpc-one"),
+                "path": .string("/tmp/wt/rpc-one"),
+            ]),
+            "agentTerminalHandle": .string("term_instant"),
+        ])
+        let createOut = OrchardHumanFormatter.worktreeCreate(created)
+        XCTAssertTrue(createOut.contains("Created worktree 'rpc-one'"), createOut)
+        XCTAssertTrue(createOut.contains("on daekeun-kang/rpc-one"), createOut)
+        XCTAssertTrue(createOut.contains("Agent terminal term_instant"), createOut)
+    }
+
+    func testProjectHelpAndHumanFaces() throws {
+        let spec = try XCTUnwrap(OrchardCommands.all.first { $0.name == "project" })
+        XCTAssertEqual(spec.positionalArgs, ["list|show|current"])
+        XCTAssertEqual(spec.flag(named: "repo")?.name, "project")
+        for verb in ProjectSubcommands.all {
+            XCTAssertTrue(spec.examples.contains { $0.contains("project \(verb)") },
+                          spec.examples.joined(separator: "\n"))
+        }
+        let help = CommandHelpRenderer.render(spec)
+        XCTAssertTrue(help.contains("list|show|current"), help)
+        XCTAssertTrue(help.contains("Host-setup verbs"), help)
+        XCTAssertTrue(ProjectGuide.content.contains("project list"), ProjectGuide.content)
+        XCTAssertTrue(ProjectGuide.content.contains("setup-clone"), ProjectGuide.content)
+
+        let listed: JSONValue = .object([
+            "projects": .array([.object([
+                "displayName": .string("Apricot"),
+                "hostId": .string("local"),
+                "kind": .string("git"),
+                "worktreeCount": .number(2),
+                "path": .string("/tmp/apricot"),
+            ])]),
+            "count": .number(1),
+        ])
+        let listOut = OrchardHumanFormatter.projectList(listed)
+        XCTAssertTrue(listOut.contains("Apricot"), listOut)
+        XCTAssertTrue(listOut.contains("2"), listOut)
+        XCTAssertTrue(listOut.contains("/tmp/apricot"), listOut)
+
+        let shown: JSONValue = .object([
+            "project": .object([
+                "displayName": .string("Apricot"),
+                "kind": .string("git"),
+                "hostId": .string("local"),
+                "path": .string("/tmp/apricot"),
+                "id": .string("abc"),
+                "baseRef": .string("main"),
+            ]),
+            "worktrees": .array([
+                .object(["displayName": .string("Apricot"), "branch": .string("main")]),
+                .object(["displayName": .string("child"), "branch": .string("topic")]),
+            ]),
+        ])
+        let showOut = OrchardHumanFormatter.projectShow(shown)
+        XCTAssertTrue(showOut.contains("Apricot  git  local"), showOut)
+        XCTAssertTrue(showOut.contains("base  main"), showOut)
+        XCTAssertTrue(showOut.contains("child  topic"), showOut)
+    }
+
+    func testGuideTopicsIncludeWorktreeAndProject() {
+        XCTAssertEqual(WorktreeGuide.topic, "worktree")
+        XCTAssertEqual(ProjectGuide.topic, "project")
+        XCTAssertTrue(CommandGroup.allCases.contains(.project))
+        XCTAssertTrue(CommandGroup.allCases.contains(.worktree))
+        XCTAssertTrue(OrchardCommands.all.contains { $0.name == "project" })
+        XCTAssertTrue(OrchardCommands.all.contains { $0.name == "worktree" })
     }
 }
