@@ -34,6 +34,10 @@ public final class ConflictsCommandHandler: CommandHandler, @unchecked Sendable 
             return .failure(id: request.id, error: RPCError(code: err.code, message: err.message))
         } catch let err as WorkspaceError {
             return .failure(id: request.id, error: RPCError(code: err.code, message: err.message))
+        } catch let err as GitConflictError {
+            return .failure(id: request.id,
+                            error: RPCError(code: Self.code(for: err),
+                                            message: String(describing: err)))
         } catch let err as GitError {
             return .failure(id: request.id,
                             error: RPCError(code: Self.code(for: err), message: err.message))
@@ -208,6 +212,17 @@ public final class ConflictsCommandHandler: CommandHandler, @unchecked Sendable 
         }
         _ = try files.resolve(root: root, relativePath: rel)
         return rel
+    }
+
+    /// T72 gave the conflict service typed errors; the CLI/RPC contract keeps the
+    /// verb-level spellings it published, so the two vocabularies are mapped here.
+    static func code(for error: GitConflictError) -> String {
+        switch error {
+        case .markersRemain: return "conflict_markers_remain"
+        case .unreadable: return "cannot_read"
+        case .notUTF8: return "not_utf8"
+        case .writeFailed: return "write_failed"
+        }
     }
 
     static func code(for error: GitError) -> String {
