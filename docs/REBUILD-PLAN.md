@@ -688,6 +688,42 @@ sheet/flow files, Sources/OrchardCore where the formatter lives, matching Tests/
 Does not touch Sources/OrchardApp/main.swift, TerminalCaptureCleaner.swift, or
 OrchardRuntime/Orchestration verb logic.
 
+### Wave 14 (T54–T56, parallel)
+
+**T54 — Upstream capture fidelity (investigation + fix).** T52 proved the cleaner
+faithful and localized the real damage upstream: wide pastes reach the captured
+stream already collapsed ("Tipsforgettingstarted") and torn repaints drop characters
+("paste gain to expad", "coorinator"). Reproduce and root-cause where fidelity is
+lost between the damson terminal grid and WorkerVerbs' page read (grid row→string
+conversion trimming/joining? snapshot racing a repaint? outputBytes vs grid source?).
+The T52 fixture (Tests/OrchardTerminalsTests/Fixtures/claude-code-tui-capture-t50.txt)
+holds the evidence. Deliver docs/design/capture-fidelity-upstream.md (root cause +
+repro), a scripted-paint repro test, and the fix. Fix Orchard-side if possible. If
+the fix is genuinely damson-side: create a branch in a NEW worktree of ~/dev/damson
+(`git -C ~/dev/damson worktree add …`) — NEVER touch the ~/dev/damson primary
+checkout, its uncommitted WIP, or its main; report the damson diff for coordinator
+review instead of merging or pinning anything yourself. Owns:
+Sources/OrchardTerminals/**, Tests/OrchardTerminalsTests/**, docs/design/**; damson
+changes only on a new branch in a new damson worktree. Does not touch
+OrchardRuntime, OrchardApp, or Package.swift pins.
+
+**T55 — respacedLines on the wire.** TerminalCaptureCleaner.Report now counts
+respacedLines but the runtime's chromeStripped receipt does not serialize it. Add it
+to the receipt payload (WorkerVerbs) and any CLI rendering that shows chromeStripped,
+with a test. Owns: Sources/OrchardRuntime/Orchestration/WorkerVerbs.swift (receipt
+region only), Sources/orchard/** if the receipt renders there, matching Tests/**.
+Does not touch TerminalCaptureCleaner.swift or OrchardApp.
+
+**T56 — Automations fire end-to-end, headless.** The Automations window and service
+exist but no automation has ever fired live. Extend the headless E2E harness
+(scripts/e2e-headless.sh + its serve fixture) to: create an automation due
+immediately against a temp repo, drive the scheduler (due/fireDue), and assert a run
+record lands in run history with its worktree/terminal outcome; fix what breaks in
+OrchardRuntime/Automations to make the path real. Keep fixes inside Automations/*
+and the harness. Owns: scripts/e2e-headless.sh, Sources/OrchardRuntime/Automations/**,
+Tests/** for automations, docs. Does not touch WorkerVerbs.swift,
+OrchardTerminals, or OrchardApp.
+
 ### Wave 13+ backlog
 
 T52 follow-ups: (a) Report.respacedLines exists but the runtime's chromeStripped
