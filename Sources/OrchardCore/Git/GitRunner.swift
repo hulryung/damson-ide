@@ -57,11 +57,53 @@ public struct GitRunner: Sendable {
         return out
     }
 
+    // MARK: - Raw bytes
+    //
+    // Everything above decodes stdout as UTF-8 *lossily*: any byte git emits that is not
+    // valid UTF-8 becomes U+FFFD, and re-encoding that string writes three bytes where one
+    // stood. That is fine for prose git wrote itself (status codes, refs, diffs shown to a
+    // human) and catastrophic for file content that gets written back to disk — it silently
+    // rewrites bytes nobody touched. Content round-trips go through these instead.
+
+    /// Run git and return stdout as raw bytes, throwing `GitError` on a nonzero exit.
+    @discardableResult
+    public func runData(_ args: [String], cwd: URL? = nil) throws -> Data {
+        let result = try captureData(args, cwd: cwd)
+        guard result.status == 0 else {
+            throw GitError("git \(args.joined(separator: " ")) failed (\(result.status)): "
+                + result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        return result.stdout
+    }
+
+    /// Run git in a worktree/repo directory and return stdout as raw bytes.
+    @discardableResult
+    public func runData(in dir: URL, _ args: [String]) throws -> Data {
+        try runData(["-C", dir.path] + args)
+    }
+
+    /// Byte-exact counterpart of `query`: raw stdout, or nil when git failed. Used for blob
+    /// content (`git show :2:path`), where "it isn't there" is an ordinary answer.
+    public func queryData(in dir: URL, _ args: [String]) -> Data? {
+        guard let result = try? captureData(["-C", dir.path] + args), result.status == 0 else {
+            return nil
+        }
+        return result.stdout
+    }
+
     // MARK: - Process
 
     public struct Output: Sendable {
         public let status: Int32
         public let stdout: String
+        public let stderr: String
+    }
+
+    /// `capture` before the stdout bytes are decoded. `stderr` stays a `String` because it
+    /// only ever carries git's own diagnostics, which are the text of an error message.
+    public struct DataOutput: Sendable {
+        public let status: Int32
+        public let stdout: Data
         public let stderr: String
     }
 
@@ -80,6 +122,15 @@ public struct GitRunner: Sendable {
     /// than left to hold the caller forever.
     public func capture(_ args: [String], cwd: URL? = nil,
                         timeout: TimeInterval = GitRunner.defaultTimeout) throws -> Output {
+        let raw = try captureData(args, cwd: cwd, timeout: timeout)
+        return Output(status: raw.status,
+                      stdout: String(decoding: raw.stdout, as: UTF8.self),
+                      stderr: raw.stderr)
+    }
+
+    /// The same launch, with stdout left as the bytes git actually wrote.
+    public func captureData(_ args: [String], cwd: URL? = nil,
+                            timeout: TimeInterval = GitRunner.defaultTimeout) throws -> DataOutput {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: gitPath)
         proc.arguments = args
@@ -126,8 +177,8 @@ public struct GitRunner: Sendable {
         }
         proc.waitUntilExit()
 
-        return Output(status: proc.terminationStatus,
-                      stdout: String(decoding: outData, as: UTF8.self),
-                      stderr: String(decoding: errData, as: UTF8.self))
+        return DataOutput(status: proc.terminationStatus,
+                          stdout: outData,
+                          stderr: String(decoding: errData, as: UTF8.self))
     }
 }

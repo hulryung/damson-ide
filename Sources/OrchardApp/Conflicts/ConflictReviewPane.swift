@@ -35,8 +35,13 @@ final class ConflictReviewModel: ObservableObject {
     @Published private(set) var selectedPath: String?
     @Published private(set) var document: GitConflictDocument?
     /// Full contents per index stage for the selected file; a stage git never wrote is
-    /// simply absent, which is what the "Base" column being missing means.
-    @Published private(set) var stages: [GitConflictStage: String] = [:]
+    /// simply absent, which is what the "Base" column being missing means. A stage that is
+    /// binary carries its byte count instead of decoded soup.
+    @Published private(set) var stages: [GitConflictStage: GitConflictStageContent] = [:]
+    /// Why the selected file has no hunks to pick, when the reason is worth saying out
+    /// loud: a non-UTF-8 file cannot be resolved as text, and the whole-file Take buttons
+    /// are its only honest route.
+    @Published private(set) var textRefusal: String?
     @Published var choices: [Int: GitConflictChoice] = [:]
     @Published private(set) var isBusy = false
     @Published var errorText: String?
@@ -83,23 +88,43 @@ final class ConflictReviewModel: ObservableObject {
         loadToken = token
         let service = self.service
         let kind = summary.files.first { $0.path == path }?.kind
-        let loaded = await Task.detached(priority: .utility) { () -> (GitConflictDocument?, [GitConflictStage: String]) in
-            var stages: [GitConflictStage: String] = [:]
+        let loaded = await Task.detached(priority: .utility) { () -> Loaded in
+            var stages: [GitConflictStage: GitConflictStageContent] = [:]
             for stage in GitConflictStage.allCases where kind?.has(stage) ?? true {
-                if let text = service.stageContents(worktree: root, path: path, stage: stage) {
-                    stages[stage] = text
+                if let content = service.stageContent(worktree: root, path: path, stage: stage) {
+                    stages[stage] = content
                 }
             }
-            return (service.document(worktree: root, path: path), stages)
+            do {
+                return Loaded(document: try service.readDocument(worktree: root, path: path),
+                              refusal: nil, stages: stages)
+            } catch let error as GitConflictError {
+                // A missing file is the ordinary shape of a delete conflict, not news.
+                let refusal: String? = {
+                    if case .unreadable = error { return nil }
+                    return error.message
+                }()
+                return Loaded(document: nil, refusal: refusal, stages: stages)
+            } catch {
+                return Loaded(document: nil, refusal: nil, stages: stages)
+            }
         }.value
         guard loadToken == token else { return }
-        document = loaded.0
-        stages = loaded.1
+        document = loaded.document
+        textRefusal = loaded.refusal
+        stages = loaded.stages
+    }
+
+    private struct Loaded: Sendable {
+        let document: GitConflictDocument?
+        let refusal: String?
+        let stages: [GitConflictStage: GitConflictStageContent]
     }
 
     private func clearSelection() {
         selectedPath = nil
         document = nil
+        textRefusal = nil
         stages = [:]
         choices = [:]
     }
@@ -241,6 +266,25 @@ struct ConflictReviewPane: View {
                  + "rebase, cherry-pick, or revert stops on one.")
     }
 
+    /// A standing explanation, not a failure: this file simply cannot be reviewed as text.
+    /// It sits above the panes rather than in the error bar because nothing went wrong and
+    /// there is nothing to dismiss.
+    private func notice(_ text: String) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Image(systemName: "info.circle").foregroundStyle(Tokens.textSecondary)
+            Text(text)
+                .font(Tokens.fontMeta)
+                .foregroundStyle(Tokens.textSecondary)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Tokens.surface)
+    }
+
     private func errorBar(_ text: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
@@ -296,6 +340,7 @@ struct ConflictReviewPane: View {
             VStack(spacing: 0) {
                 fileHeader(file)
                 Divider()
+                if let refusal = model.textRefusal { notice(refusal) }
                 if file.kind.hasInlineMarkers, !model.hunks.isEmpty, viewMode == .hunks {
                     hunkList(file)
                 } else {
@@ -372,7 +417,7 @@ struct ConflictReviewPane: View {
                 if index > 0 { Divider() }
                 ConflictStagePane(
                     title: title(for: stage, operation: model.summary.operation),
-                    text: model.stages[stage],
+                    content: model.stages[stage],
                     tint: tint(for: stage))
             }
         }
@@ -434,12 +479,21 @@ struct ConflictReviewPane: View {
                       : "Write the decided hunks. Undecided hunks keep their markers and "
                         + "the file stays unmerged.")
             } else {
-                Button("Stage File") { Task { await model.stageResolved(root: root) } }
+                // The marker refusal is real for text and cannot fire on a file with no
+                // markers to find, so a binary gets the truth instead: this stages whatever
+                // is on disk, which until you take a side is git's own "ours" copy.
+                let isNotText = model.textRefusal != nil
+                Button(isNotText ? "Stage File As-Is" : "Stage File") {
+                    Task { await model.stageResolved(root: root) }
+                }
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .disabled(model.isBusy)
-                    .help("Stage this path as it stands on disk. Refused while conflict "
-                          + "markers remain.")
+                    .help(isNotText
+                          ? "Stage this path exactly as it stands on disk — which is git's "
+                            + "'ours' copy until you take a side."
+                          : "Stage this path as it stands on disk. Refused while conflict "
+                            + "markers remain.")
             }
         }
         .padding(.horizontal, 12)
@@ -579,8 +633,18 @@ struct ConflictSideColumn: View {
 /// One whole index stage, read-only.
 struct ConflictStagePane: View {
     let title: String
-    let text: String?
+    let content: GitConflictStageContent?
     let tint: Color
+
+    /// Three different absences, three different sentences: this side has no file, this
+    /// side is binary, or here is the text.
+    private var body_text: (String, Bool) {
+        switch content {
+        case .text(let value): return (value, false)
+        case .notText: return (content?.placeholder ?? "", true)
+        case nil: return ("(this side has no version of the file)", true)
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -594,9 +658,9 @@ struct ConflictStagePane: View {
                 .background(Tokens.surface)
             Divider()
             ScrollView([.vertical, .horizontal]) {
-                Text(text ?? "(this side has no version of the file)")
+                Text(body_text.0)
                     .font(Tokens.fontMono)
-                    .foregroundStyle(text == nil ? Tokens.textTertiary : Tokens.text)
+                    .foregroundStyle(body_text.1 ? Tokens.textTertiary : Tokens.text)
                     .textSelection(.enabled)
                     .padding(8)
                     .frame(maxWidth: .infinity, alignment: .leading)

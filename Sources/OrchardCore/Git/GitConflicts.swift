@@ -129,6 +129,55 @@ public enum GitConflictKind: String, Sendable, Equatable, CaseIterable {
     }
 }
 
+/// Why a conflict operation was refused. Codes are stable so a pane, the CLI, or a test
+/// can name the reason instead of matching on prose.
+///
+/// `notUTF8` exists because the two halves of this file work at different levels: taking a
+/// whole side moves *bytes*, while picking hunks needs *lines* — and a file that is not
+/// valid UTF-8 has no lossless line representation. Resolving it as text used to rewrite
+/// every byte git could not decode as U+FFFD and stage the result, including bytes in
+/// regions the user never looked at. Refusing is the only honest answer.
+public enum GitConflictError: Error, Equatable, Sendable {
+    /// The working file is not valid UTF-8 (or holds NUL bytes), so it has no hunks to pick.
+    case notUTF8(String)
+    /// The working file could not be read at all — it is missing, or not a regular file.
+    case unreadable(String)
+    /// Staging was refused because `<<<<<<<` / `>>>>>>>` are still in the file.
+    case markersRemain(String)
+    case writeFailed(String, String)
+
+    public var code: String {
+        switch self {
+        case .notUTF8: return "not_utf8"
+        case .unreadable: return "unreadable"
+        case .markersRemain: return "markers_remain"
+        case .writeFailed: return "write_failed"
+        }
+    }
+
+    public var message: String {
+        switch self {
+        case .notUTF8(let path):
+            return "\(path) is not UTF-8 text, so it cannot be resolved hunk by hunk without "
+                 + "rewriting bytes nobody chose. Take one whole side instead — that copies "
+                 + "the chosen version byte for byte."
+        case .unreadable(let path):
+            return "cannot read conflicted file \(path)"
+        case .markersRemain(let path):
+            return "\(path) still contains conflict markers"
+        case .writeFailed(let path, let detail):
+            return "cannot write \(path): \(detail)"
+        }
+    }
+
+    /// `code — message`, the line a pane or CLI renders so a refusal is never a silent no-op.
+    public var displayText: String { "\(code) — \(message)" }
+}
+
+extension GitConflictError: CustomStringConvertible {
+    public var description: String { displayText }
+}
+
 /// One conflicted path as `git status` reports it.
 public struct GitConflictedFile: Sendable, Equatable, Identifiable, Hashable {
     public var id: String { path }
@@ -294,6 +343,25 @@ public struct GitConflictDocument: Sendable, Equatable {
         }
     }
 
+    /// The same test against raw bytes, for a file that may not be UTF-8 at all.
+    ///
+    /// Markers are ASCII, so this needs no decoding — and decoding first is exactly the bug
+    /// this file exists to close: a Latin-1 file would have to be corrupted into a `String`
+    /// before it could be asked whether it still holds markers.
+    public static func containsMarkers(_ data: Data) -> Bool {
+        let open = Data(repeating: 0x3C, count: 7)    // "<<<<<<<"
+        let close = Data(repeating: 0x3E, count: 7)   // ">>>>>>>"
+        var lineStart = data.startIndex
+        while lineStart < data.endIndex {
+            let lineEnd = data[lineStart...].firstIndex(of: 0x0A) ?? data.endIndex
+            let line = data[lineStart..<lineEnd]
+            if line.starts(with: open) || line.starts(with: close) { return true }
+            if lineEnd == data.endIndex { break }
+            lineStart = data.index(after: lineEnd)
+        }
+        return false
+    }
+
     public static func parse(_ text: String) -> GitConflictDocument {
         var lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         let trailing = text.hasSuffix("\n")
@@ -413,6 +481,34 @@ public struct GitConflictResolution: Sendable, Equatable {
     }
 }
 
+/// One index stage as the UI can show it. A side that is binary is *not* the same as a
+/// side that does not exist, and rendering U+FFFD soup for the first is how a reviewer
+/// concludes the file was already corrupt.
+public enum GitConflictStageContent: Sendable, Equatable {
+    case text(String)
+    /// Bytes with no lossless text form — a real binary, or text in an encoding that is not
+    /// UTF-8. Called `notText` rather than `binary` because a Latin-1 source file is very
+    /// much text; it just isn't text *this* code may decode.
+    case notText(byteCount: Int)
+
+    public var text: String? {
+        if case .text(let value) = self { return value }
+        return nil
+    }
+
+    public var isText: Bool {
+        if case .text = self { return true }
+        return false
+    }
+
+    /// What to render in place of content that has no text form.
+    public var placeholder: String? {
+        guard case .notText(let bytes) = self else { return nil }
+        let noun = bytes == 1 ? "byte" : "bytes"
+        return "(not UTF-8 text — \(bytes) \(noun); nothing safe to show)"
+    }
+}
+
 // MARK: - Service
 
 /// Read/resolve the conflicts in a worktree. Every method shells out through `GitRunner`;
@@ -496,21 +592,65 @@ public struct GitConflictService: Sendable {
 
     // MARK: Content
 
-    /// Contents of one index stage, or nil when git holds no such stage for this path
-    /// (the side that deleted the file, or a base that never existed).
-    public func stageContents(worktree: URL, path: String, stage: GitConflictStage) -> String? {
+    /// Contents of one index stage as the bytes git holds, or nil when git holds no such
+    /// stage for this path (the side that deleted the file, or a base that never existed).
+    ///
+    /// This is the only content read that a resolution may write back: `git show` emits the
+    /// blob verbatim, and nothing here decodes it.
+    public func stageContentsData(worktree: URL, path: String, stage: GitConflictStage) -> Data? {
         // `:N:path` is resolved relative to the top of the working tree, which is exactly
         // what porcelain paths are relative to.
-        git.query(in: worktree, ["show", ":\(stage.rawValue):\(path)"])
+        git.queryData(in: worktree, ["show", ":\(stage.rawValue):\(path)"])
+    }
+
+    /// Contents of one index stage as text, or nil when the stage is absent **or its bytes
+    /// are not UTF-8 text**. Strict on purpose: a lossy decode here is content that looks
+    /// resolvable and silently isn't. Use `stageContent` when "there is no such side" and
+    /// "that side is binary" need different words, and `stageContentsData` to write.
+    public func stageContents(worktree: URL, path: String, stage: GitConflictStage) -> String? {
+        stageContentsData(worktree: worktree, path: path, stage: stage).flatMap(Self.text(of:))
+    }
+
+    /// One stage, classified for display: text to show, or a byte count to describe.
+    public func stageContent(worktree: URL, path: String,
+                             stage: GitConflictStage) -> GitConflictStageContent? {
+        guard let data = stageContentsData(worktree: worktree, path: path, stage: stage) else {
+            return nil
+        }
+        if let text = Self.text(of: data) { return .text(text) }
+        return .notText(byteCount: data.count)
+    }
+
+    /// The working-tree file parsed into hunks, or a typed refusal saying why it has none.
+    ///
+    /// Throwing rather than returning nil is what lets `resolve` refuse instead of writing:
+    /// a caller that cannot tell "no conflict regions" from "these bytes are not text" ends
+    /// up rewriting the file either way.
+    public func readDocument(worktree: URL, path: String) throws -> GitConflictDocument {
+        let url = worktree.appendingPathComponent(path)
+        guard let data = try? Data(contentsOf: url) else {
+            throw GitConflictError.unreadable(path)
+        }
+        guard let text = Self.text(of: data) else {
+            throw GitConflictError.notUTF8(path)
+        }
+        return GitConflictDocument.parse(text)
     }
 
     /// The working-tree file, parsed into hunks. Nil when the file is gone (a delete
-    /// conflict) or unreadable as UTF-8.
+    /// conflict) or is not UTF-8 text — `readDocument` says which.
     public func document(worktree: URL, path: String) -> GitConflictDocument? {
-        let url = worktree.appendingPathComponent(path)
-        guard let data = try? Data(contentsOf: url) else { return nil }
-        if data.prefix(8000).contains(0) { return nil }   // binary: no hunks to pick
-        return GitConflictDocument.parse(String(decoding: data, as: UTF8.self))
+        try? readDocument(worktree: worktree, path: path)
+    }
+
+    /// Decode bytes as text, or nil when they are not text a resolution may round-trip.
+    ///
+    /// Two separate refusals wear one return value: a NUL in the head is git's own binary
+    /// heuristic, and `String(data:encoding:)` is *strict* where `String(decoding:as:)`
+    /// would have quietly substituted U+FFFD for every undecodable byte.
+    static func text(of data: Data) -> String? {
+        if data.prefix(8000).contains(0) { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     // MARK: Resolution
@@ -519,13 +659,14 @@ public struct GitConflictService: Sendable {
     ///
     /// Staging is gated on a fully-decided file on purpose: `git add` on a file that still
     /// holds `<<<<<<<` marks the conflict resolved and lets the markers reach a commit.
+    ///
+    /// Throws `GitConflictError.notUTF8` rather than resolving a file whose bytes cannot
+    /// survive the trip through `String` — see the type's note.
     @discardableResult
     public func resolve(worktree: URL, path: String,
                         choices: [Int: GitConflictChoice],
                         stageWhenResolved: Bool = true) throws -> GitConflictResolution {
-        guard let document = document(worktree: worktree, path: path) else {
-            throw GitError("cannot read conflicted file \(path)")
-        }
+        let document = try readDocument(worktree: worktree, path: path)
         let text = document.resolvedText(choices: choices)
         let remaining = document.unresolvedHunks(choices: choices).count
         try write(text, worktree: worktree, path: path)
@@ -535,41 +676,127 @@ public struct GitConflictService: Sendable {
                                      remainingHunks: remaining, staged: staged)
     }
 
-    /// Take one whole side for a path, whatever kind of conflict it is. When the chosen
-    /// side deleted the file, the resolution *is* the delete — the file is removed and the
-    /// removal staged, rather than leaving the other side's content sitting there.
+    /// Take one whole side for a path, whatever kind of conflict it is — the only route a
+    /// binary conflict has, and therefore the one that has to be exact.
+    ///
+    /// The chosen index stage is copied **byte for byte**, including its file mode: a blob
+    /// is content plus a mode, and staging content with the wrong mode is a change the user
+    /// never made. When the chosen side deleted the file, the resolution *is* the delete —
+    /// the file is removed and the removal staged, rather than leaving the other side's
+    /// content sitting there.
     public func take(_ side: GitConflictSide, worktree: URL, path: String) throws {
         let url = worktree.appendingPathComponent(path)
-        if let content = stageContents(worktree: worktree, path: path, stage: side.stage) {
-            try write(content, worktree: worktree, path: path)
-            try stage(worktree: worktree, path: path)
-        } else {
+        guard let data = stageContentsData(worktree: worktree, path: path, stage: side.stage) else {
             try? FileManager.default.removeItem(at: url)
             try git.run(in: worktree, ["rm", "-q", "-f", "--", path])
+            return
         }
+        let mode = indexMode(worktree: worktree, path: path, stage: side.stage)
+        if mode == "120000" {
+            // A symlink blob holds its target as content; writing it as a regular file would
+            // stage a type change nobody asked for.
+            try writeSymlink(target: data, worktree: worktree, path: path)
+        } else {
+            try write(data, worktree: worktree, path: path, mode: mode)
+        }
+        try stage(worktree: worktree, path: path)
     }
 
     /// Stage a path the user resolved by hand (in the editor, or in another tool).
     /// Refuses while conflict markers remain — staging then would bury them in a commit.
     public func stage(worktree: URL, path: String) throws {
         let url = worktree.appendingPathComponent(path)
+        // Scanned as bytes: a Latin-1 file still has ASCII markers, and it must not have to
+        // be decoded (and so corrupted) to be asked. Files git itself calls binary keep the
+        // old exemption — a stray `<<<<<<<` inside a blob is not a marker.
         if let data = try? Data(contentsOf: url), !data.prefix(8000).contains(0),
-           GitConflictDocument.containsMarkers(String(decoding: data, as: UTF8.self)) {
-            throw GitError("\(path) still contains conflict markers")
+           GitConflictDocument.containsMarkers(data) {
+            throw GitConflictError.markersRemain(path)
         }
         try git.run(in: worktree, ["add", "--", path])
     }
 
-    /// Overwrite the working file. Written via a temporary sibling + atomic replace so an
-    /// interrupted write can never leave a half-resolved file behind.
-    public func write(_ text: String, worktree: URL, path: String) throws {
+    /// The mode git records for one stage of a conflicted path (`100644`, `100755`,
+    /// `120000`), or nil when the stage is absent.
+    func indexMode(worktree: URL, path: String, stage: GitConflictStage) -> String? {
+        guard let out = git.query(in: worktree, ["ls-files", "--stage", "-z", "--", path]) else {
+            return nil
+        }
+        // "<mode> <sha> <stage>\t<path>", NUL-terminated per record.
+        for record in out.split(separator: "\0", omittingEmptySubsequences: true) {
+            let head = record.prefix(while: { $0 != "\t" }).split(separator: " ")
+            guard head.count >= 3, Int(head[2]) == stage.rawValue else { continue }
+            return String(head[0])
+        }
+        return nil
+    }
+
+    // MARK: Writing
+
+    /// Overwrite the working file with exact bytes. Written via a temporary sibling +
+    /// atomic replace so an interrupted write can never leave a half-resolved file behind.
+    ///
+    /// `mode` is git's own (`100755` / `100644`), applied after the replace because an
+    /// atomic write creates a *new* file and inherits nothing from the one it replaced —
+    /// which is how a resolution silently drops a script's executable bit.
+    public func write(_ data: Data, worktree: URL, path: String, mode: String? = nil) throws {
         let url = worktree.appendingPathComponent(path)
+        let existing = Self.permissions(of: url)
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                     withIntermediateDirectories: true)
-            try text.write(to: url, atomically: true, encoding: .utf8)
+            // An atomic replace cannot follow a symlink into place; drop it first so the
+            // path holds the file we just decided on.
+            if (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true {
+                try? FileManager.default.removeItem(at: url)
+            }
+            try data.write(to: url, options: .atomic)
+            // Start from the file's own bits (or what the umask just gave a new file) and
+            // let git's mode decide only the executable ones — forcing 0644/0755 outright
+            // would override a umask the user set on purpose.
+            var wanted = existing ?? Self.permissions(of: url) ?? 0o644
+            switch mode {
+            case "100755": wanted |= 0o111
+            case "100644": wanted &= ~0o111
+            default: break
+            }
+            if wanted != Self.permissions(of: url) {
+                try? FileManager.default.setAttributes(
+                    [.posixPermissions: NSNumber(value: wanted)], ofItemAtPath: url.path)
+            }
         } catch {
-            throw GitError("cannot write \(path): \(error.localizedDescription)")
+            throw GitConflictError.writeFailed(path, error.localizedDescription)
         }
+    }
+
+    /// Overwrite the working file with text. UTF-8 in, UTF-8 out — every caller of this
+    /// reads its text through `readDocument`, which refuses anything that would not survive.
+    public func write(_ text: String, worktree: URL, path: String) throws {
+        try write(Data(text.utf8), worktree: worktree, path: path)
+    }
+
+    /// Replace the path with a symlink to `target` (a symlink blob's content is its target).
+    private func writeSymlink(target: Data, worktree: URL, path: String) throws {
+        let url = worktree.appendingPathComponent(path)
+        guard let destination = String(data: target, encoding: .utf8), !destination.isEmpty else {
+            throw GitConflictError.notUTF8(path)
+        }
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                    withIntermediateDirectories: true)
+            if (try? url.checkResourceIsReachable()) == true
+                || (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]))?.isSymbolicLink == true {
+                try? FileManager.default.removeItem(at: url)
+            }
+            try FileManager.default.createSymbolicLink(atPath: url.path,
+                                                       withDestinationPath: destination)
+        } catch {
+            throw GitConflictError.writeFailed(path, error.localizedDescription)
+        }
+    }
+
+    private static func permissions(of url: URL) -> Int? {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attrs?[.posixPermissions] as? NSNumber)?.intValue
     }
 }

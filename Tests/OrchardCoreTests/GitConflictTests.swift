@@ -189,11 +189,13 @@ final class GitConflictPorcelainTests: XCTestCase {
     }
 }
 
-/// The git half, against real conflicted repos the test creates. Detection and staging are
-/// entirely about git's actual behaviour, so a mocked runner would prove nothing.
-final class GitConflictServiceTests: XCTestCase {
-    private var tmp: URL!
-    private let service = GitConflictService()
+/// Shared scaffolding for the git-backed cases: a scratch repo per test, and the handful
+/// of helpers that build conflicts in it. Byte-level helpers are here too, because the
+/// lesson of dogfood-6 is that a fixture written with `encoding: .utf8` cannot catch a bug
+/// about bytes that are not UTF-8.
+class GitConflictRepoCase: XCTestCase {
+    var tmp: URL!
+    let service = GitConflictService()
 
     override func setUpWithError() throws {
         try XCTSkipIf(!FileManager.default.isExecutableFile(atPath: "/usr/bin/git"), "git unavailable")
@@ -207,7 +209,7 @@ final class GitConflictServiceTests: XCTestCase {
     }
 
     @discardableResult
-    private func git(_ args: [String], cwd: URL) throws -> Int32 {
+    func git(_ args: [String], cwd: URL) throws -> Int32 {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
         proc.arguments = args
@@ -223,21 +225,46 @@ final class GitConflictServiceTests: XCTestCase {
         return proc.terminationStatus
     }
 
-    private func write(_ text: String, to name: String, in repo: URL) throws {
+    func write(_ text: String, to name: String, in repo: URL) throws {
         let url = repo.appendingPathComponent(name)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
         try text.write(to: url, atomically: true, encoding: .utf8)
     }
 
-    private func read(_ name: String, in repo: URL) -> String? {
+    func read(_ name: String, in repo: URL) -> String? {
         try? String(contentsOf: repo.appendingPathComponent(name), encoding: .utf8)
+    }
+
+    /// Byte-exact counterparts. Every fixture that matters below is written and compared
+    /// through these: `String` cannot represent the content under test.
+    func writeBytes(_ data: Data, to name: String, in repo: URL) throws {
+        let url = repo.appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try data.write(to: url)
+    }
+
+    func readBytes(_ name: String, in repo: URL) -> Data? {
+        try? Data(contentsOf: repo.appendingPathComponent(name))
+    }
+
+    /// The object id git has for a path at a ref (`feature:blob.bin`) or an index stage
+    /// (`:0:blob.bin`) — the only check that proves a *staged* copy is byte-identical.
+    func objectID(_ spec: String, in repo: URL) -> String? {
+        GitRunner.shared.line(in: repo, ["rev-parse", spec])
+    }
+
+    func fileMode(_ name: String, in repo: URL) -> Int? {
+        let attrs = try? FileManager.default.attributesOfItem(
+            atPath: repo.appendingPathComponent(name).path)
+        return (attrs?[.posixPermissions] as? NSNumber)?.intValue
     }
 
     /// A repo on `main` with `file.txt`, plus a `feature` branch that changed the same
     /// middle line differently. Merging feature into main conflicts on exactly one hunk.
-    private func makeConflictedRepo(name: String = "repo",
-                                    file: String = "file.txt") throws -> URL {
+    func makeConflictedRepo(name: String = "repo",
+                            file: String = "file.txt") throws -> URL {
         let repo = tmp.appendingPathComponent(name)
         try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
         XCTAssertEqual(try git(["init", "-q", "-b", "main"], cwd: repo), 0)
@@ -260,10 +287,24 @@ final class GitConflictServiceTests: XCTestCase {
         return repo
     }
 
-    private func porcelain(_ repo: URL) -> String {
+    func porcelain(_ repo: URL) -> String {
         GitRunner.shared.query(in: repo, ["status", "--porcelain"]) ?? ""
     }
 
+    /// An empty repo with identity configured, ready for a fixture to diverge.
+    func makeRepo(_ name: String) throws -> URL {
+        let repo = tmp.appendingPathComponent(name)
+        try FileManager.default.createDirectory(at: repo, withIntermediateDirectories: true)
+        XCTAssertEqual(try git(["init", "-q", "-b", "main"], cwd: repo), 0)
+        try git(["config", "user.email", "test@orchard.app"], cwd: repo)
+        try git(["config", "user.name", "Test"], cwd: repo)
+        return repo
+    }
+}
+
+/// The git half, against real conflicted repos the test creates. Detection and staging are
+/// entirely about git's actual behaviour, so a mocked runner would prove nothing.
+final class GitConflictServiceTests: GitConflictRepoCase {
     // MARK: -
 
     func testDetectsMergeAndListsUnmergedFile() throws {
@@ -447,5 +488,359 @@ final class GitConflictServiceTests: XCTestCase {
         XCTAssertEqual(summary.operation, .none)
         XCTAssertTrue(summary.isEmpty)
         XCTAssertFalse(summary.isActive)
+    }
+}
+
+/// The fixtures T68 did not have.
+///
+/// T68 shipped 25 passing tests and a data-loss bug, because every one of those fixtures
+/// was written and read with `encoding: .utf8` — so nothing ever asked what happens to a
+/// byte that is not UTF-8. dogfood-6 answered it live: `take(.theirs)` on a 768-byte blob
+/// wrote 1792 bytes of U+FFFD and staged them, and `resolve()` rewrote a Latin-1 header
+/// line nobody had touched. Every case below compares *bytes*.
+final class GitConflictByteFidelityTests: GitConflictRepoCase {
+
+    // MARK: Fixtures
+
+    /// 768 bytes that no UTF-8 decoder can round-trip: a NUL, two bytes that are never
+    /// legal UTF-8 (0xFF, 0xFE), a lone continuation byte (0x80), and a truncated two-byte
+    /// sequence (0xC3 0x28). `salt` is the one byte the two sides disagree about.
+    private func binaryPattern(_ salt: UInt8) -> Data {
+        var data = Data()
+        for _ in 0..<128 { data.append(contentsOf: [0x00, 0xFF, 0xFE, 0x80, 0xC3, 0x28] as [UInt8]) }
+        data[100] = salt
+        return data
+    }
+
+    /// `header caf<E9> latin1` — ordinary text in Latin-1, with the conflict eight lines
+    /// below the byte that matters. Nothing in the review touches the header; the old code
+    /// rewrote it anyway.
+    private func latin1(middle: String) -> Data {
+        var data = Data("header caf".utf8)
+        data.append(0xE9)
+        data.append(Data(" latin1\n".utf8))
+        data.append(Data("alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\neta\n\(middle)\ntail\n".utf8))
+        return data
+    }
+
+    private func makeBinaryConflictRepo() throws -> URL {
+        try makeConflictOverBytes(name: "bin", file: "blob.bin",
+                                  base: binaryPattern(0x01),
+                                  ours: binaryPattern(0x02),
+                                  theirs: binaryPattern(0x03))
+    }
+
+    private func makeLatin1ConflictRepo() throws -> URL {
+        try makeConflictOverBytes(name: "latin", file: "latin1.txt",
+                                  base: latin1(middle: "middle"),
+                                  ours: latin1(middle: "main line"),
+                                  theirs: latin1(middle: "feature line"))
+    }
+
+    /// Three byte blobs, two branches, one failed merge.
+    private func makeConflictOverBytes(name: String, file: String,
+                                       base: Data, ours: Data, theirs: Data) throws -> URL {
+        let repo = try makeRepo(name)
+        try writeBytes(base, to: file, in: repo)
+        try git(["add", "."], cwd: repo)
+        try git(["commit", "-q", "-m", "init"], cwd: repo)
+        try git(["checkout", "-q", "-b", "feature"], cwd: repo)
+        try writeBytes(theirs, to: file, in: repo)
+        try git(["commit", "-qam", "feature edit"], cwd: repo)
+        try git(["checkout", "-q", "main"], cwd: repo)
+        try writeBytes(ours, to: file, in: repo)
+        try git(["commit", "-qam", "main edit"], cwd: repo)
+        XCTAssertNotEqual(try git(["merge", "feature"], cwd: repo), 0, "the failed merge is the fixture")
+        return repo
+    }
+
+    /// The replacement-character sequence a lossy decode leaves behind.
+    private func containsReplacementChar(_ data: Data) -> Bool {
+        data.range(of: Data([0xEF, 0xBF, 0xBD])) != nil
+    }
+
+    // MARK: Binary
+
+    func testBinaryConflictHasNoHunksAndSaysWhy() throws {
+        let repo = try makeBinaryConflictRepo()
+        XCTAssertEqual(service.conflictedFiles(worktree: repo).map(\.kind), [.bothModified])
+
+        XCTAssertNil(service.document(worktree: repo, path: "blob.bin"))
+        XCTAssertThrowsError(try service.readDocument(worktree: repo, path: "blob.bin")) { error in
+            XCTAssertEqual(error as? GitConflictError, .notUTF8("blob.bin"))
+            XCTAssertEqual((error as? GitConflictError)?.code, "not_utf8")
+        }
+
+        // Stage reads: exact bytes for the writer, a typed "not text" for the reader, and
+        // never a lossy string.
+        XCTAssertEqual(service.stageContentsData(worktree: repo, path: "blob.bin", stage: .theirs),
+                       binaryPattern(0x03))
+        XCTAssertEqual(service.stageContentsData(worktree: repo, path: "blob.bin", stage: .ours),
+                       binaryPattern(0x02))
+        XCTAssertEqual(service.stageContentsData(worktree: repo, path: "blob.bin", stage: .base),
+                       binaryPattern(0x01))
+        XCTAssertNil(service.stageContents(worktree: repo, path: "blob.bin", stage: .theirs))
+        XCTAssertEqual(service.stageContent(worktree: repo, path: "blob.bin", stage: .theirs),
+                       .notText(byteCount: 768))
+        XCTAssertEqual(service.stageContent(worktree: repo, path: "blob.bin", stage: .theirs)?
+                        .placeholder,
+                       "(not UTF-8 text — 768 bytes; nothing safe to show)")
+    }
+
+    /// dogfood-6's headline case: for a binary the Take buttons are the pane's only route,
+    /// so the only route has to be byte-exact — 768 bytes in, 768 identical bytes out, and
+    /// the *staged* copy is git's own theirs blob, not a re-encoding of it.
+    func testTakeOnABinaryCopiesTheChosenStageByteForByte() throws {
+        let repo = try makeBinaryConflictRepo()
+        try service.take(.theirs, worktree: repo, path: "blob.bin")
+
+        let onDisk = try XCTUnwrap(readBytes("blob.bin", in: repo))
+        XCTAssertEqual(onDisk.count, 768, "the old code wrote 1792 bytes here")
+        XCTAssertEqual(onDisk, binaryPattern(0x03))
+        XCTAssertFalse(containsReplacementChar(onDisk), "U+FFFD means the bytes went through a String")
+
+        XCTAssertEqual(objectID(":0:blob.bin", in: repo), objectID("feature:blob.bin", in: repo),
+                       "the staged blob must be theirs, not a re-encoding of theirs")
+        XCTAssertTrue(service.conflictedFiles(worktree: repo).isEmpty)
+        XCTAssertTrue(porcelain(repo).hasPrefix("M "), "got: \(porcelain(repo))")
+    }
+
+    func testTakeOursOnABinaryIsAlsoExact() throws {
+        let repo = try makeBinaryConflictRepo()
+        try service.take(.ours, worktree: repo, path: "blob.bin")
+        XCTAssertEqual(readBytes("blob.bin", in: repo), binaryPattern(0x02))
+        XCTAssertEqual(objectID(":0:blob.bin", in: repo), objectID("main:blob.bin", in: repo))
+    }
+
+    /// Refusing is the fix: there is no honest per-hunk answer for bytes that cannot be
+    /// lines, so nothing is written and the file stays unmerged.
+    func testResolveRefusesOnABinaryAndWritesNothing() throws {
+        let repo = try makeBinaryConflictRepo()
+        let before = try XCTUnwrap(readBytes("blob.bin", in: repo))
+
+        XCTAssertThrowsError(try service.resolve(worktree: repo, path: "blob.bin",
+                                                 choices: [0: .theirs])) { error in
+            XCTAssertEqual(error as? GitConflictError, .notUTF8("blob.bin"))
+        }
+        XCTAssertEqual(readBytes("blob.bin", in: repo), before, "a refusal must not write")
+        XCTAssertEqual(service.conflictedFiles(worktree: repo).map(\.path), ["blob.bin"],
+                       "and must not stage")
+    }
+
+    // MARK: Latin-1 — text, just not UTF-8
+
+    /// The case that proves this is not only about binaries: a normal source file with one
+    /// Latin-1 byte in a header line the reviewer never opens.
+    func testLatin1FileIsRefusedAndItsUntouchedHeaderSurvives() throws {
+        let repo = try makeLatin1ConflictRepo()
+        let before = try XCTUnwrap(readBytes("latin1.txt", in: repo))
+        XCTAssertTrue(before.contains(0xE9), "fixture must carry the Latin-1 byte")
+        XCTAssertTrue(GitConflictDocument.containsMarkers(before),
+                      "git wrote real markers into this one — it is text to git")
+
+        XCTAssertNil(service.document(worktree: repo, path: "latin1.txt"))
+        XCTAssertThrowsError(try service.readDocument(worktree: repo, path: "latin1.txt")) { error in
+            XCTAssertEqual(error as? GitConflictError, .notUTF8("latin1.txt"))
+        }
+        XCTAssertThrowsError(try service.resolve(worktree: repo, path: "latin1.txt",
+                                                 choices: [0: .theirs]))
+
+        let after = try XCTUnwrap(readBytes("latin1.txt", in: repo))
+        XCTAssertEqual(after, before, "the old code rewrote caf<E9> as caf<EF BF BD> here")
+        XCTAssertFalse(containsReplacementChar(after))
+        XCTAssertEqual(service.conflictedFiles(worktree: repo).map(\.path), ["latin1.txt"])
+    }
+
+    func testTakeOnALatin1FileKeepsEveryByteOfTheChosenSide() throws {
+        let repo = try makeLatin1ConflictRepo()
+        try service.take(.theirs, worktree: repo, path: "latin1.txt")
+
+        let onDisk = try XCTUnwrap(readBytes("latin1.txt", in: repo))
+        XCTAssertEqual(onDisk, latin1(middle: "feature line"))
+        XCTAssertTrue(onDisk.contains(0xE9))
+        XCTAssertFalse(containsReplacementChar(onDisk))
+        XCTAssertEqual(objectID(":0:latin1.txt", in: repo), objectID("feature:latin1.txt", in: repo))
+        XCTAssertTrue(service.conflictedFiles(worktree: repo).isEmpty)
+    }
+
+    /// The marker refusal has to work on bytes too, or the only way to ask "are there still
+    /// markers in this Latin-1 file" is to corrupt it first.
+    func testStagingALatin1FileRefusesOnMarkersThenAcceptsAHandResolution() throws {
+        let repo = try makeLatin1ConflictRepo()
+        XCTAssertThrowsError(try service.stage(worktree: repo, path: "latin1.txt")) { error in
+            XCTAssertEqual(error as? GitConflictError, .markersRemain("latin1.txt"))
+            XCTAssertTrue("\(error)".contains("conflict markers"), "got: \(error)")
+        }
+        XCTAssertEqual(service.conflictedFiles(worktree: repo).count, 1)
+
+        // Resolved by hand in an editor that understands Latin-1, then staged from here.
+        let byHand = latin1(middle: "by hand")
+        try writeBytes(byHand, to: "latin1.txt", in: repo)
+        try service.stage(worktree: repo, path: "latin1.txt")
+        XCTAssertTrue(service.conflictedFiles(worktree: repo).isEmpty)
+        XCTAssertEqual(readBytes("latin1.txt", in: repo), byHand)
+        XCTAssertEqual(objectID(":0:latin1.txt", in: repo),
+                       GitRunner.shared.line(in: repo, ["hash-object", "--", "latin1.txt"]),
+                       "the staged blob is the bytes on disk")
+    }
+
+    func testMarkerScanOnRawBytes() {
+        var latin = Data("caf".utf8); latin.append(0xE9)
+        latin.append(Data("\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> feature\n".utf8))
+        XCTAssertTrue(GitConflictDocument.containsMarkers(latin))
+        XCTAssertFalse(GitConflictDocument.containsMarkers(latin1(middle: "no markers here")))
+        // A marker that is not at the start of a line is not a marker.
+        XCTAssertFalse(GitConflictDocument.containsMarkers(Data("a <<<<<<< b\n".utf8)))
+        XCTAssertFalse(GitConflictDocument.containsMarkers(Data()))
+        // Unterminated regions still count, which is what keeps a half-edit unstageable.
+        XCTAssertTrue(GitConflictDocument.containsMarkers(Data("x\n<<<<<<< HEAD".utf8)))
+    }
+
+    // MARK: UTF-8 that is merely awkward
+
+    /// Valid UTF-8 *is* resolved — and the parts outside the hunk come back byte-identical,
+    /// including a multi-byte emoji, a combining accent, and a CRLF line ending.
+    func testResolvingValidUTF8IsByteExactOutsideTheHunk() throws {
+        func file(_ middle: String) -> Data {
+            Data("héllo ☕\r\nalpha\nbeta\ngamma\ndelta\nepsilon\nzeta\n\(middle)\ntail 🚀\n".utf8)
+        }
+        let repo = try makeConflictOverBytes(name: "utf8", file: "u.txt",
+                                             base: file("middle"),
+                                             ours: file("main line"),
+                                             theirs: file("feature line"))
+        let doc = try service.readDocument(worktree: repo, path: "u.txt")
+        XCTAssertEqual(doc.hunkCount, 1)
+
+        let result = try service.resolve(worktree: repo, path: "u.txt", choices: [0: .theirs])
+        XCTAssertTrue(result.staged)
+        XCTAssertEqual(readBytes("u.txt", in: repo), file("feature line"))
+        XCTAssertEqual(objectID(":0:u.txt", in: repo), objectID("feature:u.txt", in: repo))
+    }
+
+    /// A file with NUL bytes that happens to be valid UTF-8 is still not something to pick
+    /// hunks in — git's own heuristic, kept, and now typed instead of silent.
+    func testNULBytesAreNotTextEvenWhenTheyDecode() {
+        let withNUL = Data("ok\n".utf8) + Data([0x00]) + Data("more\n".utf8)
+        XCTAssertNotNil(String(data: withNUL, encoding: .utf8), "these bytes do decode")
+        XCTAssertNil(GitConflictService.text(of: withNUL), "but they are not text to review")
+        XCTAssertNotNil(GitConflictService.text(of: Data("plain\n".utf8)))
+    }
+
+    // MARK: Mode
+
+    /// A blob is content *plus* a mode. Taking theirs on a file they made executable has to
+    /// bring the bit along, or the resolution stages a mode change nobody chose.
+    func testTakeCarriesTheChosenStagesFileMode() throws {
+        let repo = try makeRepo("modes")
+        try write("#!/bin/sh\necho base\n", to: "run.sh", in: repo)
+        try git(["add", "."], cwd: repo)
+        try git(["commit", "-q", "-m", "init"], cwd: repo)
+        try git(["checkout", "-q", "-b", "feature"], cwd: repo)
+        try write("#!/bin/sh\necho theirs\n", to: "run.sh", in: repo)
+        // chmod on disk, then a plain `add`: `commit -a` re-reads the working-tree mode, so
+        // an `update-index --chmod` alone would be undone before it was ever committed.
+        try FileManager.default.setAttributes([.posixPermissions: NSNumber(value: Int16(0o755))],
+                                              ofItemAtPath: repo.appendingPathComponent("run.sh").path)
+        try git(["add", "run.sh"], cwd: repo)
+        try git(["commit", "-qm", "theirs + exec bit"], cwd: repo)
+        try git(["checkout", "-q", "main"], cwd: repo)
+        try write("#!/bin/sh\necho ours\n", to: "run.sh", in: repo)
+        try git(["commit", "-qam", "ours"], cwd: repo)
+        XCTAssertNotEqual(try git(["merge", "feature"], cwd: repo), 0)
+
+        XCTAssertEqual(service.indexMode(worktree: repo, path: "run.sh", stage: .ours), "100644")
+        XCTAssertEqual(service.indexMode(worktree: repo, path: "run.sh", stage: .theirs), "100755")
+
+        try service.take(.theirs, worktree: repo, path: "run.sh")
+        XCTAssertEqual(read("run.sh", in: repo), "#!/bin/sh\necho theirs\n")
+        XCTAssertEqual((fileMode("run.sh", in: repo) ?? 0) & 0o111, 0o111, "lost the executable bit")
+        XCTAssertEqual(service.indexMode(worktree: repo, path: "run.sh", stage: .base), nil,
+                       "resolved: no unmerged stages left")
+        XCTAssertEqual(GitRunner.shared.query(in: repo, ["ls-files", "--stage", "--", "run.sh"])?
+                        .prefix(6), "100755")
+    }
+
+    /// A symlink blob's content is its target path. Writing those bytes as a regular file
+    /// would stage a type change; the resolution has to stay a symlink.
+    func testTakeOnASymlinkConflictKeepsItASymlink() throws {
+        let repo = try makeRepo("links")
+        try write("anchor\n", to: "anchor.txt", in: repo)
+        try git(["add", "."], cwd: repo)
+        try git(["commit", "-q", "-m", "init"], cwd: repo)
+        try git(["checkout", "-q", "-b", "feature"], cwd: repo)
+        try FileManager.default.createSymbolicLink(
+            atPath: repo.appendingPathComponent("link").path, withDestinationPath: "theirs-target")
+        try git(["add", "link"], cwd: repo)
+        try git(["commit", "-qm", "their link"], cwd: repo)
+        try git(["checkout", "-q", "main"], cwd: repo)
+        try FileManager.default.createSymbolicLink(
+            atPath: repo.appendingPathComponent("link").path, withDestinationPath: "ours-target")
+        try git(["add", "link"], cwd: repo)
+        try git(["commit", "-qm", "our link"], cwd: repo)
+        XCTAssertNotEqual(try git(["merge", "feature"], cwd: repo), 0)
+        XCTAssertEqual(service.indexMode(worktree: repo, path: "link", stage: .theirs), "120000")
+
+        try service.take(.theirs, worktree: repo, path: "link")
+        let destination = try FileManager.default.destinationOfSymbolicLink(
+            atPath: repo.appendingPathComponent("link").path)
+        XCTAssertEqual(destination, "theirs-target")
+        XCTAssertEqual(GitRunner.shared.query(in: repo, ["ls-files", "--stage", "--", "link"])?
+                        .prefix(6), "120000")
+        XCTAssertTrue(service.conflictedFiles(worktree: repo).isEmpty)
+    }
+
+    // MARK: Typed errors
+
+    func testRefusalCodesAndText() {
+        XCTAssertEqual(GitConflictError.notUTF8("a.bin").code, "not_utf8")
+        XCTAssertEqual(GitConflictError.markersRemain("a.txt").code, "markers_remain")
+        XCTAssertEqual(GitConflictError.unreadable("a.txt").code, "unreadable")
+        XCTAssertEqual(GitConflictError.writeFailed("a.txt", "disk full").code, "write_failed")
+        XCTAssertEqual(GitConflictError.writeFailed("a.txt", "disk full").displayText,
+                       "write_failed — cannot write a.txt: disk full")
+        XCTAssertTrue(GitConflictError.notUTF8("a.bin").message.contains("Take one whole side"),
+                      "the refusal has to name the route that still works")
+    }
+}
+
+/// `GitRunner`'s two stdout shapes. The `String` one stays exactly as it was — every
+/// existing caller reads git's own prose through it — and the `Data` one exists for the
+/// single job that prose cannot do: carrying file content back to disk.
+final class GitRunnerDataTests: GitConflictRepoCase {
+    func testRawStdoutIsByteExactWhereTheStringPathIsLossy() throws {
+        let repo = try makeRepo("raw")
+        var blob = Data("head ".utf8)
+        blob.append(contentsOf: [0xFF, 0xFE, 0x80, 0x00] as [UInt8])
+        blob.append(Data(" tail\n".utf8))
+        try writeBytes(blob, to: "b.bin", in: repo)
+        try git(["add", "."], cwd: repo)
+        try git(["commit", "-q", "-m", "init"], cwd: repo)
+
+        let raw = try XCTUnwrap(GitRunner.shared.queryData(in: repo, ["show", "HEAD:b.bin"]))
+        XCTAssertEqual(raw, blob)
+
+        // Unchanged, and unusable for content: the four odd bytes become replacement chars.
+        let text = try XCTUnwrap(GitRunner.shared.query(in: repo, ["show", "HEAD:b.bin"]))
+        XCTAssertNotEqual(Data(text.utf8), blob)
+        XCTAssertGreaterThan(Data(text.utf8).count, blob.count)
+        XCTAssertTrue(text.contains("\u{FFFD}"))
+    }
+
+    func testRunDataThrowsOnANonzeroExitAndCarriesStderr() throws {
+        let repo = try makeRepo("raw-fail")
+        XCTAssertThrowsError(try GitRunner.shared.runData(in: repo, ["show", "HEAD:nope"])) { error in
+            XCTAssertTrue("\(error)".contains("failed"), "got: \(error)")
+        }
+        XCTAssertNil(GitRunner.shared.queryData(in: repo, ["show", "HEAD:nope"]))
+    }
+
+    func testCaptureDataAndCaptureAgreeOnStatusAndStderr() throws {
+        let repo = try makeRepo("raw-status")
+        let raw = try GitRunner.shared.captureData(["-C", repo.path, "status", "--porcelain"])
+        let string = try GitRunner.shared.capture(["-C", repo.path, "status", "--porcelain"])
+        XCTAssertEqual(raw.status, 0)
+        XCTAssertEqual(raw.status, string.status)
+        XCTAssertEqual(String(decoding: raw.stdout, as: UTF8.self), string.stdout)
+        XCTAssertEqual(raw.stderr, string.stderr)
     }
 }
