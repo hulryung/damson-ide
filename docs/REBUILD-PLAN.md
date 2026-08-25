@@ -735,7 +735,18 @@ and the harness. Owns: scripts/e2e-headless.sh, Sources/OrchardRuntime/Automatio
 Tests/** for automations, docs. Does not touch WorkerVerbs.swift,
 OrchardTerminals, or OrchardApp.
 
-### Wave 15 (T57–T59, parallel)
+### Wave 15 (T57–T59, parallel) — MERGED 2026-08-25, 986 tests
+
+T57 dogfood-4: cycle clean (ready 7s, settled 17s, no app exit — T51 holding), T54
+VERIFIED LIVE on a fresh archive (cleaned = raw minus chrome, respacedLines 0, no
+T50 shapes) and pinned as the 4th fixture; automations fired live (decision B).
+T58: spinner ticks coalesce in place in the stream ring (uncoalesced, 10fps filled
+the 10k ring in ~16.7min). T59: adopted panes re-fit on first framed paint (root
+cause was ORDER — replay landed before the surface had a frame); coordinator
+verified the primary case live post-relaunch: first row renders unclipped.
+Engine notes: cursor stalls on plan-approval prompts for design-y tasks
+(agent_prompt_stalled; the orphan keeps running fenced — stop the terminal before
+re-dispatch); codex still blocked on its update prompt.
 
 **T57 — Dogfood cycle 4 (report + fixture pin).** On the current build, via the CLI
 only (the app is the user's; never launch/quit it, never touch terminals/worktrees you
@@ -768,6 +779,21 @@ extractable; document what needs a human visual pass after relaunch. Owns:
 Sources/OrchardApp/TerminalPaneHost.swift, Sources/OrchardApp/KeeperRestart.swift,
 minimal OrchardTerminals adoption touchpoints if strictly needed, matching tests.
 Does not touch TerminalStreamBuffer.swift, fixtures, or main.swift.
+
+### Wave 16 candidates (from dogfood-4, docs/reports/dogfood-4.md)
+
+Automations hardening: (1) fire-due races the in-process scheduler → double fire in
+one minute slot; (2) shell-provider fires PASTE the preamble+prompt into zsh but
+never execute it — the pane is left holding an unsubmitted paste carrying a live
+capability (also a hygiene issue: don't leave capabilities sitting in pane input);
+(3) '* * * * *' refires every minute until removed — consider a one-shot/`once`
+schedule and/or auto-disable after N failures; (4) automation dispatches never
+settle (worker-release lands retained/identity_unproven after worker-stop) — decide
+the settlement story for automation-fired workers. Plus: repo-remove verb (registry
+is permanent from the CLI today), typed errors still exit 0, help/flag nits,
+main.swift window-frame autosave (why the smaller-window adopted-fit case is the
+common one), and — only if clipping recurs — damson exposing an unconditional
+follow re-pin.
 
 ### Wave 13+ backlog
 
