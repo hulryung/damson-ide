@@ -59,6 +59,35 @@ final class AutomationServiceTests: XCTestCase {
         XCTAssertFalse(item.enabled)
     }
 
+    func testDueAndFireDueRecordCurrentMatchingSlot() async throws {
+        var fired: [String] = []
+        let (service, root) = try fixture { automation in
+            fired.append(automation.id)
+            return AutomationFireReceipt(worktreeId: "wt-live", terminalId: "term-live")
+        }
+        defer { try? FileManager.default.removeItem(at: root) }
+        var item = Automation(name: "now", trigger: .cron, time: "* * * * *", provider: "shell",
+                              prompt: "go", target: .repo("repo"))
+        item.createdAt = Date()
+        _ = try await service.create(item)
+        let now = Date()
+        let slots = await service.due(since: .distantPast, through: now)
+        XCTAssertEqual(slots.count, 1)
+        XCTAssertEqual(slots.first?.automation.id, item.id)
+        let runs = await service.fireDue(since: .distantPast, through: now)
+        XCTAssertEqual(fired, [item.id])
+        XCTAssertEqual(runs.count, 1)
+        XCTAssertEqual(runs.first?.outcome, .fired)
+        XCTAssertEqual(runs.first?.worktreeId, "wt-live")
+        XCTAssertEqual(runs.first?.terminalId, "term-live")
+        let history = await service.runs(automationId: item.id)
+        XCTAssertEqual(history.count, 1)
+        XCTAssertEqual(history.first?.worktreeId, "wt-live")
+        let again = await service.fireDue(since: .distantPast, through: now)
+        XCTAssertTrue(again.isEmpty, "the same minute must not fire twice")
+        XCTAssertEqual(fired.count, 1)
+    }
+
     func testSetEnabledTogglesLiveAndPersists() async throws {
         let (service, root) = try fixture { _ in AutomationFireReceipt() }
         defer { try? FileManager.default.removeItem(at: root) }

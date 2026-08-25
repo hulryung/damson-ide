@@ -78,15 +78,42 @@ public enum AutomationSchedule {
         throw AutomationScheduleError.invalid("no fire time within one year")
     }
     /// At most one slot per automation, even if several were missed while offline.
+    ///
+    /// The current UTC minute is also a candidate when it matches and has not
+    /// already been recorded. That is what makes an automation whose trigger
+    /// matches *now* immediately `due` (create hourly at this minute, or
+    /// `* * * * *`, then `fireDue`) instead of waiting for the next occurrence
+    /// after `createdAt`. `since` / `createdAt` still bound the historical walk
+    /// so a restart only catches the latest missed slot.
     public static func due(_ automations: [Automation], since: Date, through now: Date,
                            lastRuns: [String: Date] = [:], calendar: Calendar = .utc) -> [(Automation, Date)] {
         automations.compactMap { automation in
             guard automation.enabled else { return nil }
-            let lower = max(since, lastRuns[automation.id] ?? automation.createdAt)
-            guard let slot = try? nextFire(for: automation, after: lower, calendar: calendar), slot <= now else { return nil }
-            var latest = slot
-            while let next = try? nextFire(for: automation, after: latest, calendar: calendar), next <= now { latest = next }
-            return (automation, latest)
+            let last = lastRuns[automation.id]
+            let lower = max(since, last ?? automation.createdAt)
+            var latest: Date?
+            if let slot = try? nextFire(for: automation, after: lower, calendar: calendar), slot <= now {
+                latest = slot
+                while let next = try? nextFire(for: automation, after: latest!, calendar: calendar), next <= now {
+                    latest = next
+                }
+            }
+            if let current = minute(of: now, calendar: calendar),
+               current <= now,
+               (try? matches(automation, current, calendar: calendar)) == true,
+               last.map({ minute(of: $0, calendar: calendar) != current }) ?? true {
+                if latest == nil || current > latest! { latest = current }
+            }
+            return latest.map { (automation, $0) }
         }
+    }
+
+    /// Floor to the UTC (or `calendar`) minute. Used so "due immediately" is the
+    /// matching clock minute, not `now` with leftover seconds.
+    public static func minute(of date: Date, calendar: Calendar = .utc) -> Date? {
+        var components = calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date)
+        components.second = 0
+        components.nanosecond = 0
+        return calendar.date(from: components)
     }
 }

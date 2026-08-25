@@ -91,6 +91,16 @@ public struct Automation: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// One slot `automations due` / `fireDue` would start. Wire-only; not persisted.
+public struct AutomationDueSlot: Codable, Equatable, Sendable {
+    public var automation: Automation
+    public var scheduledAt: Date
+    public init(automation: Automation, scheduledAt: Date) {
+        self.automation = automation
+        self.scheduledAt = scheduledAt
+    }
+}
+
 public enum AutomationRunOutcome: String, Codable, Sendable { case fired, skipped, failed }
 
 public struct AutomationRun: Codable, Equatable, Identifiable, Sendable {

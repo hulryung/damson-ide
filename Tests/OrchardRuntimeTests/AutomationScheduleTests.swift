@@ -46,6 +46,35 @@ final class AutomationScheduleTests: XCTestCase {
             date("2026-08-24T10:00:00Z"))
     }
 
+    func testDueIncludesCurrentMatchingMinuteWhenCreatedDuringSlot() {
+        // Created in the matching minute must still be due now — otherwise the
+        // headless harness cannot drive due/fireDue without waiting an hour.
+        var item = automation(.hourly, "13:45")
+        item.createdAt = date("2026-08-25T13:45:30Z")
+        let now = date("2026-08-25T13:45:45Z")
+        let due = AutomationSchedule.due([item], since: .distantPast, through: now, calendar: calendar)
+        XCTAssertEqual(due.count, 1)
+        XCTAssertEqual(due.first?.1, date("2026-08-25T13:45:00Z"))
+    }
+
+    func testDueCurrentMinuteIsSkippedWhenAlreadyRecorded() {
+        var item = automation(.hourly, "13:45")
+        item.createdAt = date("2026-08-25T13:45:30Z")
+        let now = date("2026-08-25T13:45:45Z")
+        let slot = date("2026-08-25T13:45:00Z")
+        let due = AutomationSchedule.due([item], since: .distantPast, through: now,
+                                         lastRuns: [item.id: slot], calendar: calendar)
+        XCTAssertTrue(due.isEmpty)
+    }
+
+    func testDueEveryMinuteCronIsDueImmediately() {
+        var item = automation(.cron, "* * * * *")
+        item.createdAt = date("2026-08-25T13:45:30Z")
+        let now = date("2026-08-25T13:45:45Z")
+        let due = AutomationSchedule.due([item], since: .distantPast, through: now, calendar: calendar)
+        XCTAssertEqual(due.first?.1, date("2026-08-25T13:45:00Z"))
+    }
+
     func testDueSkipsDisabledAutomations() {
         var item = automation(.hourly, "00:15")
         item.createdAt = date("2026-08-23T08:00:00Z")

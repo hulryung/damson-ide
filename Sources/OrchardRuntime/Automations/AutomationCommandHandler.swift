@@ -3,7 +3,8 @@ import OrchardProtocol
 
 public struct AutomationCommandHandler: CommandHandler {
     public let verbs = ["automations-list", "automations-show", "automations-create",
-                        "automations-edit", "automations-remove", "automations-run", "automations-runs"]
+                        "automations-edit", "automations-remove", "automations-run", "automations-runs",
+                        "automations-due", "automations-fire-due", "automations-fireDue"]
     private let service: AutomationService
     public init(service: AutomationService) { self.service = service }
     public func handle(_ request: RPCRequest) async -> RPCResponse {
@@ -22,9 +23,36 @@ public struct AutomationCommandHandler: CommandHandler {
         case "automations-remove": return .object(["removed": .bool(try await service.remove(try identifier(p)))])
         case "automations-run": return try JSONBridge.value(try await service.run(id: try identifier(p)))
         case "automations-runs": return try JSONBridge.value(["runs": await service.runs(automationId: p["id"]?.stringValue)])
+        case "automations-due":
+            let window = try dueWindow(p)
+            let slots = await service.due(since: window.since, through: window.through)
+            return try JSONBridge.value(["due": slots.map { AutomationDueSlot(automation: $0.automation, scheduledAt: $0.scheduledAt) }])
+        case "automations-fire-due", "automations-fireDue":
+            let window = try dueWindow(p)
+            let runs = await service.fireDue(since: window.since, through: window.through)
+            return try JSONBridge.value(["runs": runs])
         default: throw AutomationScheduleError.invalid("unknown automation command")
         }
     }
+    /// `since` / `through` are unix seconds. Absent `since` is distantPast (same
+    /// first-pass window the in-process scheduler uses); absent `through` is now.
+    private func dueWindow(_ p: [String: JSONValue]) throws -> (since: Date, through: Date) {
+        (since: try dateParam(p, "since", default: .distantPast),
+         through: try dateParam(p, "through", default: Date()))
+    }
+
+    private func dateParam(_ p: [String: JSONValue], _ key: String, default fallback: Date) throws -> Date {
+        guard let value = p[key] else { return fallback }
+        if let number = value.numberValue { return Date(timeIntervalSince1970: number) }
+        if let text = value.stringValue {
+            if let number = Double(text) { return Date(timeIntervalSince1970: number) }
+            let iso = ISO8601DateFormatter()
+            iso.formatOptions = [.withInternetDateTime]
+            if let date = iso.date(from: text) { return date }
+        }
+        throw AutomationScheduleError.invalid("\(key) must be unix seconds or ISO-8601")
+    }
+
     private func identifier(_ p: [String: JSONValue]) throws -> String {
         guard let id = p["id"]?.stringValue ?? p["name"]?.stringValue else { throw AutomationScheduleError.invalid("--id is required") }; return id
     }
