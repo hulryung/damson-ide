@@ -219,6 +219,12 @@ struct TabGroupPane: View {
                             store.toggleViewMode(tab.id, in: group.id, key: key)
                         }
                     }
+                    if tab.kind == .terminal {
+                        Button("Float Terminal") {
+                            store.openFloatingTerminal(tab: tab, key: key)
+                        }
+                        .disabled(store.existingDamsonSession(for: tab) == nil)
+                    }
                     Button("Close Tab") { store.closeTab(tab.id, in: group.id, key: key) }
                 }
             }
@@ -389,7 +395,11 @@ struct TerminalPane: View {
 
     var body: some View {
         Group {
-            if let session = store.damsonSession(for: tab, key: key, cwd: cwd) {
+            if !FloatingTerminalPolicy.workbenchHoldsSurface(
+                tabID: tab.id, floatingTabID: store.floatingTerminal?.tabID)
+            {
+                floatedPlaceholder
+            } else if let session = store.damsonSession(for: tab, key: key, cwd: cwd) {
                 ZStack(alignment: .top) {
                     // The PTY stays in the tree so chat is an overlay, never a
                     // second session. Keyboard focus leaves it while chat is up.
@@ -430,6 +440,27 @@ struct TerminalPane: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { store.prepareChat(for: tab) }
     }
+
+    private var floatedPlaceholder: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "rectangle.on.rectangle")
+                .font(.system(size: 34, weight: .light))
+                .foregroundStyle(Tokens.textTertiary)
+            Text("Floating")
+                .font(.title3)
+                .foregroundStyle(Tokens.textSecondary)
+            Text("This pane's session is in the always-on-top window. Close that window to bring it back — the session stays alive.")
+                .font(Tokens.fontMeta)
+                .foregroundStyle(Tokens.textTertiary)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: 360)
+            Button("Reveal Floating Window") { store.revealFloatingTerminal() }
+                .buttonStyle(.borderless)
+                .font(Tokens.fontRow)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Tokens.background)
+    }
 }
 
 /// What a remote pane says when its connection ended, and the one action that can
@@ -439,7 +470,7 @@ struct TerminalPane: View {
 /// happening on the far side is unverifiable, and reconnecting opens a *new*
 /// connection rather than resuming the old one. The button says "Reconnect" for the
 /// same reason — "Resume" or "Reattach" would claim a continuity nobody can prove.
-private struct ConnectionEndedBanner: View {
+struct ConnectionEndedBanner: View {
     @EnvironmentObject var store: AppStore
     let tab: WorkbenchTab
     let note: String

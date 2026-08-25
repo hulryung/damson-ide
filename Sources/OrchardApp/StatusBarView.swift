@@ -1,22 +1,105 @@
 import SwiftUI
 import AppKit
+import OrchardCore
 import OrchardRuntime
+import OrchardTerminals
 
-/// Bottom status bar. The ports summary is the T20 surface: count plus the first
-/// few ports; click reveals the full attributed list.
+/// Bottom status bar. Workspace + branch, live agent counts by T67 dashboard
+/// bucket, T51 runtime presence, and the T20 ports chip.
 struct StatusBarView: View {
     @EnvironmentObject var store: AppStore
     @State private var showingPorts = false
 
     var body: some View {
         HStack(spacing: 8) {
+            WorkspaceStatusChip(line: workspaceLine)
+            AgentBucketStatusChip(summary: bucketSummary, counts: bucketCounts) {
+                store.showDashboard?()
+            }
             Spacer(minLength: 8)
+            RuntimeStatusChip(presence: store.runtimePresence)
             PortsStatusChip(ports: store.portSnapshot.ports, isPresented: $showingPorts)
         }
         .padding(.horizontal, 10)
         .frame(height: Tokens.statusBarHeight)
         .background(Tokens.sidebar)
         .overlay(alignment: .top) { Divider() }
+    }
+
+    private var workspaceLine: String {
+        StatusBarProjection.workspaceLine(name: store.statusBarWorkspace.name,
+                                          branch: store.statusBarWorkspace.branch)
+    }
+
+    private var bucketCounts: [StatusBarBucketCount] {
+        store.statusBarBucketCounts()
+    }
+
+    private var bucketSummary: String {
+        StatusBarProjection.bucketSummary(bucketCounts)
+    }
+}
+
+private struct WorkspaceStatusChip: View {
+    let line: String
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "internaldrive")
+                .font(.system(size: 10, weight: .semibold))
+            Text(line)
+                .font(Tokens.fontMeta)
+                .lineLimit(1)
+        }
+        .foregroundStyle(Tokens.textSecondary)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .help(line)
+    }
+}
+
+private struct AgentBucketStatusChip: View {
+    let summary: String
+    let counts: [StatusBarBucketCount]
+    let openDashboard: () -> Void
+
+    var body: some View {
+        Button(action: openDashboard) {
+            Text(summary)
+                .font(Tokens.fontMeta)
+                .monospacedDigit()
+                .lineLimit(1)
+                .foregroundStyle(Tokens.textSecondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .help(help)
+    }
+
+    private var help: String {
+        let lines = counts.map { "\($0.id) \($0.count)" }.joined(separator: "\n")
+        return "Live agents by dashboard bucket\n\(lines)"
+    }
+}
+
+private struct RuntimeStatusChip: View {
+    let presence: WindowLifecycle.RuntimeIndication
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(presence.isAlive ? Color.green.opacity(0.85) : Tokens.textTertiary)
+                .frame(width: 6, height: 6)
+            Text(StatusBarProjection.runtimeChip(presence))
+                .font(Tokens.fontMeta)
+                .lineLimit(1)
+        }
+        .foregroundStyle(Tokens.textSecondary)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .help(StatusBarProjection.runtimeChip(presence))
     }
 }
 

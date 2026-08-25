@@ -13,6 +13,7 @@ final class WindowFrameAutosaveTests: XCTestCase {
             "OrchardOrchestrationWindow",
             "OrchardAutomationsWindow",
             "OrchardVaultWindow",
+            "OrchardFloatingTerminalWindow",
         ])
         XCTAssertEqual(Set(names).count, names.count, "autosave names must stay unique")
         XCTAssertTrue(names.allSatisfy { !$0.isEmpty })
@@ -37,6 +38,10 @@ final class WindowFrameAutosaveTests: XCTestCase {
         XCTAssertEqual(
             WindowFrameAutosave.defaultContentSize(for: .vault),
             WindowFrameAutosave.Size(width: 1080, height: 640))
+        XCTAssertEqual(
+            WindowFrameAutosave.defaultContentSize(for: .floatingTerminal),
+            WindowFrameAutosave.Size(width: 560, height: 320),
+            "floating terminal is a small always-on-top window, not a second workbench")
     }
 
     func testCenterOnlyWhenNoSavedFrameWasRestored() {
