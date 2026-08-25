@@ -57,6 +57,8 @@ final class AppStore: ObservableObject {
     @Published var pendingDeletion: PendingDeletion?
     @Published var isJumpPaletteOpen = false
     @Published var isOpenRemotePresented = false
+    /// Right-sidebar section (files explorer vs source-control). Session-only.
+    @Published var rightSidebarSection: RightSidebarSection = .files
 
     /// Single unread source for cards and the dashboard. Views must not keep
     /// their own sets — fold events through `UnreadReducer`.
