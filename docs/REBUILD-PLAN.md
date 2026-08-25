@@ -1119,6 +1119,50 @@ OrchardProtocol/CommandSpec.swift + guides, the worktree/project handlers in
 OrchardRuntime/Workspaces/**, WorkerVerbs' read path for `hasOlder`, matching tests.
 Does not touch Files/**, WorktreeManager.swift, Conflicts/**, or Automations.
 
+### Wave 22 (T79–T81) — the last two open items
+
+A real SSH transport is available for this wave: host `orchard-loopback`
+(127.0.0.1:2222, user-space sshd started by the coordinator, `orchard host check
+--name orchard-loopback` → reachable). The coordinator tears it down at the end.
+
+**T79 — Unregister a remote repo without touching the far side.** Wave-21 teardown
+found that once a remote repo's worktrees are enumerated, `repo remove` refuses
+(`repo_in_use`) naming worktrees that live on the remote — and `worktree rm` would
+delete the far side's real worktrees, which is not what un-registering a view means.
+The registry row had to be pruned from orchard-data.json by hand. Add a registry-only
+unregister: drop the repo row and the *local rows projecting* its remote worktrees,
+touching nothing on the host. Decide and document the spelling (`repo remove --forget`
+or a `repo forget` subverb); a LOCAL repo must still refuse rather than silently
+forgetting worktrees that exist on this machine. Typed errors, human + JSON faces,
+CommandSpec + guide. Verify live against `orchard-loopback`: register the remote repo,
+list its worktrees, unregister, confirm `repo list` is clean, `worktree list` no longer
+projects them, and the remote's worktrees are all still there over ssh. Owns
+Sources/orchard/**, the repo-registry handler, CommandSpec/guides, matching tests.
+Does not touch WorkerVerbs, Automations, Conflicts/**, or OrchardTerminals.
+
+**T80 — Supervised dispatch to a remote host.** `worker-start` against a remote
+worktree still answers `remote_unsupported`. T78 delivered the missing precondition
+(the pane carries the five ORCHARD_* variables and the reverse-forward hook grant
+completes), so the lifecycle contract can now reach the far side. Make a supervised
+worker run on a remote host end to end: dispatch preamble injected into the remote
+agent, capability minted and usable from over there, `send`/`check`/`worker_done`
+crossing the tunnel, exit reconciliation and `worker-release` archiving the remote
+pane's output. Where a piece genuinely cannot work remotely, refuse it typed and
+say so in the report instead of pretending. Verify live against `orchard-loopback`
+with a real supervised worker (a shell worker is enough — do not spend an agent
+seat), and report exactly what crossed the tunnel. Owns
+OrchardRuntime/Orchestration/WorkerVerbs*.swift and the remote paths it needs in
+OrchardTerminals, matching tests, docs/reports/t80-remote-dispatch.md. Does not
+touch the repo registry (T79), Files/**, or Conflicts/**.
+
+**T81 — Dogfood cycle 7 (report-only).** Once T79 and T80 are merged the coordinator
+will say so. Then, CLI only (never launch/quit the app; never touch terminals or
+worktrees you did not create): run a local supervised cycle, a REMOTE supervised
+cycle against `orchard-loopback`, exercise `repo` unregister on a remote repo, and
+regression-sweep waves 19–21 (byte-exact conflicts, file fidelity, once automations,
+typed exits, `hasOlder`, `project`/`worktree` subverbs). Report
+docs/reports/dogfood-7.md with a findings table. Owns only that report.
+
 ### Backlog status (2026-08-26) — closed
 
 Every item the earlier waves deferred is now resolved:
