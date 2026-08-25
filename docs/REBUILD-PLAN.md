@@ -677,13 +677,13 @@ OrchardRuntime/Orchestration verb logic.
 ### Wave 13+ backlog
 
 From dogfood cycle 3: the "transient app exit" during the cycle matches a clean
-window-close (no crash log, metadata removed cleanly) —
-applicationShouldTerminateAfterLastWindowClosed is true, so closing the window kills
-the runtime and every supervised flow with it. An orchestrator hosting a runtime
-should keep running when its window closes (Dock icon reopens it); change that and
-have the status bar/menu show the runtime is still alive. Archive word-collapse
-persists in TUI frames (Taskcompleteanddispatchsettled) — a third cleaner pass or
-accepting raw-only for TUI frames.
+window-close (no crash log, metadata removed cleanly). T51 changes that
+lifecycle — closing the workbench keeps the in-process runtime alive; Dock /
+windowless activation restore it; Cmd-Q still takes the T23 termination path;
+the Dock and Orchard menus show a truthful "Runtime alive · rt_…" while the
+socket is listening. Human visual pass: `docs/reports/t51-window-lifecycle.md`.
+Archive word-collapse persists in TUI frames (Taskcompleteanddispatchsettled)
+— a third cleaner pass or accepting raw-only for TUI frames.
 
 Intermittent single-test failure in full-suite runs: likely root-caused by the
 accepted-socket O_NONBLOCK inheritance regression (fixed post-wave-11 — accepted
