@@ -33,6 +33,9 @@ public final class TerminalRecord {
     /// Accumulated parsed-text stream (the `read` default source). Pane-scoped: it
     /// survives respawns so the pane's history reads continuously.
     var buffer = TerminalStreamBuffer()
+    /// Per-burst print-vs-paint capture into `buffer` (T54): printed text is appended
+    /// as it arrives; a cursor-addressed repaint is captured from the rendered frame.
+    var capture = TerminalCaptureCollector()
     let tracker = AgentStatusTracker()
 
     public private(set) var lastOutputAt: Date?
@@ -88,27 +91,39 @@ public final class TerminalRecord {
     public var connected: Bool { !exited && !session.processExited }
 
     /// Subscribe this record's stream buffer and activity clock to a session's output.
+    ///
+    /// One PTY chunk arrives as `outputBytes` → its parsed `outputEvents` → one
+    /// `gridChanged`, all synchronously (damson's `handlePTYData`; the scripted fake
+    /// keeps the same order). The collector uses exactly that framing: the chunk's
+    /// events are classified as a print or a paint, and the stream is fed at the
+    /// closing `gridChanged`, when the grid holds the chunk's finished paint.
     private func attach(session: TerminalSession) {
-        session.outputEvents
-            .sink { [weak self] event in
+        session.outputBytes
+            .sink { [weak self] _ in
                 guard let self else { return }
-                switch event {
-                case .text(let s):
-                    self.buffer.appendText(s)
-                case .control(let byte):
-                    self.buffer.appendControl(byte)
-                case .osc:
-                    break
-                }
+                self.noteActivity()
+                self.capture.beginBurst()
             }
             .store(in: &cancellables)
-        // The raw byte stream is the activity clock: it fires for every output chunk,
-        // including repaint-only bursts (pure CSI) that yield no text/control events —
-        // so previews/staleness read correctly without piggybacking on `gridChanged`,
-        // which also fires for local mutations like a resize.
-        session.outputBytes
-            .sink { [weak self] _ in self?.noteActivity() }
+        session.outputEvents
+            .sink { [weak self] event in self?.capture.observe(event) }
             .store(in: &cancellables)
+        session.gridChanged
+            .sink { [weak self] in
+                guard let self else { return }
+                self.capture.endBurst(grid: session.gridSnapshot(),
+                                      scrolledOff: session.scrolledOffLines(fromAbsoluteRow:),
+                                      into: &self.buffer)
+            }
+            .store(in: &cancellables)
+    }
+
+    /// Nothing more will close a frame on this session (exit, close, respawn): capture
+    /// what is on the screen now and append any print the collector was holding.
+    func flushPendingCapture() {
+        capture.flush(grid: session.gridSnapshot(),
+                      scrolledOff: session.scrolledOffLines(fromAbsoluteRow:),
+                      into: &buffer)
     }
 
     /// Mark the pane as having produced output. Keeper adoption seeds this so a
@@ -126,7 +141,11 @@ public final class TerminalRecord {
     /// it or the pane would keep advertising a channel it no longer has.
     func adopt(handle: String, session: TerminalSession, agentSession: AgentSession,
                spec: TerminalCreateSpec? = nil) {
+        flushPendingCapture()
         cancellables.removeAll()
+        // The new engine's grid counts rows from zero; its frames must not be diffed
+        // against the outgoing one's baseline.
+        capture.resetBaselines()
         if let spec { self.spec = spec }
         self.handle = handle
         self.incarnation += 1

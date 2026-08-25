@@ -186,6 +186,7 @@ public final class TerminalService {
             record.session.terminate()
         }
         record.exited = true
+        record.flushPendingCapture()
         // A deliberate close settles every outstanding wait: exit waiters resolve,
         // tui-idle waiters reject (the pane can never reach idle again).
         settleWaiters(record, exitCode: record.exitCode ?? record.session.exitCode)
@@ -858,6 +859,7 @@ public final class TerminalService {
         case .finished(let code):
             record.exited = true
             record.exitCode = code
+            record.flushPendingCapture()
             settleWaiters(record, exitCode: code)
             // The processExited guard keeps a straggler state change from a replaced
             // (respawned-away) session from reporting the live incarnation as dead.
@@ -868,6 +870,7 @@ public final class TerminalService {
             if record.session.processExited {
                 record.exited = true
                 record.exitCode = record.session.exitCode
+                record.flushPendingCapture()
                 settleWaiters(record, exitCode: record.exitCode)
                 notifyExit(record, deliberate: false)
             }

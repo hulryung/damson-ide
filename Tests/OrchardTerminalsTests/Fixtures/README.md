@@ -25,7 +25,11 @@ terminal whose paste never emitted its empty cells, so most of the capture arriv
 already collapsed (`Tipsforgettingstarted`) and some of it arrives with letters
 missing (`paste gain to expad` for "paste again to expand", `coorinator` for
 "coordinator"). That damage is upstream of the cleaner — see
-`docs/design/terminal-capture-fidelity.md`.
+`docs/design/terminal-capture-fidelity.md` — and T54 root-caused and fixed it
+(`docs/design/capture-fidelity-upstream.md`; `UpstreamCaptureFidelityTests` reproduces
+the same shapes from a scripted cell-diff paint through the real engine). Captures
+pinned after T54 will read as whole rows; these three are kept verbatim as the record
+of what the cleaner was built against.
 
 ## How these were extracted
 

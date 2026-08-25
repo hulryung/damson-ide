@@ -26,6 +26,11 @@ public final class ScriptedTerminalSession: TerminalSession {
     public var gridRows: Int = 24
     public var isAltScreen = true
     public var inSyncOutputMode = false
+    /// Absolute index of `screenLines[0]` — bump it when a scripted screen scrolls, and
+    /// append the rows that left the top to `scrolledOff` so frame capture can read
+    /// them back the way it reads damson's scrollback.
+    public var firstRowIndex = 0
+    public var scrolledOff: [String] = []
 
     public var config: DamsonConfig
     public private(set) var processExited = false
@@ -71,7 +76,14 @@ public final class ScriptedTerminalSession: TerminalSession {
             lines: screenLines, cursorRow: 0, cursorCol: 0,
             cols: max(gridCols, 1),
             rows: max(gridRows, screenLines.count, 1),
-            isAltScreen: isAltScreen, inSyncOutputMode: inSyncOutputMode)
+            isAltScreen: isAltScreen, inSyncOutputMode: inSyncOutputMode,
+            firstRowIndex: firstRowIndex)
+    }
+
+    public func scrolledOffLines(fromAbsoluteRow: Int) -> [String] {
+        // `scrolledOff` holds absolute rows 0..<firstRowIndex, oldest first.
+        let start = max(0, min(fromAbsoluteRow, scrolledOff.count))
+        return Array(scrolledOff[start...])
     }
 
     // MARK: - Scripting
@@ -101,6 +113,20 @@ public final class ScriptedTerminalSession: TerminalSession {
             }
         }
         flush()
+        gridChangedSubject.send()
+    }
+
+    /// Emit one output chunk the way a cursor-addressed TUI paints: `events` are the
+    /// chunk's parsed events in order (text runs and the CSIs between them), and
+    /// `screen` is the grid after the chunk was applied. Fires `outputBytes` first and
+    /// `gridChanged` last, matching the engine's burst framing; `inSync` leaves the
+    /// scripted grid inside a DECSET-2026 frame at the closing `gridChanged`.
+    public func emitPaint(_ events: [TerminalOutputEvent], screen: [String],
+                          inSync: Bool = false) {
+        outputBytesSubject.send(Data())
+        for event in events { outputSubject.send(event) }
+        screenLines = screen
+        inSyncOutputMode = inSync
         gridChangedSubject.send()
     }
 

@@ -64,6 +64,16 @@ public struct TerminalStreamBuffer: Sendable {
         }
     }
 
+    /// Append one complete line captured from the rendered grid (T54 frame capture).
+    /// A still-open printed line is closed first, exactly as a CR would close it, so a
+    /// prompt that was mid-print when a repaint began is kept — never overwritten or
+    /// joined with the captured row.
+    public mutating func appendCapturedRow(_ row: String) {
+        if let current = lines.last, !current.isEmpty { breakLine() }
+        appendText(row)
+        breakLine()
+    }
+
     private mutating func breakLine() {
         lines.append("")
         if lines.count > maxLines {
