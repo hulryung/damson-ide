@@ -111,6 +111,16 @@ func formatHuman(method: String, result: JSONValue?, verbose: Bool = false) -> S
         return OrchardHumanFormatter.worktreeRm(result)
     case "repo-remove":
         return OrchardHumanFormatter.repoRemove(result)
+    case "conflicts-list":
+        return OrchardHumanFormatter.conflictsList(result)
+    case "conflicts-show":
+        return OrchardHumanFormatter.conflictsShow(result)
+    case "conflicts-take":
+        return OrchardHumanFormatter.conflictsTake(result)
+    case "conflicts-resolve":
+        return OrchardHumanFormatter.conflictsResolve(result)
+    case "conflicts-stage":
+        return OrchardHumanFormatter.conflictsStage(result)
     case "worktree-ps":
         return formatWorktreePs(result)
     case "workspace-ports":
@@ -276,12 +286,23 @@ do {
         let values: [JSONValue]
         if case let .array(parsedValues)? = parsed.params["_args"] { values = parsedValues } else { values = [] }
         let verb = values.first?.stringValue ?? "list"
+        let topics = OrchestrationContract.topics + [ConflictsGuide.topic]
         if verb == "list", values.isEmpty || values.count == 1 {
-            if parsed.json { let data = try JSONEncoder.pretty.encode(["topics": OrchestrationContract.topics]); FileHandle.standardOutput.write(data + Data("\n".utf8)) }
-            else { print(GuideTopicFormatter.render(OrchestrationContract.topics)) }
-        } else if verb == "get", values.count == 2, values[1].stringValue == "orchestration" {
-            if parsed.json { let data = try JSONEncoder.pretty.encode(["topic": "orchestration", "content": OrchestrationContract.coordinatorGuide]); FileHandle.standardOutput.write(data + Data("\n".utf8)) } else { print(OrchestrationContract.coordinatorGuide) }
-        } else { throw CLIError.usage("usage: orchard guide list | orchard guide get orchestration [--json]") }
+            if parsed.json { let data = try JSONEncoder.pretty.encode(["topics": topics]); FileHandle.standardOutput.write(data + Data("\n".utf8)) }
+            else { print(GuideTopicFormatter.render(topics)) }
+        } else if verb == "get", values.count == 2, let topic = values[1].stringValue {
+            let content: String
+            switch topic {
+            case "orchestration": content = OrchestrationContract.coordinatorGuide
+            case ConflictsGuide.topic: content = ConflictsGuide.content
+            default:
+                throw CLIError.usage("usage: orchard guide list | orchard guide get orchestration|conflicts [--json]")
+            }
+            if parsed.json {
+                let data = try JSONEncoder.pretty.encode(["topic": topic, "content": content])
+                FileHandle.standardOutput.write(data + Data("\n".utf8))
+            } else { print(content) }
+        } else { throw CLIError.usage("usage: orchard guide list | orchard guide get orchestration|conflicts [--json]") }
     default:
         var method = parsed.spec.name, params = parsed.params
         params.removeValue(forKey: "json")
@@ -357,6 +378,25 @@ do {
                 params["path"] = values[1]
             }
             if params["cwd"] == nil { params["cwd"] = .string(FileManager.default.currentDirectoryPath) }
+        }
+        if method == "conflicts" {
+            guard case let .array(values)? = params.removeValue(forKey: "_args"),
+                  let subcommand = values.first?.stringValue else {
+                throw CLIError.usage("usage: orchard conflicts list|show|take|resolve|stage [options]")
+            }
+            let known = ["list", "show", "take", "resolve", "stage"]
+            guard known.contains(subcommand) else {
+                throw CLIError.usage("usage: orchard conflicts list|show|take|resolve|stage [options]")
+            }
+            method = "conflicts-\(subcommand)"
+            if subcommand != "list", values.count > 1, params["path"] == nil {
+                params["path"] = values[1]
+            } else if subcommand == "list", values.count > 1, params["worktree"] == nil {
+                params["worktree"] = values[1]
+            }
+            if params["cwd"] == nil {
+                params["cwd"] = .string(FileManager.default.currentDirectoryPath)
+            }
         }
         let response = try callRuntime(method: method, params: .object(params))
         if parsed.json {

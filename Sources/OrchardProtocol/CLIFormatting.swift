@@ -185,6 +185,98 @@ public enum OrchardHumanFormatter {
         return "\(hours / 24)d ago"
     }
 
+    public static func conflictsList(_ result: JSONValue?) -> String {
+        let object = result?.objectValue ?? [:]
+        let headline = object["headline"]?.stringValue ?? "No conflicts"
+        var lines = [headline]
+        let files = object["files"]?.arrayValue ?? []
+        for file in files {
+            let row = file.objectValue ?? [:]
+            let code = row["kindCode"]?.stringValue ?? "??"
+            let path = row["path"]?.stringValue ?? "?"
+            let label = row["kindLabel"]?.stringValue ?? ""
+            lines.append("  \(code)  \(path)  \(label)")
+        }
+        if let hint = object["nextStepHint"]?.stringValue, !hint.isEmpty {
+            lines.append(hint)
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public static func conflictsShow(_ result: JSONValue?) -> String {
+        let object = result?.objectValue ?? [:]
+        let path = object["path"]?.stringValue ?? "?"
+        let kind = object["kindLabel"]?.stringValue ?? object["kind"]?.stringValue ?? ""
+        let code = object["kindCode"]?.stringValue ?? ""
+        var header = path
+        if !kind.isEmpty {
+            header += "  \(kind)"
+            if !code.isEmpty { header += " (\(code))" }
+        }
+        var lines = [header]
+        let hunks = object["hunks"]?.arrayValue ?? []
+        if hunks.isEmpty {
+            if object["readable"]?.boolValue == false {
+                lines.append("  not readable as text; use conflicts take --side ours|theirs")
+            } else {
+                lines.append("  no inline hunks; use conflicts take --side ours|theirs")
+            }
+            if let ours = object["actionOurs"]?.stringValue { lines.append("  ours: \(ours)") }
+            if let theirs = object["actionTheirs"]?.stringValue { lines.append("  theirs: \(theirs)") }
+        } else {
+            for hunk in hunks {
+                let row = hunk.objectValue ?? [:]
+                let index = row["index"]?.numberValue.map { Int($0) } ?? 0
+                let start = row["startLine"]?.numberValue.map { Int($0) } ?? 0
+                lines.append("  hunk \(index)  line \(start)")
+                let oursLabel = row["oursLabel"]?.stringValue ?? "ours"
+                lines.append("    ours (\(oursLabel)):")
+                for line in row["ours"]?.arrayValue ?? [] {
+                    lines.append("      \(line.stringValue ?? "")")
+                }
+                if let base = row["base"]?.arrayValue {
+                    let baseLabel = row["baseLabel"]?.stringValue ?? "base"
+                    lines.append("    base (\(baseLabel)):")
+                    for line in base { lines.append("      \(line.stringValue ?? "")") }
+                }
+                let theirsLabel = row["theirsLabel"]?.stringValue ?? "theirs"
+                lines.append("    theirs (\(theirsLabel)):")
+                for line in row["theirs"]?.arrayValue ?? [] {
+                    lines.append("      \(line.stringValue ?? "")")
+                }
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public static func conflictsTake(_ result: JSONValue?) -> String {
+        let object = result?.objectValue ?? [:]
+        let path = object["path"]?.stringValue ?? "?"
+        let side = object["side"]?.stringValue ?? "side"
+        if object["deleted"]?.boolValue == true {
+            return "Took \(side) for \(path) (deleted, staged)."
+        }
+        return "Took \(side) for \(path) (staged)."
+    }
+
+    public static func conflictsResolve(_ result: JSONValue?) -> String {
+        let object = result?.objectValue ?? [:]
+        let path = object["path"]?.stringValue ?? "?"
+        let hunk = object["hunk"]?.numberValue.map { Int($0) } ?? 0
+        let choice = object["choice"]?.stringValue ?? "choice"
+        if object["staged"]?.boolValue == true {
+            return "Resolved hunk \(hunk) of \(path) as \(choice) (staged)."
+        }
+        let remaining = object["remainingHunks"]?.numberValue.map { Int($0) } ?? 0
+        let noun = remaining == 1 ? "hunk" : "hunks"
+        return "Resolved hunk \(hunk) of \(path) as \(choice) (\(remaining) \(noun) remaining, not staged)."
+    }
+
+    public static func conflictsStage(_ result: JSONValue?) -> String {
+        let path = result?.objectValue?["path"]?.stringValue ?? "?"
+        return "Staged \(path)."
+    }
+
     /// Compact receipt for `orchard repo remove` without `--json`.
     public static func repoRemove(_ result: JSONValue?) -> String {
         let object = result?.objectValue ?? [:]

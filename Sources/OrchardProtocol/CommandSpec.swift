@@ -150,7 +150,8 @@ public enum OrchardCommands {
             CommandSpec(name: "guide", summary: "Read an embedded version-matched guide",
                         usage: "orchard guide [list | get <topic>] [--json]",
                         flags: [json], positionalArgs: ["list | get <topic>"],
-                        examples: ["orchard guide", "orchard guide get orchestration"],
+                        examples: ["orchard guide", "orchard guide get orchestration",
+                                   "orchard guide get conflicts"],
                         notes: ["With no arguments, lists the available topics."]),
             command("version", "Print the CLI version"),
             command("run-create", "Create an orchestration run", [flag("objective", "Run objective", "text", required: true), from, retry]),
@@ -246,6 +247,37 @@ public enum OrchardCommands {
                 flag("exclude", "Content-search exclude glob", "glob"),
                 flag("limit", "Maximum content-search matches", "n"),
             ], positionals: ["open|diff|open-changed|search", "path|query"]),
+            CommandSpec(
+                name: "conflicts",
+                summary: "List, inspect, and resolve git merge conflicts in a worktree",
+                usage: "orchard conflicts list|show|take|resolve|stage [options]",
+                flags: [
+                    flag("worktree", "Worktree selector", "selector"),
+                    flag("path", "Repo-relative conflicted path", "path"),
+                    enumerated("side", "Whole-file side for take", "ours|theirs",
+                               ["ours", "theirs"]),
+                    flag("hunk", "Hunk index as reported by conflicts show (0-based)", "n"),
+                    enumerated("choice", "Per-hunk choice for resolve", "ours|theirs|both",
+                               ["ours", "theirs", "both"]),
+                    flag("cwd", "Working directory for worktree resolution", "path"),
+                    json,
+                ],
+                positionalArgs: ["list|show|take|resolve|stage"],
+                examples: [
+                    "orchard conflicts list --worktree <selector>",
+                    "orchard conflicts show --path src/a.swift --worktree <selector>",
+                    "orchard conflicts take --path src/a.swift --side ours --worktree <selector>",
+                    "orchard conflicts resolve --path src/a.swift --hunk 0 --choice theirs --worktree <selector>",
+                    "orchard conflicts stage --path src/a.swift --worktree <selector>",
+                ],
+                notes: [
+                    "Typed errors: invalid_argument, not_conflicted, hunk_not_found, cannot_read, conflict_markers_remain, remote_unsupported, git_error.",
+                    "conflicts stage refuses while conflict markers remain — it never stages a lie.",
+                    "This surface resolves files only. Finish the merge/rebase with git commit or git rebase --continue in a terminal.",
+                    "On a rebase, ours is the upstream and theirs is the replayed commit.",
+                    "Hunk indexes are 0-based as printed by conflicts show; after a partial resolve they are re-indexed from 0.",
+                    "Binary files and kinds without inline markers have no hunks — use conflicts take.",
+                ]),
             command("terminal", "List, create, inspect, and control runtime terminals", [
                 flag("worktree", "Worktree selector for list or create", "selector"),
                 flag("terminal", "Terminal handle", "handle"),
@@ -330,6 +362,7 @@ public enum CommandGroup: String, Codable, CaseIterable, Sendable {
     case worktree     // worktree list/show/current/create/set/rm/ps
     case repo         // repo list/add/show/remove
     case file         // file open/diff/open-changed/search
+    case conflicts    // conflicts list/show/take/resolve/stage
     case browser      // browser goto/…/tab (wave 2)
     case host         // host list/add/check (T29 remote hosts)
     case automations  // scheduled prompts
