@@ -173,7 +173,8 @@ public enum OrchardCommands {
                         examples: ["orchard guide", "orchard guide get orchestration",
                                    "orchard guide get conflicts",
                                    "orchard guide get worktree",
-                                   "orchard guide get project"],
+                                   "orchard guide get project",
+                                   "orchard guide get repo"],
                         notes: ["With no arguments, lists the available topics."]),
             command("version", "Print the CLI version"),
             command("run-create", "Create an orchestration run", [flag("objective", "Run objective", "text", required: true), from, retry]),
@@ -216,17 +217,36 @@ public enum OrchardCommands {
             // T32: `repo add --host ssh:<name>` registers a checkout that lives on a
             // registered host. The remote path is probed over a bounded ssh run before
             // the record exists, so a repo record is never a claim nobody checked.
-            command("repo", "Manage registered repositories", [
-                flag("path", "Repository path", "path"),
-                flag("repo", "Repository selector", "selector"),
-                flag("display-name", "Display name", "text"),
-                flag("base-ref", "Default base ref for new worktrees", "ref"),
-                flag("host", "Execution host: local (default) or ssh:<name>", "id"),
-            ], positionals: ["list|add|show|remove"], notes: [
-                "repo remove drops the registry row and orchard-data owned by the repo.",
-                "It refuses while extra worktrees or automations still reference the repo (typed repo_in_use, naming them). There is no --force.",
-                "A successful remove also rmdirs the empty ~/Orchard/worktrees/<repo>/ container (never recursively).",
-            ]),
+            CommandSpec(
+                name: "repo",
+                summary: "Manage registered repositories",
+                usage: "orchard repo list|add|show|remove [options]",
+                flags: [
+                    flag("path", "Repository path", "path"),
+                    flag("repo", "Repository selector", "selector"),
+                    flag("display-name", "Display name", "text"),
+                    flag("base-ref", "Default base ref for new worktrees", "ref"),
+                    flag("host", "Execution host: local (default) or ssh:<name>", "id"),
+                    flag("forget",
+                         "Unregister a remote repo without touching the host"),
+                    json,
+                ],
+                positionalArgs: ["list|add|show|remove"],
+                examples: [
+                    "orchard repo list",
+                    "orchard repo add --path <path>",
+                    "orchard repo add --path <path> --host ssh:<name> --display-name <name>",
+                    "orchard repo show --repo <selector>",
+                    "orchard repo remove --repo <selector>",
+                    "orchard repo remove --repo <selector> --forget",
+                ],
+                notes: [
+                    "repo remove drops the registry row and orchard-data owned by the repo.",
+                    "It refuses while extra worktrees or automations still reference the repo (typed repo_in_use, naming them). There is no --force.",
+                    "The spelling for a registry-only unregister is repo remove --forget, not a repo forget subverb. It drops the repo row and the local rows projecting its remote worktrees, and touches nothing on the host.",
+                    "A local repo refuses --forget (typed forget_local_refused) rather than silently dropping worktrees that live on this machine.",
+                    "A successful remove also rmdirs the empty ~/Orchard/worktrees/<repo>/ container (never recursively).",
+                ]),
             CommandSpec(
                 name: "worktree",
                 summary: "List, inspect, create, update, or remove worktrees; ps shows live processes and ports",
@@ -430,7 +450,7 @@ public enum CommandGroup: String, Codable, CaseIterable, Sendable {
     case terminal     // terminal list/create/read/send/wait/split/close/rename
     case worktree     // worktree list/show/current/create/set/rm/ps
     case project      // project list/show/current
-    case repo         // repo list/add/show/remove
+    case repo         // repo list/add/show/remove [--forget]
     case file         // file open/diff/open-changed/search
     case conflicts    // conflicts list/show/take/resolve/stage
     case browser      // browser goto/…/tab (wave 2)

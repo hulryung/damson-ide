@@ -46,7 +46,9 @@ public enum WorktreeGuide {
       `delete`. `--force` is required when dirty. `--delete-branch` runs
       `git branch -d` after a successful removal; `--force-branch` is `-D`.
       Refuses the repo primary checkout (`close the project instead`). Rmdirs
-      the empty per-repo container; never recursively.
+      the empty per-repo container; never recursively. A remote worktree's
+      `rm` deletes the checkout on the host. To drop Orchard's view of a
+      remote repo without touching the far side, use `repo remove --forget`.
 
     `orchard worktree ps [--repo <selector>] [--limit <n>]`
       Compact listing of live agent/shell processes and attributed listening

@@ -311,6 +311,7 @@ do {
         let verb = values.first?.stringValue ?? "list"
         let topics = OrchestrationContract.topics + [
             ConflictsGuide.topic, WorktreeGuide.topic, ProjectGuide.topic,
+            RepoGuide.topic,
         ]
         if verb == "list", values.isEmpty || values.count == 1 {
             if parsed.json { let data = try JSONEncoder.pretty.encode(["topics": topics]); FileHandle.standardOutput.write(data + Data("\n".utf8)) }
@@ -322,14 +323,15 @@ do {
             case ConflictsGuide.topic: content = ConflictsGuide.content
             case WorktreeGuide.topic: content = WorktreeGuide.content
             case ProjectGuide.topic: content = ProjectGuide.content
+            case RepoGuide.topic: content = RepoGuide.content
             default:
-                throw CLIError.usage("usage: orchard guide list | orchard guide get orchestration|conflicts|worktree|project [--json]")
+                throw CLIError.usage("usage: orchard guide list | orchard guide get orchestration|conflicts|worktree|project|repo [--json]")
             }
             if parsed.json {
                 let data = try JSONEncoder.pretty.encode(["topic": topic, "content": content])
                 FileHandle.standardOutput.write(data + Data("\n".utf8))
             } else { print(content) }
-        } else { throw CLIError.usage("usage: orchard guide list | orchard guide get orchestration|conflicts|worktree|project [--json]") }
+        } else { throw CLIError.usage("usage: orchard guide list | orchard guide get orchestration|conflicts|worktree|project|repo [--json]") }
     default:
         var method = parsed.spec.name, params = parsed.params
         params.removeValue(forKey: "json")
@@ -344,6 +346,10 @@ do {
                 params["id"] = rest[0]
             } else if method.hasPrefix("repo-") {
                 let verb = String(method.dropFirst("repo-".count))
+                if verb == "forget" {
+                    throw CLIError.usage(
+                        "repo forget is not a verb; unregister a remote view with orchard repo remove --repo <selector> --forget")
+                }
                 let known = ["list", "add", "show", "remove"]
                 guard known.contains(verb) else {
                     throw CLIError.usage("usage: orchard repo list|add|show|remove [options]")

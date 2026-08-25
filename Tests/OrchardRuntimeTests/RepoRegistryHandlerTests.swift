@@ -176,4 +176,127 @@ final class RepoRegistryHandlerTests: XCTestCase {
         XCTAssertEqual(removed.result?.objectValue?["id"]?.stringValue, record.id)
         XCTAssertTrue(service.listRepos().isEmpty)
     }
+
+    // MARK: - T79 repo remove --forget
+
+    /// Seed a remote repo + primary + one extra projected worktree. No ssh: the
+    /// listing path for remotes is the last-known set in orchard-data.
+    private func seedRemoteRepo(
+        _ service: WorkspaceService,
+        displayName: String = "RemoteOrchard"
+    ) throws -> (repo: RepoRecord, extraId: String) {
+        let repo = RepoRecord(path: "/srv/work/orchard", displayName: displayName,
+                              kind: .git, hostId: "ssh:build")
+        let extraPath = "/home/ci/Orchard/worktrees/orchard/apricot"
+        let extraId = RemoteWorktreeRecord.id(repoId: repo.id, path: extraPath)
+        try service.store.modify { data in
+            data.repos.append(repo)
+            data.remoteWorktrees.append(contentsOf: [
+                RemoteWorktreeRecord(
+                    id: RemoteWorktreeRecord.id(repoId: repo.id, path: repo.path),
+                    repoId: repo.id, hostId: "ssh:build", path: repo.path,
+                    branch: "main", isPrimary: true),
+                RemoteWorktreeRecord(
+                    id: extraId, repoId: repo.id, hostId: "ssh:build",
+                    path: extraPath, branch: "ci/apricot"),
+            ])
+        }
+        return (repo, extraId)
+    }
+
+    func testForgetDropsRemoteProjectionRowsAndLeavesHostUntouched() async throws {
+        let (handler, service) = try makeHandler()
+        let seeded = try seedRemoteRepo(service)
+        XCTAssertEqual(try service.listWorkspaces(repo: seeded.repo.id).count, 2)
+
+        let refused = await call(handler, "repo-remove", ["repo": .string(seeded.repo.id)])
+        XCTAssertFalse(refused.ok)
+        XCTAssertEqual(refused.error?.code, "repo_in_use")
+        XCTAssertTrue(refused.error?.message.contains("apricot") ?? false,
+                      refused.error?.message ?? "")
+        XCTAssertEqual(service.listRepos().map(\.id), [seeded.repo.id])
+        XCTAssertEqual(service.store.load().remoteWorktrees.count, 2)
+
+        let forgotten = await call(handler, "repo-remove", [
+            "repo": .string(seeded.repo.id), "forget": .bool(true),
+        ])
+        XCTAssertTrue(forgotten.ok, forgotten.error?.message ?? "")
+        let object = try XCTUnwrap(forgotten.result?.objectValue)
+        XCTAssertEqual(object["removed"]?.boolValue, true)
+        XCTAssertEqual(object["forgotten"]?.boolValue, true)
+        XCTAssertEqual(object["hostUntouched"]?.boolValue, true)
+        XCTAssertEqual(object["displayName"]?.stringValue, "RemoteOrchard")
+        let dropped = object["droppedWorktrees"]?.arrayValue ?? []
+        XCTAssertEqual(dropped.count, 1)
+        XCTAssertEqual(dropped.first?.objectValue?["id"]?.stringValue, seeded.extraId)
+        XCTAssertEqual(dropped.first?.objectValue?["displayName"]?.stringValue, "apricot")
+        XCTAssertEqual(dropped.first?.objectValue?["path"]?.stringValue,
+                       "/home/ci/Orchard/worktrees/orchard/apricot")
+
+        XCTAssertTrue(service.listRepos().isEmpty)
+        XCTAssertTrue(service.store.load().remoteWorktrees.isEmpty)
+        XCTAssertTrue(service.store.load().worktreeMeta.isEmpty)
+        XCTAssertTrue(try service.listWorkspaces().isEmpty)
+    }
+
+    func testForgetRefusesALocalRepoEvenWithOnlyThePrimary() async throws {
+        let (handler, service) = try makeHandler()
+        let path = try makeRepo()
+        let record = try service.addRepo(path: path, displayName: "LocalOnly")
+        XCTAssertEqual(try service.listWorkspaces(repo: record.id).count, 1)
+
+        let refused = await call(handler, "repo-remove", [
+            "repo": .string(record.id), "forget": .bool(true),
+        ])
+        XCTAssertFalse(refused.ok)
+        XCTAssertEqual(refused.error?.code, "forget_local_refused")
+        XCTAssertTrue(refused.error?.message.contains("local") ?? false,
+                      refused.error?.message ?? "")
+        XCTAssertEqual(refused.error?.data?.objectValue?["hostId"]?.stringValue, "local")
+        XCTAssertEqual(service.listRepos().map(\.id), [record.id])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path.path))
+    }
+
+    func testForgetRefusesALocalRepoWithExtraWorktreesRatherThanDroppingThem() async throws {
+        let (handler, service) = try makeHandler()
+        let path = try makeRepo()
+        let record = try service.addRepo(path: path, displayName: "HasTree")
+        let created = try await service.create(
+            WorkspaceCreateRequest(repo: record.id, name: "keep-me"))
+
+        let refused = await call(handler, "repo-remove", [
+            "repo": .string(record.id), "forget": .bool(true),
+        ])
+        XCTAssertFalse(refused.ok)
+        XCTAssertEqual(refused.error?.code, "forget_local_refused")
+        XCTAssertEqual(service.listRepos().map(\.id), [record.id])
+        XCTAssertEqual(try service.listWorkspaces(repo: record.id).count, 2)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: created.workspace.path))
+    }
+
+    func testForgetStillRefusesARemoteRepoReferencedByAutomations() async throws {
+        let (handler, service) = try makeHandler()
+        let seeded = try seedRemoteRepo(service, displayName: "AutoRemote")
+        try service.store.modify { data in
+            data.automations.append(Automation(
+                name: "nightly-scan",
+                trigger: .hourly,
+                time: "00:00",
+                provider: "shell",
+                prompt: "echo hi",
+                target: .repo(seeded.repo.id)))
+        }
+
+        let refused = await call(handler, "repo-remove", [
+            "repo": .string(seeded.repo.id), "forget": .bool(true),
+        ])
+        XCTAssertFalse(refused.ok)
+        XCTAssertEqual(refused.error?.code, "repo_in_use")
+        let message = try XCTUnwrap(refused.error?.message)
+        XCTAssertTrue(message.contains("nightly-scan"), message)
+        XCTAssertTrue(message.contains("automations"), message)
+        XCTAssertFalse(message.contains("worktrees:"), message)
+        XCTAssertEqual(service.listRepos().map(\.id), [seeded.repo.id])
+        XCTAssertEqual(service.store.load().remoteWorktrees.count, 2)
+    }
 }

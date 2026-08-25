@@ -383,6 +383,9 @@ public enum OrchardHumanFormatter {
             ?? object["path"]?.stringValue
             ?? nested["path"]?.stringValue
             ?? "repo"
+        if object["forgotten"]?.boolValue == true {
+            return "Forgot repo '\(name)' (registry only; host untouched)."
+        }
         if object["removed"]?.boolValue == true {
             return "Removed repo '\(name)'."
         }

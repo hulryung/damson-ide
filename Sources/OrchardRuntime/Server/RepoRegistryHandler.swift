@@ -6,6 +6,12 @@ import OrchardProtocol
 /// close: the earlier T2 handler kept a private `{repositories: []}` sidecar that
 /// fought T4's `orchard-data.json` schema for the same file). Records are T4's
 /// `RepoRecord`, so repo ids here are the ids worktree identities embed.
+///
+/// T79: `repo remove --forget` is the registry-only unregister for a *remote*
+/// repo. It drops the repo row and the local rows projecting its remote
+/// worktrees and never talks to the host. A local repo refuses
+/// (`forget_local_refused`) rather than silently dropping worktrees on this
+/// machine. There is no `repo forget` subverb.
 public struct RepoRegistryHandler: CommandHandler {
     public let verbs = ["repo-list", "repo-add", "repo-show", "repo-remove"]
     private let service: WorkspaceService
@@ -56,16 +62,36 @@ public struct RepoRegistryHandler: CommandHandler {
             case "repo-remove":
                 // v1 has no --force: extra worktrees or automations that still
                 // name this repo are a typed refusal, not a cascade delete.
+                // `--forget` is not --force. It is the remote-only way to drop
+                // Orchard's view without `worktree rm` on the far side.
                 guard let selector = params.str("repo") ?? params.str("id") ?? params.str("path") else {
                     throw WorkspaceError("invalid_argument", "repo-remove requires --repo <selector>")
                 }
+                let forget = params.flag("forget")
                 let record = try await service.resolveRepo(selector)
-                if let refusal = try await referencingError(for: record) {
+                if forget, !WorkspaceService.isRemote(record) {
+                    return .failure(id: request.id, error: Self.forgetLocalError(for: record))
+                }
+                let extras = try await extraWorktrees(for: record)
+                if let refusal = try await referencingError(
+                    for: record, extraWorktrees: forget ? [] : extras)
+                {
                     return .failure(id: request.id, error: refusal)
                 }
                 let removed = try await service.removeRepo(record.id)
                 var object = try JSONBridge.value(removed).objectValue ?? [:]
                 object["removed"] = .bool(true)
+                if forget {
+                    object["forgotten"] = .bool(true)
+                    object["hostUntouched"] = .bool(true)
+                    object["droppedWorktrees"] = .array(extras.map { ws in
+                        .object([
+                            "id": .string(ws.id),
+                            "displayName": .string(ws.displayName),
+                            "path": .string(ws.path),
+                        ])
+                    })
+                }
                 return .success(id: request.id, result: .object(object))
 
             default:
@@ -93,17 +119,35 @@ public struct RepoRegistryHandler: CommandHandler {
         return host.isLocal ? nil : host
     }
 
-    /// Primary checkout is the repo itself and does not block remove. Extra
-    /// worktrees (git, folder sessions, remote records) and automations that
-    /// target the repo or one of its workspaces do.
-    private func referencingError(for repo: RepoRecord) async throws -> RPCError? {
+    /// Extra worktrees that `repo remove` treats as in-use. The primary
+    /// checkout is the repo itself and does not block.
+    private func extraWorktrees(for repo: RepoRecord) async throws -> [Workspace] {
         let workspaces = try await service.listWorkspaces(repo: repo.id)
         let primaryId = WorktreeIdentity.make(
             repoId: repo.id,
             path: URL(fileURLWithPath: repo.path).standardizedFileURL.path)
-        let worktrees = workspaces.filter {
+        return workspaces.filter {
             $0.id.caseInsensitiveCompare(primaryId) != .orderedSame
         }
+    }
+
+    static func forgetLocalError(for repo: RepoRecord) -> RPCError {
+        RPCError(
+            code: "forget_local_refused",
+            message: "cannot forget local repo '\(repo.displayName)': --forget drops the registry "
+                + "view of a remote checkout without touching the host. A local repo's worktrees "
+                + "live on this machine; remove extra worktrees first, then repo remove.",
+            data: .object([
+                "repoId": .string(repo.id),
+                "hostId": .string(repo.hostId),
+            ]))
+    }
+
+    /// Extra worktrees (git, folder sessions, remote records) and automations
+    /// that target the repo or one of its workspaces block ordinary remove.
+    /// `--forget` already filtered extra remote projections out of `worktrees`.
+    private func referencingError(for repo: RepoRecord,
+                                  extraWorktrees worktrees: [Workspace]) async throws -> RPCError? {
         let automations = await referencingAutomations(for: repo)
         guard !worktrees.isEmpty || !automations.isEmpty else { return nil }
 

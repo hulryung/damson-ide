@@ -10,7 +10,9 @@ public enum ProjectGuide {
 
     A project is a registered repo. The sidebar groups worktrees under these
     records. `orchard project` is the grouping view; `orchard repo add|remove`
-    is how a checkout joins or leaves the registry.
+    is how a checkout joins or leaves the registry. Unregister a remote view
+    without touching the host with `repo remove --forget` (see
+    `orchard guide get repo`).
 
     ## Verbs
 
