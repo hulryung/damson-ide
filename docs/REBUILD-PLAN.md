@@ -780,7 +780,41 @@ Sources/OrchardApp/TerminalPaneHost.swift, Sources/OrchardApp/KeeperRestart.swif
 minimal OrchardTerminals adoption touchpoints if strictly needed, matching tests.
 Does not touch TerminalStreamBuffer.swift, fixtures, or main.swift.
 
-### Wave 16 candidates (from dogfood-4, docs/reports/dogfood-4.md)
+### Wave 16 (T60–T62, parallel)
+
+**T60 — Automations hardening (dogfood-4 findings 1–4).** (1) Single-fire guarantee:
+fire-due and the in-process scheduler must not both fire one minute slot — claim the
+slot atomically in the store (or equivalent) with a test that concurrent due→fire
+paths produce exactly one run. (2) Shell-provider fires must EXECUTE: the injected
+preamble+prompt currently lands as an unsubmitted paste in zsh; submit it, and
+guarantee no fire path ever leaves a capability sitting in a pane's pending input.
+(3) Add a `once` schedule: fires a single time then auto-disables (runtime + CLI;
+a minimal "Once" option in AutomationEditorSheet.swift is allowed). (4) Settlement
+story for automation-fired workers: a fired shell worker settles on process exit,
+worker-release must not strand them; document the decided semantics. Owns:
+Sources/OrchardRuntime/Automations/**, minimal AutomationEditorSheet.swift addition,
+settlement touchpoints in LiveOrchestrationStore+*/WorkerVerbs only if strictly
+needed, matching Tests, e2e stage update. Does not touch Sources/orchard CLI files
+or OrchardApp/main.swift.
+
+**T61 — CLI polish (dogfood-4 leftovers).** (1) `repo remove` verb: refuse while
+worktrees/automations reference the repo (typed error naming them), no --force in
+v1 of the verb; registry row + orchard-data cleanup; human + JSON faces. (2) Typed
+errors must exit non-zero from the CLI (today exit 0) — audit the error path once,
+centrally. (3) The help/flag nits listed in docs/reports/dogfood-4.md. Owns:
+Sources/orchard/**, the repo-registry handler file, OrchardProtocol/CommandSpec.swift
++ CLIFormatting.swift, matching Tests. Does not touch Automations/** or OrchardApp.
+
+**T62 — Window frame persistence.** main.swift windows remember nothing across
+relaunch (why keeper-adopted panes commonly come back into a smaller window). Give
+the main window and the auxiliary windows (Settings, Dashboard, Orchestration,
+Automations, Vault) frame autosave (setFrameAutosaveName or equivalent restoration),
+verify the T51 close→reopen path restores the frame too, and unit-test whatever is
+extractable. Owns: Sources/OrchardApp/main.swift (window creation sites), a small
+test where extractable, docs note. Does not touch AutomationEditorSheet.swift,
+OrchardRuntime, or OrchardTerminals.
+
+### Wave 16 source findings (from dogfood-4, docs/reports/dogfood-4.md)
 
 Automations hardening: (1) fire-due races the in-process scheduler → double fire in
 one minute slot; (2) shell-provider fires PASTE the preamble+prompt into zsh but
