@@ -5,7 +5,8 @@ import OrchardProtocol
 /// RPC verbs for worktree list|show|current|create|set|rm.
 ///
 /// Method names are hyphenated (`worktree-list`) to match the T0 envelope
-/// example; T2's CLI can map `worktree list` onto the same verbs.
+/// example; the CLI maps `worktree list` onto the same verbs. `worktree-ps`
+/// lives on `PortCommandHandler` (process + port snapshot).
 public final class WorkspaceCommandHandler: CommandHandler, @unchecked Sendable {
     public let verbs = [
         "worktree-list", "worktree-show", "worktree-current",
@@ -104,7 +105,13 @@ public final class WorkspaceCommandHandler: CommandHandler, @unchecked Sendable 
     }
 
     private func create(_ params: JSONValue) async throws -> JSONValue {
-        guard let repo = params.string("repo"), !repo.isEmpty else {
+        let repo: String
+        if let explicit = params.string("repo"), !explicit.isEmpty {
+            repo = explicit
+        } else if let cwd = params.string("cwd"), !cwd.isEmpty,
+                  let current = try? await service.current(cwd: cwd) {
+            repo = current.repoId
+        } else {
             throw WorkspaceError("invalid_argument", "missing repo selector")
         }
         let request = WorkspaceCreateRequest(

@@ -50,6 +50,8 @@ final class DispatchErgonomicsTests: XCTestCase {
         XCTAssertEqual(WorkerReadPaging.defaultLimit, 200)
         XCTAssertTrue(spec.notes.contains { $0.contains("\(WorkerReadPaging.defaultLimit)") },
                       spec.notes.joined(separator: " | "))
+        XCTAssertTrue(spec.notes.contains { $0.contains("hasOlder") },
+                      spec.notes.joined(separator: " | "))
     }
 
     /// `allowedValues` is additive on the wire: metadata written by an older runtime

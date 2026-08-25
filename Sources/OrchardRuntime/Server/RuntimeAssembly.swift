@@ -237,6 +237,7 @@ public final class OrchardRuntimeHost {
         registry.register(RemotePaneReconnectHandler(service: terminalService,
                                                      hosts: hostRegistry))
         registry.register(WorkspaceCommandHandler(service: workspaceService))
+        registry.register(ProjectCommandHandler(service: workspaceService))
         registry.register(RepoRegistryHandler(service: workspaceService))
         registry.register(FileCommandHandler(files: fileService,
                                              workspaces: workspaceService,

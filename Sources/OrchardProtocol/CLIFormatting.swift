@@ -130,6 +130,103 @@ public enum OrchardHumanFormatter {
         return lines.joined(separator: "\n")
     }
 
+    /// Compact receipt for `orchard worktree show|current` without `--json`.
+    public static func worktreeShow(_ result: JSONValue?) -> String {
+        let object = result?.objectValue ?? [:]
+        let wt = object["worktree"]?.objectValue ?? object
+        let name = wt["displayName"]?.stringValue ?? wt["name"]?.stringValue ?? "?"
+        let branch = wt["branch"]?.stringValue ?? ""
+        let host = wt["hostId"]?.stringValue ?? "local"
+        let path = wt["path"]?.stringValue ?? ""
+        let id = wt["id"]?.stringValue ?? ""
+        var lines = ["\(name)  \(branch)  \(host)"]
+        if !path.isEmpty { lines.append(path) }
+        if !id.isEmpty { lines.append("id  \(id)") }
+        if let status = wt["workspaceStatus"]?.stringValue, !status.isEmpty {
+            lines.append("status  \(status)")
+        }
+        if let comment = wt["comment"]?.stringValue, !comment.isEmpty {
+            lines.append("comment  \(comment)")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// Compact receipt for `orchard worktree create` without `--json`.
+    public static func worktreeCreate(_ result: JSONValue?) -> String {
+        let object = result?.objectValue ?? [:]
+        let wt = object["worktree"]?.objectValue ?? [:]
+        let name = wt["displayName"]?.stringValue ?? wt["name"]?.stringValue ?? "worktree"
+        let branch = wt["branch"]?.stringValue ?? ""
+        let path = wt["path"]?.stringValue ?? ""
+        var line = "Created worktree '\(name)'"
+        if !branch.isEmpty { line += " on \(branch)" }
+        if !path.isEmpty { line += " at \(path)" }
+        line += "."
+        if let handle = object["agentTerminalHandle"]?.stringValue, !handle.isEmpty {
+            line += " Agent terminal \(handle)."
+        }
+        if let warning = object["warning"]?.stringValue, !warning.isEmpty {
+            line += "\nWarning: \(warning)"
+        }
+        return line
+    }
+
+    /// Compact receipt for `orchard project list` without `--json`.
+    public static func projectList(_ result: JSONValue?) -> String {
+        let rows = result?.objectValue?["projects"]?.arrayValue ?? []
+        if rows.isEmpty { return "No projects registered." }
+        let headings = ["NAME", "HOST", "KIND", "WORKTREES", "PATH"]
+        let values = rows.map { value -> [String] in
+            let row = value.objectValue ?? [:]
+            let count = row["worktreeCount"]?.numberValue.map { String(Int($0)) } ?? "0"
+            return [
+                row["displayName"]?.stringValue ?? "?",
+                row["hostId"]?.stringValue ?? "local",
+                row["kind"]?.stringValue ?? "git",
+                count,
+                row["path"]?.stringValue ?? "",
+            ]
+        }
+        let widths = headings.indices.map { index in
+            ([headings[index]] + values.map { $0[index] }).map(\.count).max() ?? 0
+        }
+        return ([headings] + values).map { row in
+            row.indices.map { index in
+                index == row.count - 1 ? row[index] : row[index].padding(toLength: widths[index], withPad: " ", startingAt: 0)
+            }.joined(separator: "  ")
+        }.joined(separator: "\n")
+    }
+
+    /// Compact receipt for `orchard project show|current` without `--json`.
+    public static func projectShow(_ result: JSONValue?) -> String {
+        let object = result?.objectValue ?? [:]
+        let project = object["project"]?.objectValue ?? object
+        let name = project["displayName"]?.stringValue ?? "?"
+        let host = project["hostId"]?.stringValue ?? "local"
+        let kind = project["kind"]?.stringValue ?? "git"
+        let path = project["path"]?.stringValue ?? ""
+        let id = project["id"]?.stringValue ?? ""
+        var lines = ["\(name)  \(kind)  \(host)"]
+        if !path.isEmpty { lines.append(path) }
+        if !id.isEmpty { lines.append("id  \(id)") }
+        if let base = project["baseRef"]?.stringValue, !base.isEmpty {
+            lines.append("base  \(base)")
+        }
+        let worktrees = object["worktrees"]?.arrayValue ?? []
+        if worktrees.isEmpty {
+            lines.append("No worktrees.")
+        } else {
+            lines.append("worktrees  \(worktrees.count)")
+            for item in worktrees {
+                let wt = item.objectValue ?? [:]
+                let wtName = wt["displayName"]?.stringValue ?? "?"
+                let branch = wt["branch"]?.stringValue ?? "-"
+                lines.append("  \(wtName)  \(branch)")
+            }
+        }
+        return lines.joined(separator: "\n")
+    }
+
     /// Compact receipt for `orchard worktree rm` without `--json`.
     public static func worktreeRm(_ result: JSONValue?) -> String {
         let object = result?.objectValue ?? [:]

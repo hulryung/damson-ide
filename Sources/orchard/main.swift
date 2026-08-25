@@ -107,8 +107,16 @@ func formatHuman(method: String, result: JSONValue?, verbose: Bool = false) -> S
         return formatHostCheck(result)
     case "worktree-list":
         return OrchardHumanFormatter.worktreeList(result)
+    case "worktree-show", "worktree-current", "worktree-set":
+        return OrchardHumanFormatter.worktreeShow(result)
+    case "worktree-create":
+        return OrchardHumanFormatter.worktreeCreate(result)
     case "worktree-rm":
         return OrchardHumanFormatter.worktreeRm(result)
+    case "project-list":
+        return OrchardHumanFormatter.projectList(result)
+    case "project-show", "project-current":
+        return OrchardHumanFormatter.projectShow(result)
     case "repo-remove":
         return OrchardHumanFormatter.repoRemove(result)
     case "conflicts-list":
@@ -286,7 +294,9 @@ do {
         let values: [JSONValue]
         if case let .array(parsedValues)? = parsed.params["_args"] { values = parsedValues } else { values = [] }
         let verb = values.first?.stringValue ?? "list"
-        let topics = OrchestrationContract.topics + [ConflictsGuide.topic]
+        let topics = OrchestrationContract.topics + [
+            ConflictsGuide.topic, WorktreeGuide.topic, ProjectGuide.topic,
+        ]
         if verb == "list", values.isEmpty || values.count == 1 {
             if parsed.json { let data = try JSONEncoder.pretty.encode(["topics": topics]); FileHandle.standardOutput.write(data + Data("\n".utf8)) }
             else { print(GuideTopicFormatter.render(topics)) }
@@ -295,19 +305,21 @@ do {
             switch topic {
             case "orchestration": content = OrchestrationContract.coordinatorGuide
             case ConflictsGuide.topic: content = ConflictsGuide.content
+            case WorktreeGuide.topic: content = WorktreeGuide.content
+            case ProjectGuide.topic: content = ProjectGuide.content
             default:
-                throw CLIError.usage("usage: orchard guide list | orchard guide get orchestration|conflicts [--json]")
+                throw CLIError.usage("usage: orchard guide list | orchard guide get orchestration|conflicts|worktree|project [--json]")
             }
             if parsed.json {
                 let data = try JSONEncoder.pretty.encode(["topic": topic, "content": content])
                 FileHandle.standardOutput.write(data + Data("\n".utf8))
             } else { print(content) }
-        } else { throw CLIError.usage("usage: orchard guide list | orchard guide get orchestration|conflicts [--json]") }
+        } else { throw CLIError.usage("usage: orchard guide list | orchard guide get orchestration|conflicts|worktree|project [--json]") }
     default:
         var method = parsed.spec.name, params = parsed.params
         params.removeValue(forKey: "json")
         params.removeValue(forKey: "verbose")
-        if method == "repo" || method == "browser" || method == "automations" || method == "worktree" || method == "terminal" || method == "host", case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue {
+        if method == "repo" || method == "browser" || method == "automations" || method == "worktree" || method == "terminal" || method == "host" || method == "project", case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue {
             method = "\(method)-\(subcommand)"
             let rest = Array(values.dropFirst())
             if method.hasPrefix("host-") {
@@ -327,12 +339,30 @@ do {
                     params["_args"] = .array(rest)
                 }
             } else if method.hasPrefix("worktree-") {
+                var verb = String(method.dropFirst("worktree-".count))
+                if WorktreeSubcommands.rmAliases.contains(verb) { verb = "rm"; method = "worktree-rm" }
+                guard WorktreeSubcommands.all.contains(verb) else {
+                    throw CLIError.usage("usage: orchard worktree list|show|current|create|set|rm|ps [options]")
+                }
                 if params["cwd"] == nil {
                     params["cwd"] = .string(FileManager.default.currentDirectoryPath)
                 }
                 if !rest.isEmpty, params["worktree"] == nil,
                    ["worktree-show", "worktree-set", "worktree-rm"].contains(method) {
                     params["worktree"] = rest[0]
+                } else if !rest.isEmpty {
+                    params["_args"] = .array(rest)
+                }
+            } else if method.hasPrefix("project-") {
+                let verb = String(method.dropFirst("project-".count))
+                guard ProjectSubcommands.all.contains(verb) else {
+                    throw CLIError.usage("usage: orchard project list|show|current [options]")
+                }
+                if params["cwd"] == nil {
+                    params["cwd"] = .string(FileManager.default.currentDirectoryPath)
+                }
+                if verb == "show", !rest.isEmpty, params["project"] == nil {
+                    params["project"] = rest[0]
                 } else if !rest.isEmpty {
                     params["_args"] = .array(rest)
                 }
@@ -362,6 +392,8 @@ do {
             throw CLIError.usage("usage: orchard repo list|add|show|remove [options]")
         } else if method == "worktree" {
             throw CLIError.usage("usage: orchard worktree list|show|current|create|set|rm|ps [options]")
+        } else if method == "project" {
+            throw CLIError.usage("usage: orchard project list|show|current [options]")
         } else if method == "terminal" {
             throw CLIError.usage("usage: orchard terminal list|create|read|send|wait|split|close|rename|reconnect [options]")
         } else if method == "host" {

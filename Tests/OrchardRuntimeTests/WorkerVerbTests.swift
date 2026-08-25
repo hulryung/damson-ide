@@ -782,6 +782,16 @@ final class WorkerVerbTests: XCTestCase {
         let lines = read.result?.field("lines")?.arrayValue ?? []
         XCTAssertLessThanOrEqual(lines.count, 3)
         XCTAssertNotNil(read.result?.field("latestCursor"))
+        XCTAssertEqual(read.result?.field("hasOlder")?.boolValue, true,
+                       "10 live lines with --limit 3 must advertise older output")
+        XCTAssertNotNil(read.result?.field("startCursor"))
+
+        let fromStart = await call("worker-read", [
+            "dispatch": .string(dispatchID), "limit": .number(3), "cursor": .number(0),
+        ])
+        XCTAssertTrue(fromStart.ok, String(describing: fromStart.error))
+        XCTAssertEqual(fromStart.result?.field("hasOlder")?.boolValue, false)
+        XCTAssertEqual(fromStart.result?.field("startCursor")?.numberValue, 0)
 
         let transcript = await call("worker-read", [
             "dispatch": .string(dispatchID), "source": .string("transcript"),
@@ -821,6 +831,7 @@ final class WorkerVerbTests: XCTestCase {
         XCTAssertEqual(read.result?.field("content")?.stringValue,
                        #"{"type":"assistant","message":"live answer"}"#)
         XCTAssertEqual(read.result?.field("transcriptPath")?.stringValue, "/tmp/claude/live.jsonl")
+        XCTAssertEqual(read.result?.field("hasOlder")?.boolValue, false)
 
         // `auto` keeps the paged terminal shape even now that a transcript could be
         // resolved: the same command must not sometimes return a whole document.
@@ -882,6 +893,17 @@ final class WorkerVerbTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(chrome.field("spinnerLines")?.numberValue), 0)
         XCTAssertNotNil(chrome.field("respacedLines"),
                         "T55: respacedLines belongs on the chromeStripped receipt")
+        XCTAssertEqual(read.result?.field("hasOlder")?.boolValue, false,
+                       "limit 500 covering the whole archive has no older window")
+
+        // Page the raw capture: chrome-stripped text can collapse to ≤2 lines, which
+        // would make hasOlder false even with --limit 2.
+        let paged = await call("worker-read", [
+            "dispatch": .string(dispatchID), "raw": .bool(true), "limit": .number(2),
+        ])
+        XCTAssertTrue(paged.ok, String(describing: paged.error))
+        XCTAssertEqual(paged.result?.field("hasOlder")?.boolValue, true)
+        XCTAssertGreaterThan(paged.result?.field("startCursor")?.numberValue ?? 0, 0)
 
         // …and --raw still serves every captured byte.
         let raw = await call("worker-read", ["dispatch": .string(dispatchID),

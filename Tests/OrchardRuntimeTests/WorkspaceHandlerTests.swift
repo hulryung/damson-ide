@@ -247,6 +247,36 @@ final class WorkspaceHandlerTests: XCTestCase {
         XCTAssertNotNil(branch)
         XCTAssertFalse(branch?.isEmpty ?? true)
     }
+
+    func testCreateInfersRepoFromCwdWhenRepoOmitted() async throws {
+        let (server, _, repo) = try makeServer()
+        let parent = await server.perform(RPCRequest(
+            id: "p", method: "worktree-create",
+            params: .object(["repo": .string(repo.id), "name": .string("from-cwd-parent")])))
+        XCTAssertTrue(parent.ok, parent.error?.message ?? "")
+        let parentPath = try XCTUnwrap(
+            parent.result?.objectValue?["worktree"]?.objectValue?["path"]?.stringValue)
+
+        let created = await server.perform(RPCRequest(
+            id: "c", method: "worktree-create",
+            params: .object([
+                "name": .string("inferred"),
+                "cwd": .string(parentPath),
+            ])))
+        XCTAssertTrue(created.ok, created.error?.message ?? "")
+        let worktree = created.result?.objectValue?["worktree"]?.objectValue
+        XCTAssertEqual(worktree?["repoId"]?.stringValue, repo.id)
+        XCTAssertEqual(worktree?["displayName"]?.stringValue, "inferred")
+    }
+
+    func testCreateWithoutRepoOrCwdIsTypedError() async throws {
+        let (server, _, _) = try makeServer()
+        let response = await server.perform(RPCRequest(
+            id: "x", method: "worktree-create",
+            params: .object(["name": .string("orphan")])))
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.error?.code, "invalid_argument")
+    }
 }
 
 private final class InstantLauncher: AgentLaunching, @unchecked Sendable {
