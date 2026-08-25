@@ -25,9 +25,10 @@ struct JumpPalette: View {
         var workspaces: [PaletteWorkspaceSeed] = []
         var agents: [PaletteAgentSeed] = []
         for project in store.projects {
+            // No `rootSubtitle` here: it shells out to git, and this catalog is
+            // rebuilt on every keystroke for every project.
             roots.append(PaletteProjectSeed(
-                id: project.id, name: project.name,
-                branch: project.rootSubtitle))
+                id: project.id, name: project.name, branch: ""))
             for record in project.records {
                 workspaces.append(PaletteWorkspaceSeed(
                     id: record.id, title: record.title,
