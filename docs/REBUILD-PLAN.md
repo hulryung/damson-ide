@@ -1119,6 +1119,27 @@ OrchardProtocol/CommandSpec.swift + guides, the worktree/project handlers in
 OrchardRuntime/Workspaces/**, WorkerVerbs' read path for `hasOlder`, matching tests.
 Does not touch Files/**, WorktreeManager.swift, Conflicts/**, or Automations.
 
+### Backlog status (2026-08-26) — closed
+
+Every item the earlier waves deferred is now resolved:
+
+- **damson push / pin** — no longer a blocker: `0483173` is on `origin/main`, and
+  damson has since released **v0.5.0**, which contains it. The exact-revision pin was
+  retired for `.package(url: …, exact: "0.5.0")`; the full suite (1199), release build
+  and headless e2e all pass against it. The "tag v0.4.2" item is obsolete — damson's
+  release pipeline already shipped 0.5.0 (its CI committed the appcast), and cutting a
+  damson release remains the owner's call, not something this repo needs.
+- **Real-remote SSH verification** — done without a second machine
+  (docs/reports/remote-verification.md, docs/reports/t78-remote-identity.md).
+- **Editor decode-then-write, ensureExcluded truncation** — T75.
+- **Intermittent full-suite failures** — two distinct flakes, both fixed (T76's socket
+  load test; the FileWatcher microbenchmark, by the coordinator).
+- **CLI surface gaps** — T77 (worktree subverbs, `project`, `hasOlder`).
+
+Open by design / newly filed: `repo remove --forget` for remote repos (see wave 21),
+supervised dispatch to remote stays typed-refused (identity is necessary but not
+sufficient), and skills/artifacts/computer groups remain out of scope.
+
 ### Wave 16 source findings (from dogfood-4, docs/reports/dogfood-4.md)
 
 Automations hardening: (1) fire-due races the in-process scheduler → double fire in
