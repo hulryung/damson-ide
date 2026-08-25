@@ -18,8 +18,17 @@ public enum CommandHelpRenderer {
             let width = labels.map(\.count).max() ?? 0
             for (flag, label) in zip(spec.flags, labels) {
                 let required = flag.required ? " (required)" : ""
+                let aliasNote: String
+                if flag.aliases.isEmpty {
+                    aliasNote = ""
+                } else {
+                    let listed = flag.aliases.map { "--\($0)" }.joined(separator: ", ")
+                    aliasNote = flag.aliases.count == 1
+                        ? "; alias: \(listed)"
+                        : "; aliases: \(listed)"
+                }
                 let padded = label.padding(toLength: width, withPad: " ", startingAt: 0)
-                lines.append("  \(padded)  \(flag.summary)\(required)")
+                lines.append("  \(padded)  \(flag.summary)\(required)\(aliasNote)")
             }
             let helpPadding = String(repeating: " ", count: max(1, width - 10))
             lines.append("  -h, --help\(helpPadding)  Show this help")
@@ -174,6 +183,34 @@ public enum OrchardHumanFormatter {
         let hours = minutes / 60
         if hours < 48 { return "\(hours)h ago" }
         return "\(hours / 24)d ago"
+    }
+
+    /// Compact receipt for `orchard repo remove` without `--json`.
+    public static func repoRemove(_ result: JSONValue?) -> String {
+        let object = result?.objectValue ?? [:]
+        let nested = object["repo"]?.objectValue ?? [:]
+        let name = object["displayName"]?.stringValue
+            ?? nested["displayName"]?.stringValue
+            ?? object["path"]?.stringValue
+            ?? nested["path"]?.stringValue
+            ?? "repo"
+        if object["removed"]?.boolValue == true {
+            return "Removed repo '\(name)'."
+        }
+        return "Repo '\(name)' was not removed."
+    }
+}
+
+/// Process exit for a runtime RPC envelope. Typed errors (`ok: false`) are a
+/// failed process even when `--json` printed the envelope — dogfood-3/4 found
+/// that path used to fall through to status 0.
+public enum CLIEnvelopeExit {
+    public static let success: Int32 = 0
+    public static let typedError: Int32 = 1
+    public static let usage: Int32 = 64
+
+    public static func status(for response: RPCResponse) -> Int32 {
+        response.ok ? success : typedError
     }
 }
 

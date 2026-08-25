@@ -17,9 +17,10 @@ func parse(_ arguments: [String]) throws -> ParsedCommand {
         let argument = arguments[index]
         if argument.hasPrefix("--") {
             let name = String(argument.dropFirst(2))
-            guard let flag = spec.flags.first(where: { $0.name == name }) else { throw CLIError.usage("unknown flag --\(name) for \(spec.name)") }
-            if flag.valueHint == nil { params[name] = .bool(true) }
-            else { index += 1; guard index < arguments.count else { throw CLIError.usage("--\(name) requires a value") }; params[name] = jsonValue(arguments[index], hint: flag.valueHint) }
+            guard let flag = spec.flag(named: name) else { throw CLIError.usage("unknown flag --\(name) for \(spec.name)") }
+            // Store under the canonical name so `--dispatch` satisfies required `--id`.
+            if flag.valueHint == nil { params[flag.name] = .bool(true) }
+            else { index += 1; guard index < arguments.count else { throw CLIError.usage("--\(name) requires a value") }; params[flag.name] = jsonValue(arguments[index], hint: flag.valueHint) }
         } else { positionals.append(.string(argument)) }
         index += 1
     }
@@ -108,6 +109,8 @@ func formatHuman(method: String, result: JSONValue?, verbose: Bool = false) -> S
         return OrchardHumanFormatter.worktreeList(result)
     case "worktree-rm":
         return OrchardHumanFormatter.worktreeRm(result)
+    case "repo-remove":
+        return OrchardHumanFormatter.repoRemove(result)
     case "worktree-ps":
         return formatWorktreePs(result)
     case "workspace-ports":
@@ -291,6 +294,17 @@ do {
                 if !rest.isEmpty, params["name"] == nil { params["name"] = rest[0] }
             } else if method.hasPrefix("automations-") && !rest.isEmpty && params["id"] == nil {
                 params["id"] = rest[0]
+            } else if method.hasPrefix("repo-") {
+                let verb = String(method.dropFirst("repo-".count))
+                let known = ["list", "add", "show", "remove"]
+                guard known.contains(verb) else {
+                    throw CLIError.usage("usage: orchard repo list|add|show|remove [options]")
+                }
+                if ["show", "remove"].contains(verb), !rest.isEmpty, params["repo"] == nil {
+                    params["repo"] = rest[0]
+                } else if !rest.isEmpty {
+                    params["_args"] = .array(rest)
+                }
             } else if method.hasPrefix("worktree-") {
                 if params["cwd"] == nil {
                     params["cwd"] = .string(FileManager.default.currentDirectoryPath)
@@ -323,6 +337,8 @@ do {
                     params["cwd"] = .string(FileManager.default.currentDirectoryPath)
                 }
             } else if !rest.isEmpty { params["_args"] = .array(rest) }
+        } else if method == "repo" {
+            throw CLIError.usage("usage: orchard repo list|add|show|remove [options]")
         } else if method == "worktree" {
             throw CLIError.usage("usage: orchard worktree list|show|current|create|set|rm|ps [options]")
         } else if method == "terminal" {
@@ -343,10 +359,20 @@ do {
             if params["cwd"] == nil { params["cwd"] = .string(FileManager.default.currentDirectoryPath) }
         }
         let response = try callRuntime(method: method, params: .object(params))
-        if parsed.json { let data = try JSONEncoder.pretty.encode(response); FileHandle.standardOutput.write(data + Data("\n".utf8)) }
-        else if response.ok { print(formatHuman(method: method, result: response.result, verbose: parsed.verbose)) }
-        else { throw CLIError.runtime("\(response.error?.code ?? "error"): \(response.error?.message ?? "unknown error")") }
+        if parsed.json {
+            let data = try JSONEncoder.pretty.encode(response)
+            FileHandle.standardOutput.write(data + Data("\n".utf8))
+        } else if response.ok {
+            print(formatHuman(method: method, result: response.result, verbose: parsed.verbose))
+        } else {
+            let code = response.error?.code ?? "error"
+            let message = response.error?.message ?? "unknown error"
+            FileHandle.standardError.write(Data("orchard: \(code): \(message)\n".utf8))
+        }
+        // Typed errors (`ok: false`) must be a failed process even when `--json`
+        // printed the envelope. Usage / connect failures still exit 64 below.
+        exit(CLIEnvelopeExit.status(for: response))
     }
-} catch { FileHandle.standardError.write(Data("orchard: \(error)\n".utf8)); exit(64) }
+} catch { FileHandle.standardError.write(Data("orchard: \(error)\n".utf8)); exit(CLIEnvelopeExit.usage) }
 
 extension JSONEncoder { static var pretty: JSONEncoder { let value = JSONEncoder(); value.outputFormatting = [.prettyPrinted, .sortedKeys]; return value } }

@@ -2,12 +2,12 @@ import Foundation
 import OrchardCore
 import OrchardProtocol
 
-/// `repo list|add|show`, backed by T4's `OrchardDataStore` repo registry (wave-2 seam
+/// `repo list|add|show|remove`, backed by T4's `OrchardDataStore` repo registry (wave-2 seam
 /// close: the earlier T2 handler kept a private `{repositories: []}` sidecar that
 /// fought T4's `orchard-data.json` schema for the same file). Records are T4's
 /// `RepoRecord`, so repo ids here are the ids worktree identities embed.
 public struct RepoRegistryHandler: CommandHandler {
-    public let verbs = ["repo-list", "repo-add", "repo-show"]
+    public let verbs = ["repo-list", "repo-add", "repo-show", "repo-remove"]
     private let service: WorkspaceService
 
     public init(service: WorkspaceService) {
@@ -53,6 +53,21 @@ public struct RepoRegistryHandler: CommandHandler {
                 let record = try await service.resolveRepo(selector)
                 return .success(id: request.id, result: try JSONBridge.value(record))
 
+            case "repo-remove":
+                // v1 has no --force: extra worktrees or automations that still
+                // name this repo are a typed refusal, not a cascade delete.
+                guard let selector = params.str("repo") ?? params.str("id") ?? params.str("path") else {
+                    throw WorkspaceError("invalid_argument", "repo-remove requires --repo <selector>")
+                }
+                let record = try await service.resolveRepo(selector)
+                if let refusal = try await referencingError(for: record) {
+                    return .failure(id: request.id, error: refusal)
+                }
+                let removed = try await service.removeRepo(record.id)
+                var object = try JSONBridge.value(removed).objectValue ?? [:]
+                object["removed"] = .bool(true)
+                return .success(id: request.id, result: .object(object))
+
             default:
                 throw WorkspaceError("unknown_command", request.method)
             }
@@ -76,5 +91,74 @@ public struct RepoRegistryHandler: CommandHandler {
                                  "--host must be 'local' or 'ssh:<name>' (got '\(raw)')")
         }
         return host.isLocal ? nil : host
+    }
+
+    /// Primary checkout is the repo itself and does not block remove. Extra
+    /// worktrees (git, folder sessions, remote records) and automations that
+    /// target the repo or one of its workspaces do.
+    private func referencingError(for repo: RepoRecord) async throws -> RPCError? {
+        let workspaces = try await service.listWorkspaces(repo: repo.id)
+        let primaryId = WorktreeIdentity.make(
+            repoId: repo.id,
+            path: URL(fileURLWithPath: repo.path).standardizedFileURL.path)
+        let worktrees = workspaces.filter {
+            $0.id.caseInsensitiveCompare(primaryId) != .orderedSame
+        }
+        let automations = await referencingAutomations(for: repo)
+        guard !worktrees.isEmpty || !automations.isEmpty else { return nil }
+
+        var named: [String] = []
+        if !worktrees.isEmpty {
+            named.append("worktrees: " + worktrees.map { "'\($0.displayName)'" }.joined(separator: ", "))
+        }
+        if !automations.isEmpty {
+            named.append("automations: " + automations.map { "'\($0.name)'" }.joined(separator: ", "))
+        }
+        let message = "cannot remove repo '\(repo.displayName)': still referenced by "
+            + named.joined(separator: "; ")
+            + ". Remove those first; --force is not accepted."
+        let data = JSONValue.object([
+            "repoId": .string(repo.id),
+            "worktrees": .array(worktrees.map { ws in
+                .object([
+                    "id": .string(ws.id),
+                    "displayName": .string(ws.displayName),
+                ])
+            }),
+            "automations": .array(automations.map { auto in
+                .object([
+                    "id": .string(auto.id),
+                    "name": .string(auto.name),
+                ])
+            }),
+        ])
+        return RPCError(code: "repo_in_use", message: message, data: data)
+    }
+
+    private func referencingAutomations(for repo: RepoRecord) async -> [Automation] {
+        let data = await MainActor.run { service.store.load() }
+        var matches: [Automation] = []
+        for automation in data.automations {
+            if await automationReferences(automation, repo: repo) {
+                matches.append(automation)
+            }
+        }
+        return matches
+    }
+
+    private func automationReferences(_ automation: Automation, repo: RepoRecord) async -> Bool {
+        switch automation.target {
+        case .repo(let selector):
+            if let resolved = try? await service.resolveRepo(selector),
+               resolved.id.caseInsensitiveCompare(repo.id) == .orderedSame {
+                return true
+            }
+            let trimmed = selector.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.caseInsensitiveCompare(repo.id) == .orderedSame
+                || trimmed.caseInsensitiveCompare(repo.displayName) == .orderedSame
+        case .workspace(let selector):
+            guard let workspace = try? await service.show(selector: selector) else { return false }
+            return workspace.repoId.caseInsensitiveCompare(repo.id) == .orderedSame
+        }
     }
 }
