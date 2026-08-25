@@ -826,7 +826,20 @@ extractable. Owns: Sources/OrchardApp/main.swift (window creation sites), a smal
 test where extractable, docs note. Does not touch AutomationEditorSheet.swift,
 OrchardRuntime, or OrchardTerminals.
 
-### Wave 17 (T63–T65, parallel)
+### Wave 17 (T63–T65, parallel) — MERGED 2026-08-25, 1031 tests, e2e PASS
+
+T63 dogfood-5 verified wave 16 LIVE: once fired exactly one run across a minute
+boundary and two scheduler ticks then auto-disabled; concurrent run --id refused
+automation_fire_in_flight; repo remove refused repo_in_use (naming worktree, then
+worktree+automation, then automation) and removed cleanly after; 13 typed errors
+across 10 verbs exit 1, usage errors exit 64; archive fidelity clean (0 re-spaced,
+0 unsourced). All dogfood-4 findings closed. T64: cardStatus board columns
+(worktree set --status, sidebar chips + context menu + group-by-status). T65: jump
+palette four-kind routing incl. Go-menu commands. New minor findings → backlog:
+empty ~/Orchard/worktrees/<repo>/ container dir left after worktree rm + repo
+remove; automations verbs use generic automation_error where siblings use typed
+codes; manual run --id does not check enabled on a consumed once; worker-read
+200-line default window worth a look.
 
 **T63 — Dogfood cycle 5 (wave-16 verification, report-only).** On the current build via
 the CLI only (never launch/quit the app; never touch terminals/worktrees you did not
