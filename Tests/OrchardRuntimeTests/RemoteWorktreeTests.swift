@@ -456,6 +456,31 @@ final class RemoteWorktreeTests: XCTestCase {
         XCTAssertTrue(listed.error?.message.contains("ssh:build") ?? false,
                       listed.error?.message ?? "")
     }
+
+    func testForgetUnregistersWithoutIssuingRemoteWorktreeDeletes() async throws {
+        let repo = try await addRemoteRepo()
+        let listed = await call("worktree-list", ["repo": .string(repo.id)])
+        XCTAssertEqual(listed.result?.objectValue?["worktrees"]?.arrayValue?.count, 2)
+
+        let refused = await call("repo-remove", ["repo": .string(repo.id)])
+        XCTAssertEqual(refused.error?.code, "repo_in_use")
+
+        let before = runner.commandLines
+        let forgotten = await call("repo-remove", [
+            "repo": .string(repo.id), "forget": .bool(true),
+        ])
+        XCTAssertTrue(forgotten.ok, String(describing: forgotten.error))
+        XCTAssertEqual(forgotten.result?.objectValue?["forgotten"]?.boolValue, true)
+        XCTAssertEqual(forgotten.result?.objectValue?["hostUntouched"]?.boolValue, true)
+        XCTAssertEqual(runner.commandLines, before,
+                       "forget must not ssh or git-worktree-remove on the host")
+        XCTAssertFalse(runner.ran("worktree remove"), runner.commandLines.joined(separator: "\n"))
+        XCTAssertTrue(service.listRepos().isEmpty)
+        XCTAssertTrue(store.load().remoteWorktrees.isEmpty)
+        let afterList = await call("worktree-list")
+        let remaining = afterList.result?.objectValue?["worktrees"]?.arrayValue ?? []
+        XCTAssertTrue(remaining.isEmpty, String(describing: remaining))
+    }
 }
 
 /// Rule-1 edges that must never resolve to "local": a workspace whose host stamp cannot

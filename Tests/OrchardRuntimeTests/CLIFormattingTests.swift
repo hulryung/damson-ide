@@ -247,11 +247,23 @@ final class CLIFormattingTests: XCTestCase {
         let spec = try XCTUnwrap(OrchardCommands.all.first { $0.name == "repo" })
         XCTAssertTrue(spec.positionalArgs.contains { $0.contains("remove") },
                       spec.positionalArgs.joined(separator: ","))
+        XCTAssertFalse(spec.positionalArgs.contains { $0.contains("forget") },
+                      "forget is a flag on remove, not a subverb: \(spec.positionalArgs)")
         XCTAssertFalse(spec.flags.map(\.name).contains("force"), spec.flags.map(\.name).joined(separator: ","))
+        XCTAssertNotNil(spec.flag(named: "forget"))
+        XCTAssertNil(spec.flag(named: "forget")?.valueHint)
         let help = CommandHelpRenderer.render(spec)
         XCTAssertTrue(help.contains("list|add|show|remove"), help)
+        XCTAssertTrue(help.contains("--forget"), help)
         XCTAssertTrue(help.contains("repo_in_use") || help.contains("no --force"), help)
+        XCTAssertTrue(help.contains("forget_local_refused"), help)
         XCTAssertTrue(help.contains("rmdirs"), help)
+        XCTAssertTrue(help.contains("repo remove --repo <selector> --forget"), help)
+        XCTAssertTrue(RepoGuide.content.contains("repo remove --repo <selector> --forget"),
+                      RepoGuide.content)
+        XCTAssertTrue(RepoGuide.content.contains("forget_local_refused"), RepoGuide.content)
+        XCTAssertTrue(RepoGuide.content.contains("not a `repo forget` subverb"), RepoGuide.content)
+        XCTAssertEqual(RepoGuide.topic, "repo")
     }
 
     func testRepoRemoveHumanFace() {
@@ -271,6 +283,15 @@ final class CLIFormattingTests: XCTestCase {
             "displayName": .string("Named"),
         ])
         XCTAssertEqual(OrchardHumanFormatter.repoRemove(kept), "Repo 'Named' was not removed.")
+        let forgotten: JSONValue = .object([
+            "removed": .bool(true),
+            "forgotten": .bool(true),
+            "hostUntouched": .bool(true),
+            "displayName": .string("RemoteOrchard"),
+        ])
+        XCTAssertEqual(
+            OrchardHumanFormatter.repoRemove(forgotten),
+            "Forgot repo 'RemoteOrchard' (registry only; host untouched).")
     }
 
     func testTypedErrorEnvelopeExitsNonZeroEvenWhenJSONPrinted() {
