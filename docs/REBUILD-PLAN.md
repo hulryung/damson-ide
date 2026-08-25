@@ -869,6 +869,43 @@ OrchardCore/Support/PaletteSources.swift + PaletteRanking if needed, the palette
 files in OrchardApp, matching tests. Does not touch SidebarView.swift, worktree meta, or
 CommandSpec.
 
+### Wave 18 (T66–T68, parallel)
+
+**T66 — Dogfood-5 minor findings sweep.** (1) `worktree rm` and `repo remove` must
+remove the now-empty `~/Orchard/worktrees/<repo>/` container directory (only when
+empty; never recursively). (2) Automations verbs get typed error codes
+(automation_not_found, automation_invalid_input, …) where they answer generic
+automation_error today — match sibling verbs' vocabulary; update CommandSpec notes if
+they enumerate codes. (3) Manual `run --id` on a consumed `once` automation must
+refuse (automation_disabled or equivalent typed code) instead of firing a disabled
+automation. (4) Look at worker-read's 200-line default window: make the default and
+the flag documented and consistent (no behavior redesign). Owns:
+OrchardCore/Worktrees removal path, OrchardRuntime/Automations error surface +
+run-path guard, Sources/orchard + CommandSpec touch-ups, matching tests. Does not
+touch OrchardApp or OrchardTerminals.
+
+**T67 — Agent Dashboard kanban parity.** Inventory §6: buckets
+attention|working|done|idle; card carries paneKey, agentType, dotState, task, last
+user/agent message, click-to-focus routing, parentPaneKey, workspaceStatus,
+startedAt/finishedAt, unseen, askSummary; a done card stays highlighted until
+acknowledged; fleet sizes bounded so a huge fleet cannot blank the view. Audit the
+T19 dashboard against that list, implement what is missing, and unit-test the
+UI-free projection. Owns: Sources/OrchardApp/AgentDashboardView.swift + its
+projection files (extract to OrchardCore/OrchardRuntime if UI-free), minimal
+AppStore wiring, matching tests. Does not touch WorkbenchView.swift, worktree
+meta/removal, or Automations.
+
+**T68 — Conflict-review tab.** Inventory §6 center tabs include conflict-review: when
+a workspace's worktree has merge conflicts (merge/rebase in progress), a tab that
+lists conflicted files, shows ours/theirs/base per file with the conflicted hunks,
+and lets the user choose ours/theirs per hunk or open the file in the editor; writing
+a resolution stages the file. Detection via git status porcelain (unmerged entries).
+Keep the git logic UI-free in OrchardCore/Git with tests over a fixture repo the
+tests create; the tab renders it. Owns: OrchardCore/Git conflict files,
+Sources/OrchardApp conflict-review view files + WorkbenchView tab-kind wiring +
+minimal AppStore additions, matching tests. Does not touch
+AgentDashboardView.swift, Automations, or worktree removal paths.
+
 ### Wave 16 source findings (from dogfood-4, docs/reports/dogfood-4.md)
 
 Automations hardening: (1) fire-due races the in-process scheduler → double fire in
