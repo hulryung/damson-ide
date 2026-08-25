@@ -17,7 +17,7 @@ struct RootView: View {
                         max: Tokens.sidebarMaxWidth)
             } detail: {
                 WorkbenchView()
-                    .fileExplorerSidebar()
+                    .rightSidebar()
                     .toolbar {
                         // NavigationSplitView supplies its own sidebar toggle on
                         // macOS 13+; a custom one shows as a duplicate icon.
