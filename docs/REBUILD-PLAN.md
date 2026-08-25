@@ -630,6 +630,50 @@ class must stay dead), run the full live cycle again, verify the Orchestration w
 reflects the run live (screenshot evidence), confirm remote_unsupported guards, and
 write docs/reports/dogfood-3.md with comparisons to cycle 2 and any new findings.
 
+### Wave 13 (T51–T53, parallel)
+
+**T51 — Runtime survives window close.** Closing the main window today terminates the
+app (applicationShouldTerminateAfterLastWindowClosed), killing the runtime and every
+supervised worker with it — diagnosed live in dogfood-3. Change the lifecycle: closing
+the main window keeps the app and runtime alive; clicking the Dock icon or activating
+Orchard reopens (or re-fronts) the main window with its workbench state; auxiliary
+windows (Automations, Vault, Orchestration, Dashboard, Settings) keep their existing
+close behavior; Cmd-Q / Orchard ▸ Quit still performs the full termination path
+(keeper handoff, runtime stop, metadata removal — do not break T23). Add a small,
+truthful "runtime alive" indication reachable without the main window (the Dock menu
+and/or app menu). Unit-test the lifecycle decision logic where it is extractable;
+document what needs a human visual pass. Owns: Sources/OrchardApp/main.swift,
+Sources/OrchardApp/AppStore.swift (minor wiring only), docs. Does not touch
+OrchardTerminals, OrchardRuntime, or the CLI.
+
+**T52 — Terminal capture cleaner: stop mangling text.** The Vault reader shows cleaned
+captures losing whitespace AND characters: real samples from the live store include
+"Tipsforgettingstarted", "WelcomebackDaekeun!", "Bugfixesandreliabilityimprovements",
+"coorinatoronlythroughtheCLIcommandsbelow.Donotuse", and "paste gain to expad" (note
+dropped letters: should read "paste again to expand"), "coorinator" (dropped d-i),
+"handleis" ("handle is"). The cleaner (Sources/OrchardTerminals/
+TerminalCaptureCleaner.swift) must never emit a line it cannot clean faithfully —
+prefer passing the raw line through over collapsing or dropping characters. Extract
+real fixtures by COPYING ~/Library/Application Support/Orchard/orchestration.db into
+your worktree's test resources (worker_terminal_archives.raw_lines) — never open the
+live DB read-write and never point tests at the live path. Acceptance: fixture-driven
+tests over the real T50/T38/T34 captures assert no word-joins and no character loss
+versus raw; existing cleaner tests stay green or are corrected with justification.
+Owns: Sources/OrchardTerminals/TerminalCaptureCleaner.swift, Tests/** for it, test
+fixtures, docs. Does not touch OrchardApp or OrchardRuntime.
+
+**T53 — Small-finding sweep (dogfood-2/T32 leftovers).** Three small fixes, one
+branch: (1) the app-side worktree remove flow offers branch deletion in its preflight
+(v1 behavior; CLI `worktree rm --delete-branch` from T40 is the model — surface the
+same choice and result in the sheet); (2) `orchard host worktree-list` (or the actual
+remote worktree-list verb) gets a human-readable formatter including the staleness
+warning that today is JSON-only; (3) worker send in a Swift-debug context prints noisy
+output — find the debug-print leak and silence it behind a verbosity flag. Each fix
+gets a test where testable. Owns: Sources/orchard/**, Sources/OrchardApp worktree
+sheet/flow files, Sources/OrchardCore where the formatter lives, matching Tests/**.
+Does not touch Sources/OrchardApp/main.swift, TerminalCaptureCleaner.swift, or
+OrchardRuntime/Orchestration verb logic.
+
 ### Wave 13+ backlog
 
 From dogfood cycle 3: the "transient app exit" during the cycle matches a clean
