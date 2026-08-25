@@ -31,7 +31,7 @@ enum TabViewMode: String, Hashable, Codable {
 }
 
 enum TabKind: String, CaseIterable, Hashable, Identifiable {
-    case terminal, diff, editor, browser
+    case terminal, diff, editor, browser, conflicts
     var id: String { rawValue }
 
     var label: String {
@@ -40,6 +40,7 @@ enum TabKind: String, CaseIterable, Hashable, Identifiable {
         case .diff: return "Diff"
         case .editor: return "Editor"
         case .browser: return "Browser"
+        case .conflicts: return "Conflicts"
         }
     }
 
@@ -49,6 +50,7 @@ enum TabKind: String, CaseIterable, Hashable, Identifiable {
         case .diff: return "plusminus"
         case .editor: return "doc.text"
         case .browser: return "globe"
+        case .conflicts: return "arrow.triangle.merge"
         }
     }
 
@@ -60,6 +62,10 @@ enum TabKind: String, CaseIterable, Hashable, Identifiable {
         case .diff: return .diff
         case .editor: return .editor
         case .browser: return .browser
+        // Conflict review reads the local working tree and index exactly as the diff
+        // pane does, so it is gated by — and explained by — the same affordance rather
+        // than inventing a second word for one unavailability.
+        case .conflicts: return .diff
         }
     }
 }
@@ -214,6 +220,17 @@ indirect enum SplitNode: Identifiable, Hashable {
             return g.tabs.first { $0.id == id }
         case .split(_, _, let first, let second):
             return first.tab(id: id) ?? second.tab(id: id)
+        }
+    }
+
+    /// First tab of `kind` anywhere in the tree, with the group that holds it.
+    func findTab(kind: TabKind) -> (groupID: UUID, tabID: UUID)? {
+        switch self {
+        case .group(let g):
+            guard let tab = g.tabs.first(where: { $0.kind == kind }) else { return nil }
+            return (g.id, tab.id)
+        case .split(_, _, let first, let second):
+            return first.findTab(kind: kind) ?? second.findTab(kind: kind)
         }
     }
 
