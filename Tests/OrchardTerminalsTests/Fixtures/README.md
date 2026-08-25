@@ -1,8 +1,8 @@
 # Terminal capture fixtures
 
-Three verbatim `terminal_tail` archives Orchard pinned at `worker-release` during
-live dogfood cycles. `TerminalCaptureCleanerTests` and
-`TerminalCaptureFidelityTests` read them directly, so the chrome stripper is
+Four verbatim `terminal_tail` archives Orchard pinned at `worker-release` during
+live dogfood cycles. `TerminalCaptureCleanerTests`, `TerminalCaptureFidelityTests`,
+and `PostT54CaptureFixtureTests` read them directly, so the chrome stripper is
 measured against real noise rather than a synthetic imitation of it. Do not
 regenerate or tidy the files: their value is that they are untouched.
 
@@ -11,6 +11,7 @@ regenerate or tidy the files: their value is that they are untouched.
 | `claude-code-tui-capture.txt` | 1 (T34 retry, docs/reports/dogfood-1.md) | `ctx_0931b123463e` | 1,594 |
 | `claude-code-tui-capture-dogfood-2.txt` | 2 (T38, docs/reports/dogfood-2.md) | `ctx_c6ed09a10232` | 630 |
 | `claude-code-tui-capture-t50.txt` | 3 (T50, docs/reports/dogfood-3.md) | `ctx_49651f2f3c3f` | 430 |
+| `claude-code-tui-capture-t57.txt` | 4 (T57, docs/reports/dogfood-4.md) | `ctx_cc1a74b0234a` | 380 |
 
 One captured line per file line. Nothing was reformatted — the collapsed words,
 half-painted spinner frames, dropped letters, and repeated footer blocks are exactly
@@ -27,9 +28,13 @@ missing (`paste gain to expad` for "paste again to expand", `coorinator` for
 "coordinator"). That damage is upstream of the cleaner — see
 `docs/design/terminal-capture-fidelity.md` — and T54 root-caused and fixed it
 (`docs/design/capture-fidelity-upstream.md`; `UpstreamCaptureFidelityTests` reproduces
-the same shapes from a scripted cell-diff paint through the real engine). Captures
-pinned after T54 will read as whole rows; these three are kept verbatim as the record
-of what the cleaner was built against.
+the same shapes from a scripted cell-diff paint through the real engine). Cycle 4 is
+the first capture pinned after T54: the same Claude Code welcome box, preamble paste,
+and status bar as cycle 3, now arriving as whole rows (`Tips for getting started`,
+`Your coordinator's terminal handle is: cli`) with `respacedLines: 0` — the cleaner had
+nothing to re-space. `PostT54CaptureFixtureTests` pins its cleaned shape to the numbers
+the live `worker-release` reported. The three earlier captures are kept verbatim as the
+record of what the cleaner was built against.
 
 ## How these were extracted
 
