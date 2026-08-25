@@ -869,7 +869,34 @@ OrchardCore/Support/PaletteSources.swift + PaletteRanking if needed, the palette
 files in OrchardApp, matching tests. Does not touch SidebarView.swift, worktree meta, or
 CommandSpec.
 
-### Wave 18 (T66–T68, parallel)
+### Wave 18 (T66–T68, parallel) — MERGED 2026-08-25, 1077 tests, e2e PASS
+
+T66: empty `~/Orchard/worktrees/<repo>/` container removed after the last worktree
+goes (never recursive), typed automation errors (automation_not_found /
+_invalid_input / _disabled) incl. a disabled-once `run --id` guard, worker-read's
+200-line default documented. T67: UI-free DashboardCard/DashboardBoard projection
+with all inventory §6 card fields, done-until-acknowledged highlight, 40-card
+per-bucket cap (parentPaneKey has no live stamp yet — nil until orchestration
+stamps it). T68: conflict-review tab — UI-free GitConflicts (operation detection
+via --absolute-git-dir since a linked worktree's MERGE_HEAD lives in
+.git/worktrees/<name>, porcelain -z with the rename second-field trap, marker
+parsing, per-hunk ours/theirs/both, staging refused while markers remain,
+delete/modify resolves via git rm) + ConflictReviewPane auto-opening for a
+conflicted worktree without stealing the pane. Finishing/aborting an operation
+stays in the terminal by design; the pane itself is unit-verified only.
+
+**Coordinator-found palette defects (fixed on main, not worker work).** Live ⌘J
+verification of wave 17 found two: rows kept stale content when the query
+refiltered (`.id(index)` fought the ForEach's data identity — now keyed by
+candidate), and a repo with no secondary worktrees was unreachable because the
+catalog seeded only from `records` while the primary checkout is its own sidebar
+row (new PaletteProjectSeed / `root:` candidates / `.selectProjectRoot`). A first
+attempt at the latter read `project.rootSubtitle` inside the catalog and crashed
+the app (SwiftUI AttributeGraph precondition, SIGABRT) — that property shells out
+to git and the catalog rebuilds on every keystroke; the render path now stays
+git-free. Tooling note: `orca computer press-key Escape` does not reach the
+palette's KeyCaptureView (a stuck sheet then blocks Cmd-Q with -128);
+`osascript 'key code 53'` does.
 
 **T66 — Dogfood-5 minor findings sweep.** (1) `worktree rm` and `repo remove` must
 remove the now-empty `~/Orchard/worktrees/<repo>/` container directory (only when
