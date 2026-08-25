@@ -933,7 +933,16 @@ Sources/OrchardApp conflict-review view files + WorkbenchView tab-kind wiring +
 minimal AppStore additions, matching tests. Does not touch
 AgentDashboardView.swift, Automations, or worktree removal paths.
 
-### Wave 19 (T69–T71, parallel)
+### Wave 19 (T69–T71, parallel) — MERGED 2026-08-25, 1106 tests
+
+T69 dogfood-6: cycle holds (ready 5s, settled 16s, respacedLines 0); T68's conflict
+LOGIC verified live against six real merge/rebase conflicts in linked worktrees;
+waves 16–18 fixes all held. One real defect found → T72. T70: source-control panel
+(staged/unstaged, stage/unstage, typed commit refusals, branch switch/create,
+push/pull only with a remote) over a new UI-free GitSourceControl. T71: floating
+terminal bound to an existing pane's session (close unbinds, never kills the PTY)
+plus status-bar workspace/branch, dashboard bucket counts, runtime item. Three GUI
+surfaces landed without a visual pass → T74.
 
 **T69 — Dogfood cycle 6 (report-only).** CLI only; never launch/quit the app; never
 touch terminals/worktrees you did not create. (1) Full supervised cycle to
@@ -972,6 +981,48 @@ a new floating-terminal view file + its window creation in main.swift, minimal
 AppStore wiring, matching tests where extractable. Does not touch
 AgentDashboardView.swift, DashboardProjection.swift, SourceControl/**, or
 OrchardTerminals internals.
+
+### Wave 20 (T72–T74, parallel)
+
+**T72 — Conflict resolution must be byte-exact (data-loss fix).** dogfood-6 found
+`GitRunner.Output.stdout` decodes with `String(decoding:as: UTF8.self)`, so
+GitConflictService round-trips file content lossily: `take()` on a binary conflict
+rewrote a 768-byte blob as 1792 bytes of U+FFFD **and staged it**, and `resolve()`
+corrupted an untouched Latin-1 header line. For binaries the Take buttons are the
+pane's only route, so the broken path is the only path. Fix: give GitRunner a raw
+`Data` stdout variant (do not change the existing String API's callers) and make
+whole-file take a byte-exact copy of the chosen index stage; per-hunk resolution
+needs text, so refuse it with a typed error when the file is not valid UTF-8, and
+say so in the pane. Audit every other place that writes file content read through
+the String path. Tests must include binary and Latin-1 fixtures — T68's 25 tests
+were all `.utf8`, which is why this shipped. Owns: OrchardCore/Git/GitRunner.swift,
+GitConflicts.swift, Conflicts/ConflictReviewPane.swift, their tests. Does not touch
+GitSourceControl.swift, SourceControl/**, or Automations.
+
+**T73 — Conflict verbs on the CLI/RPC surface.** dogfood-6: the entire T68 surface
+is GUI-only (zero conflict verbs in agent-context), so no agent can see or resolve
+a conflict and the tab could not be dogfooded. Add `orchard conflicts
+list|show|take|resolve|stage` over the same UI-free service the pane uses (list
+conflicted files for a worktree; show hunks; take ours/theirs whole-file; resolve a
+hunk; stage a fully-decided file — with the same refusals: never stage while markers
+remain, typed errors throughout), CommandSpec entries, and guide coverage. Owns:
+Sources/orchard/**, OrchardProtocol/CommandSpec.swift, a new conflict command
+handler in OrchardRuntime, guide text, matching tests. Does not edit
+GitConflicts.swift or GitRunner.swift (T72 owns those) — call them as they are.
+
+**T74 — Wave 19/20 visual pass + agent-context freshness (report-only).** Three
+GUI surfaces landed unverified (source-control panel, floating terminal +
+status-bar items, conflict-review pane) and dogfood-6 noted `worker-read` still has
+no `hasOlder` field. Drive the RUNNING app through computer-use ONLY for reading
+(screenshots + AX trees; never quit or relaunch it, never send input into the user's
+terminals): confirm the source-control section renders staged/unstaged and its
+error surfaces, the status bar shows workspace/branch, agent buckets and the runtime
+item, and the floating terminal's menu affordance exists. Note honestly what
+synthetic input cannot verify (SwiftUI key handling — `orca computer press-key`
+does not reach KeyCaptureView; use System Events key codes). Also diff
+`agent-context --json` against the CommandSpec table and report any verb whose help
+or allowedValues drifted. Report docs/reports/visual-pass-w19.md. Owns only that
+report.
 
 ### Wave 16 source findings (from dogfood-4, docs/reports/dogfood-4.md)
 
