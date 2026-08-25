@@ -140,15 +140,24 @@ public final class OrchardRuntimeHost {
                 guard let taskID = taskValue.field("taskId")?.stringValue else {
                     throw AutomationScheduleError.invalid("could not create automation task")
                 }
-                let value = try await orchestration.workerStart([
+                var start: [String: JSONValue] = [
                     "task": .string(taskID), "repo": .string(selector),
                     "worktree": .string("new-top-level"), "agent": .string(automation.provider),
                     "name": .string("automation-\(automation.id.suffix(8))-\(Int(Date().timeIntervalSince1970))"),
-                    "setup": .string("run")], runtime: workerRuntime)
+                    "setup": .string("run")]
+                // T60: a shell provider gets its prompt as an executable command line
+                // (run → worker_done with the exit status → exit), never the agent
+                // preamble, which zsh cannot execute and would hold in pending input.
+                if AutomationShellDispatch.isShellProvider(automation.provider) {
+                    start[AutomationShellDispatch.workerStartParam] = .string(AutomationShellDispatch.shellCommandMode)
+                }
+                let value = try await orchestration.workerStart(start, runtime: workerRuntime)
                 return AutomationFireReceipt(worktreeId: value.field("effects")?.arrayValue?
                     .first(where: { $0.field("kind")?.stringValue == "worktree" })?.field("id")?.stringValue,
                     terminalId: value.field("effects")?.arrayValue?
-                    .first(where: { $0.field("kind")?.stringValue == "terminal" })?.field("id")?.stringValue)
+                    .first(where: { $0.field("kind")?.stringValue == "terminal" })?.field("id")?.stringValue,
+                    runId: value.field("runId")?.stringValue,
+                    dispatchId: value.field("dispatchId")?.stringValue)
             case .workspace(let selector):
                 let workspace = try await workspaceService.resolveWorkspace(selector, cwd: nil)
                 let terminals = await terminalService.list(worktreeId: workspace.id)

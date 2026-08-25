@@ -87,4 +87,67 @@ final class AutomationScheduleTests: XCTestCase {
                                              through: date("2026-08-23T12:40:00Z"), calendar: calendar)
         XCTAssertEqual(enabled.count, 1)
     }
+
+    // MARK: - once (T60)
+
+    private func once(_ time: String, createdAt: String) -> Automation {
+        var item = automation(.once, time)
+        item.createdAt = date(createdAt)
+        return item
+    }
+
+    func testOnceResolvesNowHHmmAndInstants() throws {
+        XCTAssertEqual(try AutomationSchedule.onceFireDate(once("now", createdAt: "2026-08-25T10:30:45Z"), calendar: calendar),
+                       date("2026-08-25T10:30:00Z"))
+        XCTAssertEqual(try AutomationSchedule.onceFireDate(once("2026-08-26T07:05:30Z", createdAt: "2026-08-25T10:30:45Z"), calendar: calendar),
+                       date("2026-08-26T07:05:00Z"))
+        XCTAssertEqual(try AutomationSchedule.onceFireDate(once("2026-08-26T07:05Z", createdAt: "2026-08-25T10:30:45Z"), calendar: calendar),
+                       date("2026-08-26T07:05:00Z"), "hand-typed instants without seconds resolve")
+        XCTAssertEqual(try AutomationSchedule.onceFireDate(once("2026-08-26T16:05:00+09:00", createdAt: "2026-08-25T10:30:45Z"), calendar: calendar),
+                       date("2026-08-26T07:05:00Z"), "offsets are honoured")
+        // HH:mm is the first such minute at or after the creation minute.
+        XCTAssertEqual(try AutomationSchedule.onceFireDate(once("10:30", createdAt: "2026-08-25T10:30:45Z"), calendar: calendar),
+                       date("2026-08-25T10:30:00Z"))
+        XCTAssertEqual(try AutomationSchedule.onceFireDate(once("09:00", createdAt: "2026-08-25T10:30:45Z"), calendar: calendar),
+                       date("2026-08-26T09:00:00Z"))
+        XCTAssertThrowsError(try AutomationSchedule.validate(once("soon", createdAt: "2026-08-25T10:30:45Z")))
+        XCTAssertThrowsError(try AutomationSchedule.validate(once("25:00", createdAt: "2026-08-25T10:30:45Z")))
+        XCTAssertNoThrow(try AutomationSchedule.validate(once("now", createdAt: "2026-08-25T10:30:45Z")))
+    }
+
+    func testOnceMatchesAndNextFireOnlyBeforeItsSlot() throws {
+        let item = once("2026-08-26T07:05:00Z", createdAt: "2026-08-25T10:30:45Z")
+        XCTAssertTrue(try AutomationSchedule.matches(item, date("2026-08-26T07:05:20Z"), calendar: calendar))
+        XCTAssertFalse(try AutomationSchedule.matches(item, date("2026-08-26T07:06:00Z"), calendar: calendar))
+        XCTAssertEqual(try AutomationSchedule.nextFire(for: item, after: date("2026-08-25T12:00:00Z"), calendar: calendar),
+                       date("2026-08-26T07:05:00Z"))
+        XCTAssertThrowsError(try AutomationSchedule.nextFire(for: item, after: date("2026-08-26T07:05:00Z"), calendar: calendar),
+                             "a passed once slot has no next fire")
+    }
+
+    func testOnceIsDueFromItsSlotUntilRecordedRegardlessOfSince() {
+        let item = once("2026-08-26T07:05:00Z", createdAt: "2026-08-25T10:30:45Z")
+        XCTAssertTrue(AutomationSchedule.due([item], since: .distantPast,
+                                             through: date("2026-08-26T07:04:59Z"), calendar: calendar).isEmpty)
+        let atSlot = AutomationSchedule.due([item], since: date("2026-08-26T07:04:30Z"),
+                                            through: date("2026-08-26T07:05:10Z"), calendar: calendar)
+        XCTAssertEqual(atSlot.first?.1, date("2026-08-26T07:05:00Z"))
+        // Runtime was down for a day: the slot is still due on the first pass back,
+        // even though `since` (the scheduler checkpoint) is far past the slot.
+        let catchUp = AutomationSchedule.due([item], since: date("2026-08-27T09:00:00Z"),
+                                             through: date("2026-08-27T09:00:30Z"), calendar: calendar)
+        XCTAssertEqual(catchUp.first?.1, date("2026-08-26T07:05:00Z"))
+        // Recorded → never again; re-armed to a new slot → due at that slot.
+        XCTAssertTrue(AutomationSchedule.due([item], since: .distantPast, through: date("2026-08-27T09:00:30Z"),
+                                             lastRuns: [item.id: date("2026-08-26T07:05:00Z")], calendar: calendar).isEmpty)
+        var rearmed = item
+        rearmed.time = "2026-08-27T08:00:00Z"
+        let again = AutomationSchedule.due([rearmed], since: .distantPast, through: date("2026-08-27T09:00:30Z"),
+                                           lastRuns: [item.id: date("2026-08-26T07:05:00Z")], calendar: calendar)
+        XCTAssertEqual(again.first?.1, date("2026-08-27T08:00:00Z"))
+        var disabled = item
+        disabled.enabled = false
+        XCTAssertTrue(AutomationSchedule.due([disabled], since: .distantPast,
+                                             through: date("2026-08-27T09:00:30Z"), calendar: calendar).isEmpty)
+    }
 }

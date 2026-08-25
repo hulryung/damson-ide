@@ -9,6 +9,9 @@ public struct AutomationCommandHandler: CommandHandler {
     public init(service: AutomationService) { self.service = service }
     public func handle(_ request: RPCRequest) async -> RPCResponse {
         do { return .success(id: request.id, result: try await route(request)) }
+        catch let error as AutomationScheduleError {
+            return .failure(id: request.id, error: RPCError(code: error.code, message: error.description))
+        }
         catch { return .failure(id: request.id, error: RPCError(code: "automation_error", message: String(describing: error))) }
     }
     private func route(_ request: RPCRequest) async throws -> JSONValue {

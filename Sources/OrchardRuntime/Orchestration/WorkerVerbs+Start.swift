@@ -30,6 +30,10 @@ extension LiveOrchestrationStore {
                 message: "worker-start requires exactly one of --agent or --terminal.")
         }
         let placement = try Self.placement(p)
+        // T60: `dispatch-input shell-command` (automation fires with a shell provider)
+        // replaces the agent preamble with one executable command line; only a bare
+        // shell can run it, so any other engine is refused before anything is created.
+        let shellCommandInput = try AutomationShellDispatch.wantsShellCommand(p, agentID: agentID)
         // Refused before a dispatch row exists, exactly like `--on`: a supervised
         // dispatch that could never discharge its duties should leave nothing
         // half-created behind for a coordinator to clean up (T39).
@@ -204,12 +208,18 @@ extension LiveOrchestrationStore {
                     worktreeID: worktree?.id,
                     externalTerminal: external)
 
-                // Stage: dispatch_input — the verified injection of the preamble.
+                // Stage: dispatch_input — the verified injection of the preamble (or,
+                // for a shell-command dispatch, the self-settling command line).
                 stage = "dispatch_input"
-                let preamble = self.workerPreamble(
-                    task: task, run: run, dispatchID: dispatchID,
-                    capability: capability, workerHandle: summary.handle,
-                    cliCommand: runtime.cliCommand)
+                let preamble = shellCommandInput
+                    ? AutomationShellDispatch.commandLine(
+                        prompt: task.spec, cliCommand: runtime.cliCommand,
+                        workerHandle: summary.handle, capability: capability,
+                        taskID: taskID, dispatchID: dispatchID)
+                    : self.workerPreamble(
+                        task: task, run: run, dispatchID: dispatchID,
+                        capability: capability, workerHandle: summary.handle,
+                        cliCommand: runtime.cliCommand)
                 let delivered = try await runtime.injectPrompt(summary.handle, preamble)
                 guard delivered.accepted else {
                     let reason = delivered.refusedReason?.rawValue ?? "refused"
@@ -222,6 +232,8 @@ extension LiveOrchestrationStore {
                     "role": .string("agent"),
                     "id": .string(summary.handle),
                     "state": .string("accepted"),
+                    "mode": .string(shellCommandInput
+                        ? AutomationShellDispatch.shellCommandMode : "preamble"),
                 ]))
                 let worker = try self.store.markWorkerDispatchReady(
                     dispatchID, effects: Self.encodeReceipt(.array(effects)))

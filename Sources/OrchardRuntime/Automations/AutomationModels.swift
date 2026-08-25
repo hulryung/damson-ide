@@ -2,6 +2,10 @@ import Foundation
 
 public enum AutomationTrigger: String, Codable, CaseIterable, Sendable {
     case hourly, daily, weekdays, weekly
+    /// T60: fires a single time, then the automation is disabled by the service.
+    /// `time` is an ISO-8601 instant, `HH:mm` (next occurrence after creation), or
+    /// `now` (the creation minute). See `AutomationSchedule.onceFireDate`.
+    case once
     case cron = "five-field-cron"
 }
 
@@ -29,7 +33,8 @@ public struct Automation: Codable, Equatable, Identifiable, Sendable {
     public var id: String
     public var name: String
     public var trigger: AutomationTrigger
-    /// HH:mm for built-ins, five fields for cron.
+    /// HH:mm for built-ins, five fields for cron, an ISO-8601 instant / HH:mm /
+    /// `now` for once.
     public var time: String
     /// Sunday = 0, only meaningful for weekly.
     public var day: Int?
@@ -113,12 +118,20 @@ public struct AutomationRun: Codable, Equatable, Identifiable, Sendable {
     public var message: String?
     public var worktreeId: String?
     public var terminalId: String?
+    /// T60: the orchestration Run / Dispatch a repo-target fire opened, so the
+    /// worker it started can be inspected, released, and its settlement audited
+    /// (`worker-show --dispatch`, `worker-release --dispatch`). nil for workspace
+    /// targets (prompt sent to an existing agent) and pre-T60 rows.
+    public var orchestrationRunId: String?
+    public var dispatchId: String?
     public init(id: String = "arun_" + UUID().uuidString.lowercased(), automationId: String,
                 scheduledAt: Date, startedAt: Date, finishedAt: Date,
                 outcome: AutomationRunOutcome, message: String? = nil,
-                worktreeId: String? = nil, terminalId: String? = nil) {
+                worktreeId: String? = nil, terminalId: String? = nil,
+                orchestrationRunId: String? = nil, dispatchId: String? = nil) {
         self.id = id; self.automationId = automationId; self.scheduledAt = scheduledAt
         self.startedAt = startedAt; self.finishedAt = finishedAt; self.outcome = outcome
         self.message = message; self.worktreeId = worktreeId; self.terminalId = terminalId
+        self.orchestrationRunId = orchestrationRunId; self.dispatchId = dispatchId
     }
 }

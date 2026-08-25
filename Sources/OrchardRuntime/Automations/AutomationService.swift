@@ -4,8 +4,14 @@ import OrchardProtocol
 public struct AutomationFireReceipt: Sendable {
     public var worktreeId: String?
     public var terminalId: String?
-    public init(worktreeId: String? = nil, terminalId: String? = nil) {
+    /// The orchestration Run / Dispatch the fire opened (repo targets), recorded on
+    /// the history row so the fired worker's settlement is inspectable.
+    public var runId: String?
+    public var dispatchId: String?
+    public init(worktreeId: String? = nil, terminalId: String? = nil,
+                runId: String? = nil, dispatchId: String? = nil) {
         self.worktreeId = worktreeId; self.terminalId = terminalId
+        self.runId = runId; self.dispatchId = dispatchId
     }
 }
 
@@ -16,6 +22,12 @@ public actor AutomationService {
     private let store: OrchardDataStore
     private let fire: AutomationFire
     private var changeContinuations: [UUID: AsyncStream<Void>.Continuation] = [:]
+    /// T60 single-fire guard: automation id → the slot whose fire is in flight.
+    /// Claimed synchronously (no suspension) before the fire callback is awaited
+    /// and released only after the run row is persisted, so every path that can
+    /// start a worker — the in-process scheduler, CLI `fire-due`, `run --id` —
+    /// sees one claim and exactly one run per slot comes out of a race.
+    private var inFlight: [String: Date] = [:]
 
     public init(store: OrchardDataStore, fire: @escaping AutomationFire) {
         self.store = store; self.fire = fire
@@ -99,62 +111,105 @@ public actor AutomationService {
         for continuation in changeContinuations.values { continuation.yield(()) }
     }
 
-    @discardableResult public func run(_ automation: Automation, scheduledAt: Date = Date()) async -> AutomationRun {
+    /// Manual fire (`automations run --id`). Refused typed while a fire for the
+    /// same automation is in flight.
+    @discardableResult
+    public func run(_ automation: Automation, scheduledAt: Date = Date()) async throws -> AutomationRun {
+        guard claim(automation.id, slot: scheduledAt) else {
+            throw AutomationScheduleError.fireInFlight(automationId: automation.id)
+        }
+        return await execute(automation, scheduledAt: scheduledAt)
+    }
+
+    public func run(id: String) async throws -> AutomationRun {
+        guard let automation = show(id) else { throw AutomationScheduleError.invalid("automation not found") }
+        return try await run(automation)
+    }
+
+    /// Slots `fireDue` would start. Observation only — does not persist or fire.
+    /// An automation whose fire is in flight is not listed: its slot is claimed.
+    public func due(since: Date, through now: Date = Date()) -> [(automation: Automation, scheduledAt: Date)] {
+        let data = store.load()
+        let latest = Dictionary(grouping: data.automationRuns, by: \.automationId)
+            .compactMapValues { $0.map(\.scheduledAt).max() }
+        return AutomationSchedule.due(data.automations, since: since, through: now, lastRuns: latest)
+            .filter { inFlight[$0.0.id] == nil }
+            .map { (automation: $0.0, scheduledAt: $0.1) }
+    }
+
+    /// Fire every due slot in `(since, now]`, including a matching current minute.
+    /// Returns the persisted run records (empty when nothing was due).
+    ///
+    /// Every due slot is claimed before the first fire is awaited, so a concurrent
+    /// `fireDue` (scheduler tick vs. CLI) computes an empty due list instead of
+    /// starting the same slot a second time.
+    @discardableResult
+    public func fireDue(since: Date, through now: Date = Date()) async -> [AutomationRun] {
+        let claimed = due(since: since, through: now).filter { claim($0.automation.id, slot: $0.scheduledAt) }
+        var runs: [AutomationRun] = []
+        for (automation, slot) in claimed {
+            runs.append(await execute(automation, scheduledAt: slot))
+        }
+        return runs
+    }
+
+    /// Whether a fire is currently in flight for `id` (test/observation hook).
+    public func isFireInFlight(_ id: String) -> Bool { inFlight[id] != nil }
+
+    private func claim(_ id: String, slot: Date) -> Bool {
+        if inFlight[id] != nil { return false }
+        inFlight[id] = slot
+        return true
+    }
+
+    /// The claimed fire: precheck, fire callback, persist. The claim is released
+    /// after `persist` — both run inside the actor without suspension, so no other
+    /// caller can observe "run not yet recorded, claim already gone".
+    private func execute(_ automation: Automation, scheduledAt: Date) async -> AutomationRun {
+        defer { inFlight.removeValue(forKey: automation.id) }
         let started = Date()
+        let once = automation.trigger == .once
         if let command = automation.precheck, !command.isEmpty {
             let check = await Self.precheck(command, timeout: automation.precheckTimeoutSeconds)
             guard check.exitCode == 0 else {
                 let run = AutomationRun(automationId: automation.id, scheduledAt: scheduledAt,
                     startedAt: started, finishedAt: Date(), outcome: .skipped,
                     message: check.timedOut ? "precheck timed out" : "precheck exited \(check.exitCode)")
-                persist(run); return run
+                persist(run, disableAutomation: once); return run
             }
         }
         do {
             let receipt = try await fire(automation)
             let run = AutomationRun(automationId: automation.id, scheduledAt: scheduledAt,
                 startedAt: started, finishedAt: Date(), outcome: .fired,
-                worktreeId: receipt.worktreeId, terminalId: receipt.terminalId)
-            persist(run); return run
+                message: once ? Self.onceConsumedMessage : nil,
+                worktreeId: receipt.worktreeId, terminalId: receipt.terminalId,
+                orchestrationRunId: receipt.runId, dispatchId: receipt.dispatchId)
+            persist(run, disableAutomation: once); return run
         } catch {
             let run = AutomationRun(automationId: automation.id, scheduledAt: scheduledAt,
                 startedAt: started, finishedAt: Date(), outcome: .failed,
                 message: String(describing: error))
-            persist(run); return run
+            persist(run, disableAutomation: once); return run
         }
     }
 
-    public func run(id: String) async throws -> AutomationRun {
-        guard let automation = show(id) else { throw AutomationScheduleError.invalid("automation not found") }
-        return await run(automation)
-    }
+    /// Stamped on the fired row of a `once` automation.
+    public static let onceConsumedMessage = "once schedule consumed; automation disabled"
 
-    /// Slots `fireDue` would start. Observation only — does not persist or fire.
-    public func due(since: Date, through now: Date = Date()) -> [(automation: Automation, scheduledAt: Date)] {
-        let data = store.load()
-        let latest = Dictionary(grouping: data.automationRuns, by: \.automationId)
-            .compactMapValues { $0.map(\.scheduledAt).max() }
-        return AutomationSchedule.due(data.automations, since: since, through: now, lastRuns: latest)
-            .map { (automation: $0.0, scheduledAt: $0.1) }
-    }
-
-    /// Fire every due slot in `(since, now]`, including a matching current minute.
-    /// Returns the persisted run records (empty when nothing was due).
-    @discardableResult
-    public func fireDue(since: Date, through now: Date = Date()) async -> [AutomationRun] {
-        var runs: [AutomationRun] = []
-        for (automation, slot) in due(since: since, through: now) {
-            runs.append(await run(automation, scheduledAt: slot))
-        }
-        return runs
-    }
-
-    private func persist(_ run: AutomationRun) {
+    /// Append the run row (bounded history) and, for a `once` automation, flip
+    /// `enabled` off in the same store write: one attempt is the whole schedule,
+    /// whatever its outcome (fired, failed, or precheck-skipped).
+    private func persist(_ run: AutomationRun, disableAutomation: Bool = false) {
         do {
             try store.modify { data in
                 data.automationRuns.append(run)
                 if data.automationRuns.count > Self.historyLimit {
                     data.automationRuns.removeFirst(data.automationRuns.count - Self.historyLimit)
+                }
+                if disableAutomation,
+                   let index = data.automations.firstIndex(where: { $0.id == run.automationId }) {
+                    data.automations[index].enabled = false
                 }
             }
             notifyChanges()

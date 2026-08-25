@@ -91,4 +91,76 @@ final class AutomationCommandHandlerTests: XCTestCase {
         XCTAssertFalse(response.ok)
         XCTAssertEqual(response.error?.code, "automation_error")
     }
+
+    // MARK: - T60
+
+    func testOnceCreatesFiresAndAutoDisablesOverRPC() async throws {
+        let counter = FireCounter()
+        let (handler, _, root) = try fixture { _ in
+            counter.increment()
+            return AutomationFireReceipt(worktreeId: "wt", terminalId: "term",
+                                         runId: "run_x", dispatchId: "ctx_x")
+        }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let created = await call(handler, "automations-create", [
+            "name": .string("one-shot"),
+            "trigger": .string("once"),
+            "time": .string("now"),
+            "provider": .string("shell"),
+            "prompt": .string("printf hi"),
+            "repo": .string("repo"),
+        ])
+        XCTAssertTrue(created.ok, created.error?.message ?? "")
+        let id = try XCTUnwrap(created.result?.objectValue?["id"]?.stringValue)
+        XCTAssertEqual(created.result?.objectValue?["trigger"]?.stringValue, "once")
+
+        let due = await call(handler, "automations-due", [:])
+        XCTAssertEqual(due.result?.objectValue?["due"]?.arrayValue?.count, 1)
+
+        let fired = await call(handler, "automations-fire-due", [:])
+        XCTAssertTrue(fired.ok, fired.error?.message ?? "")
+        let runs = fired.result?.objectValue?["runs"]?.arrayValue ?? []
+        XCTAssertEqual(runs.count, 1)
+        XCTAssertEqual(runs.first?.objectValue?["outcome"]?.stringValue, "fired")
+        XCTAssertEqual(runs.first?.objectValue?["dispatchId"]?.stringValue, "ctx_x")
+        XCTAssertEqual(runs.first?.objectValue?["orchestrationRunId"]?.stringValue, "run_x")
+        XCTAssertEqual(counter.value, 1)
+
+        let shown = await call(handler, "automations-show", ["id": .string(id)])
+        XCTAssertEqual(shown.result?.objectValue?["enabled"]?.boolValue, false)
+        let dueAfter = await call(handler, "automations-due", [:])
+        XCTAssertEqual(dueAfter.result?.objectValue?["due"]?.arrayValue?.count, 0)
+        let again = await call(handler, "automations-fire-due", [:])
+        XCTAssertEqual(again.result?.objectValue?["runs"]?.arrayValue?.count, 0)
+        XCTAssertEqual(counter.value, 1)
+
+        let invalid = await call(handler, "automations-create", [
+            "name": .string("bad-once"), "trigger": .string("once"), "time": .string("tomorrow-ish"),
+            "provider": .string("shell"), "prompt": .string("true"), "repo": .string("repo"),
+        ])
+        XCTAssertFalse(invalid.ok)
+        XCTAssertEqual(invalid.error?.code, "automation_error")
+    }
+
+    func testManualRunDuringAFireIsRefusedTyped() async throws {
+        let (handler, _, root) = try fixture { _ in
+            try await Task.sleep(nanoseconds: 300_000_000)
+            return AutomationFireReceipt(worktreeId: "wt", terminalId: "term")
+        }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let created = await call(handler, "automations-create", [
+            "name": .string("slow"), "trigger": .string("daily"), "time": .string("12:00"),
+            "provider": .string("shell"), "prompt": .string("true"), "repo": .string("repo"),
+        ])
+        let id = try XCTUnwrap(created.result?.objectValue?["id"]?.stringValue)
+        let first = Task { await self.call(handler, "automations-run", ["id": .string(id)]) }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let second = await call(handler, "automations-run", ["id": .string(id)])
+        XCTAssertFalse(second.ok)
+        XCTAssertEqual(second.error?.code, "automation_fire_in_flight")
+        let firstResponse = await first.value
+        XCTAssertTrue(firstResponse.ok, firstResponse.error?.message ?? "")
+        let history = await call(handler, "automations-runs", ["id": .string(id)])
+        XCTAssertEqual(history.result?.objectValue?["runs"]?.arrayValue?.count, 1)
+    }
 }

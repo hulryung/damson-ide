@@ -15,6 +15,7 @@ struct AutomationEditorSheet: View {
     @State private var time = "09:00"
     @State private var day = 1
     @State private var cron = "0 9 * * 1-5"
+    @State private var onceAt = ""
     @State private var targetKind: TargetKind = .repo
     @State private var repoSelector = ""
     @State private var workspaceSelector = ""
@@ -40,7 +41,19 @@ struct AutomationEditorSheet: View {
     private var engines: [EngineOption] { EngineOption.all }
 
     private var scheduleTime: String {
-        trigger == .cron ? cron : time
+        switch trigger {
+        case .cron: return cron
+        case .once: return onceAt
+        default: return time
+        }
+    }
+
+    /// Default for a fresh Once schedule: five minutes out, to the minute, UTC.
+    private static func defaultOnceAt(now: Date = Date()) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        let slot = AutomationSchedule.minute(of: now.addingTimeInterval(300)) ?? now
+        return formatter.string(from: slot)
     }
 
     private var scheduleDay: Int? { trigger == .weekly ? day : nil }
@@ -156,7 +169,10 @@ struct AutomationEditorSheet: View {
             if next == .cron, cron.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 cron = "0 9 * * 1-5"
             }
-            if next != .cron {
+            if next == .once, onceAt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                onceAt = Self.defaultOnceAt()
+            }
+            if next != .cron && next != .once {
                 let parts = time.split(separator: ":")
                 if parts.count != 2 { time = "09:00" }
             }
@@ -183,12 +199,22 @@ struct AutomationEditorSheet: View {
                     Text("Daily").tag(AutomationTrigger.daily)
                     Text("Weekdays").tag(AutomationTrigger.weekdays)
                     Text("Weekly").tag(AutomationTrigger.weekly)
+                    Text("Once").tag(AutomationTrigger.once)
                     Text("Cron").tag(AutomationTrigger.cron)
                 }
                 .labelsHidden()
                 .pickerStyle(.segmented)
             }
-            if trigger == .cron {
+            if trigger == .once {
+                field("Fire at (ISO-8601 UTC, HH:mm, or now)") {
+                    TextField("2026-01-01T09:00:00Z", text: $onceAt)
+                        .textFieldStyle(.roundedBorder)
+                        .font(Tokens.fontMono)
+                    Text("Fires a single time, then the automation disables itself.")
+                        .font(Tokens.fontMeta)
+                        .foregroundStyle(Tokens.textTertiary)
+                }
+            } else if trigger == .cron {
                 field("Cron (five fields)") {
                     TextField("0 9 * * 1-5", text: $cron)
                         .textFieldStyle(.roundedBorder)
@@ -296,10 +322,14 @@ struct AutomationEditorSheet: View {
         if let existing = mode.existing {
             name = existing.name
             trigger = existing.trigger
-            if existing.trigger == .cron {
+            switch existing.trigger {
+            case .cron:
                 cron = existing.time
                 time = "09:00"
-            } else {
+            case .once:
+                onceAt = existing.time
+                time = "09:00"
+            default:
                 time = existing.time
             }
             day = existing.day ?? 1
