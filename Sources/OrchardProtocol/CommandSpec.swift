@@ -253,8 +253,8 @@ public enum OrchardCommands {
             command("automations", "Manage scheduled prompts", [
                 flag("id", "Automation identifier", "id"),
                 flag("name", "Unique display name", "text"),
-                flag("trigger", "Schedule kind", "hourly|daily|weekdays|weekly|five-field-cron"),
-                flag("time", "HH:mm or quoted five-field cron expression", "schedule"),
+                flag("trigger", "Schedule kind", "once|hourly|daily|weekdays|weekly|five-field-cron"),
+                flag("time", "ISO date, HH:mm, `now` (once), or quoted five-field cron expression", "schedule"),
                 flag("day", "Weekly weekday (Sunday 0 through Saturday 6)", "n"),
                 flag("provider", "Agent provider identifier", "agent"),
                 flag("prompt", "Prompt delivered when fired", "text"),
