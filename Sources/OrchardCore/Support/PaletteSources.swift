@@ -37,6 +37,18 @@ public struct PaletteCandidate: Equatable, Sendable, Identifiable {
     }
 }
 
+public struct PaletteProjectSeed: Equatable, Sendable {
+    public var id: UUID
+    public var name: String
+    public var branch: String
+
+    public init(id: UUID, name: String, branch: String) {
+        self.id = id
+        self.name = name
+        self.branch = branch
+    }
+}
+
 public struct PaletteWorkspaceSeed: Equatable, Sendable {
     public var id: UUID
     public var title: String
@@ -176,6 +188,8 @@ public enum PaletteCommand: String, CaseIterable, Sendable, Identifiable {
 public enum PaletteActivation: Equatable, Sendable {
     /// Select that worktree as the current workspace.
     case selectWorkspace(UUID)
+    /// Select a repo's primary checkout (the sidebar's project-root row).
+    case selectProjectRoot(UUID)
     /// Focus the agent's pane (select its worktree and bind its tab).
     case focusAgent(UUID)
     /// Open the worktree-relative path in the editor (Option still maps to diff
@@ -202,6 +216,24 @@ public enum PaletteSources {
                 subtitle: command.subtitle,
                 symbol: command.symbol,
                 fields: fields)
+        }
+    }
+
+    /// The repo's primary checkout. It is a sidebar row of its own (`ProjectRootRow`,
+    /// not a `records` entry), so seeding the palette from worktree records alone left
+    /// a repo with no secondary worktrees unreachable from ⌘J.
+    public static func projectRoots(_ seeds: [PaletteProjectSeed]) -> [PaletteCandidate] {
+        seeds.map { seed in
+            PaletteCandidate(
+                id: "root:\(seed.id.uuidString)",
+                kind: .workspace,
+                title: seed.name,
+                subtitle: seed.branch.isEmpty ? "Repo" : "Repo · \(seed.branch)",
+                symbol: "house",
+                fields: [
+                    PaletteField(text: seed.name, weight: 300),
+                    PaletteField(text: seed.branch, weight: 200),
+                ])
         }
     }
 
@@ -266,9 +298,11 @@ public enum PaletteSources {
         files paths: [String],
         workspaceTitle: String,
         includeFiles: Bool,
-        includeCommands: Bool = true
+        includeCommands: Bool = true,
+        projectRoots rootSeeds: [PaletteProjectSeed] = []
     ) -> [PaletteCandidate] {
         var items: [PaletteCandidate] = []
+        items.append(contentsOf: projectRoots(rootSeeds))
         items.append(contentsOf: workspaces(seeds))
         items.append(contentsOf: agents(agentSeeds))
         if includeCommands {
@@ -284,6 +318,11 @@ public enum PaletteSources {
         PaletteRanking.rank(query: query, items: candidates) { candidate in
             candidate.fields.map { ($0.text, $0.weight) }
         }
+    }
+
+    public static func parseProjectRootID(_ id: String) -> UUID? {
+        guard id.hasPrefix("root:") else { return nil }
+        return UUID(uuidString: String(id.dropFirst(5)))
     }
 
     public static func parseWorkspaceID(_ id: String) -> UUID? {
@@ -309,6 +348,7 @@ public enum PaletteSources {
     /// Map a catalog row id onto the T65 activation: worktree → select workspace,
     /// file → open in editor, agent → focus its pane, command → execute.
     public static func activation(for id: String) -> PaletteActivation? {
+        if let projectID = parseProjectRootID(id) { return .selectProjectRoot(projectID) }
         if let workspaceID = parseWorkspaceID(id) { return .selectWorkspace(workspaceID) }
         if let agentID = parseAgentID(id) { return .focusAgent(agentID) }
         if let path = parseFilePath(id) { return .openFile(path) }

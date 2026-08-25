@@ -21,9 +21,13 @@ struct JumpPalette: View {
     }
 
     private var catalog: [PaletteCandidate] {
+        var roots: [PaletteProjectSeed] = []
         var workspaces: [PaletteWorkspaceSeed] = []
         var agents: [PaletteAgentSeed] = []
         for project in store.projects {
+            roots.append(PaletteProjectSeed(
+                id: project.id, name: project.name,
+                branch: project.rootSubtitle))
             for record in project.records {
                 workspaces.append(PaletteWorkspaceSeed(
                     id: record.id, title: record.title,
@@ -44,7 +48,8 @@ struct JumpPalette: View {
             agents: agents,
             files: quickOpenPaths,
             workspaceTitle: selectedWorkspaceTitle,
-            includeFiles: !trimmedQuery.isEmpty)
+            includeFiles: !trimmedQuery.isEmpty,
+            projectRoots: roots)
     }
 
     private var results: [PaletteCandidate] {
@@ -146,6 +151,8 @@ struct JumpPalette: View {
         switch PaletteSources.activation(for: results[selection]) {
         case .selectWorkspace(let id):
             activateWorkspace(id)
+        case .selectProjectRoot(let id):
+            activateProjectRoot(id)
         case .focusAgent(let id):
             store.focus(agentID: id)
         case .openFile(let path):
@@ -156,6 +163,12 @@ struct JumpPalette: View {
             break
         }
         dismiss()
+    }
+
+    private func activateProjectRoot(_ id: UUID) {
+        guard let project = store.projects.first(where: { $0.id == id }) else { return }
+        store.selectProjectRoot(project)
+        store.focusMainWindow?()
     }
 
     private func activateWorkspace(_ id: UUID) {

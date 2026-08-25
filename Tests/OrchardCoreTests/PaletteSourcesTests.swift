@@ -211,4 +211,22 @@ final class PaletteRankingTests: XCTestCase {
         let hay = "agent dashboard"
         XCTAssertTrue(PaletteRanking.isWordStart(hay.firstIndex(of: "d")!, in: hay))
     }
+
+    /// A repo whose only workspace is its primary checkout was unreachable from ⌘J:
+    /// the catalog seeded from worktree records only, and the sidebar renders the
+    /// primary checkout as its own row.
+    func testProjectRootIsReachable() {
+        let projectID = UUID()
+        let catalog = PaletteSources.catalog(
+            workspaces: [], agents: [], files: [], workspaceTitle: "",
+            includeFiles: false,
+            projectRoots: [PaletteProjectSeed(id: projectID, name: "damson-ide", branch: "main")])
+
+        let hits = PaletteSources.rank(query: "damson", candidates: catalog)
+        XCTAssertEqual(hits.first?.title, "damson-ide")
+        XCTAssertEqual(hits.first?.kind, .workspace)
+        XCTAssertEqual(PaletteSources.activation(for: hits.first!), .selectProjectRoot(projectID))
+        XCTAssertEqual(PaletteSources.parseProjectRootID("root:\(projectID.uuidString)"), projectID)
+        XCTAssertNil(PaletteSources.parseWorkspaceID("root:\(projectID.uuidString)"))
+    }
 }
