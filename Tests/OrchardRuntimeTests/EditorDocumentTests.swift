@@ -21,6 +21,83 @@ final class EditorDocumentTests: XCTestCase {
             .binary(byteLength: 3, isImage: true, mimeType: "image/png", imageBase64: "abc"))
     }
 
+    func testSurfaceSeparatesNotUTF8FromBinary() {
+        let latin1 = FilePreview(content: "", isBinary: true, isImage: false, mimeType: nil,
+                                 byteLength: 13, notTextReason: .notUTF8)
+        XCTAssertEqual(EditorDocument.surface(from: latin1), .notUTF8(byteLength: 13))
+
+        let nulBearing = FilePreview(content: "", isBinary: true, isImage: false, mimeType: nil,
+                                     byteLength: 14, notTextReason: .nulBytes)
+        XCTAssertEqual(EditorDocument.surface(from: nulBearing),
+                       .binary(byteLength: 14, isImage: false, mimeType: nil, imageBase64: nil))
+    }
+
+    func testTruncatedPreviewNeverBecomesAnEditableBuffer() {
+        let partial = FilePreview(content: "first half", isBinary: false, isImage: false,
+                                  mimeType: "text/plain", byteLength: 999, truncated: true)
+        XCTAssertEqual(EditorDocument.surface(from: partial), .tooLarge,
+                       "saving a prefix would write it over the whole file")
+    }
+
+    func testSaveIsRefusedForEverySurfaceThatIsNotWholeText() {
+        XCTAssertNil(EditorDocument.saveRefusal(for: .text("hello\n")))
+        XCTAssertNil(EditorDocument.saveRefusal(for: .text("")), "an empty file is savable")
+
+        XCTAssertEqual(EditorDocument.saveRefusal(for: .notUTF8(byteLength: 13)),
+                       .notUTF8(byteLength: 13))
+        XCTAssertEqual(
+            EditorDocument.saveRefusal(for: .binary(byteLength: 14, isImage: false,
+                                                    mimeType: nil, imageBase64: nil)),
+            .notText(byteLength: 14, isImage: false))
+        XCTAssertEqual(
+            EditorDocument.saveRefusal(for: .binary(byteLength: 3, isImage: true,
+                                                    mimeType: "image/png", imageBase64: "abc")),
+            .notText(byteLength: 3, isImage: true))
+        XCTAssertEqual(EditorDocument.saveRefusal(for: .tooLarge), .tooLarge)
+        XCTAssertEqual(EditorDocument.saveRefusal(for: .missing("gone")), .notLoaded("gone"))
+    }
+
+    func testSaveRefusalsCarryAStableCodeAndSayWhy() {
+        let refusals: [EditorDocument.SaveRefusal] = [
+            .notUTF8(byteLength: 13),
+            .notText(byteLength: 14, isImage: false),
+            .tooLarge,
+            .notLoaded("this file is not loaded"),
+        ]
+        XCTAssertEqual(refusals.map(\.code),
+                       ["not_utf8", "not_text", "file_too_large", "not_loaded"])
+        for refusal in refusals {
+            XCTAssertTrue(refusal.displayText.hasPrefix("\(refusal.code) — "))
+            XCTAssertFalse(refusal.message.isEmpty, "a refusal with no reason is a silent no-op")
+        }
+    }
+
+    func testDirtyTrackingIsByteExactNotCanonicallyEqual() {
+        // U+00E9 and "e" + U+0301 are the same character to `==` and different bytes on
+        // disk. Comparing text would call this edit clean and quietly drop it.
+        let precomposed = "caf\u{00E9}"
+        let decomposed = "cafe\u{0301}"
+        XCTAssertEqual(precomposed, decomposed, "Swift compares these as equal — that is the trap")
+        XCTAssertNotEqual(Array(precomposed.utf8), Array(decomposed.utf8))
+
+        var state = EditorDocument.State(diskText: precomposed)
+        XCTAssertFalse(state.isDirty)
+        state = EditorDocument.applyEdit(state, draft: decomposed)
+        XCTAssertTrue(state.isDirty, "a change in bytes is a change")
+        XCTAssertFalse(EditorDocument.isOwnWrite(
+            incomingText: decomposed,
+            state: EditorDocument.State(diskText: precomposed, lastWrittenText: precomposed),
+            incomingMTime: nil))
+        XCTAssertFalse(EditorDocument.bytesEqual(precomposed, decomposed))
+        XCTAssertTrue(EditorDocument.bytesEqual(precomposed, "caf\u{00E9}"))
+    }
+
+    func testCRLFDraftStaysDirtyAgainstLFDisk() {
+        var state = EditorDocument.State(diskText: "one\r\ntwo\r\n")
+        state = EditorDocument.applyEdit(state, draft: "one\ntwo\n")
+        XCTAssertTrue(state.isDirty, "rewriting line endings is a real edit, not a no-op")
+    }
+
     func testSurfaceMapsTypedLoadErrors() {
         XCTAssertEqual(EditorDocument.surface(from: .fileTooLarge), .tooLarge)
         XCTAssertEqual(EditorDocument.surface(from: .notFound("gone.txt")),

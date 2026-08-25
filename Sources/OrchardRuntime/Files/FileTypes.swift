@@ -17,22 +17,38 @@ public struct FileDirEntry: Codable, Equatable, Sendable {
 
 /// Byte-budgeted preview of one file. Images travel as base64 with a MIME type;
 /// other binaries return empty `content` so a huge blob never crosses the wire.
+///
+/// `content` is only ever a *lossless* decode of the file. A byte sequence that is
+/// not UTF-8 has no String that re-encodes to it, so such a file is reported as
+/// not-text (empty `content` plus a `notTextReason`) rather than handed over as a
+/// String full of U+FFFD that a save would then write back over the original bytes.
 public struct FilePreview: Codable, Equatable, Sendable {
+    /// Why `content` is empty even though the file was read. Nil for text and images.
+    public enum NotTextReason: String, Codable, Equatable, Sendable {
+        /// A NUL byte in the first `FileService.binarySniffBytes` — git's own heuristic.
+        case nulBytes = "nul_bytes"
+        /// The bytes are not valid UTF-8 (Latin-1, UTF-16, arbitrary binary tail).
+        case notUTF8 = "not_utf8"
+    }
+
     public var content: String
     public var isBinary: Bool
     public var isImage: Bool
     public var mimeType: String?
     public var byteLength: Int
     public var truncated: Bool
+    public var notTextReason: NotTextReason?
 
     public init(content: String, isBinary: Bool, isImage: Bool, mimeType: String?,
-                byteLength: Int, truncated: Bool = false) {
+                byteLength: Int, truncated: Bool = false,
+                notTextReason: NotTextReason? = nil) {
         self.content = content
         self.isBinary = isBinary
         self.isImage = isImage
         self.mimeType = mimeType
         self.byteLength = byteLength
         self.truncated = truncated
+        self.notTextReason = notTextReason
     }
 }
 
@@ -293,6 +309,23 @@ public struct FileServiceError: Error, Equatable, CustomStringConvertible {
 
     public static func pathEscape(_ message: String) -> FileServiceError {
         FileServiceError("path_escape", message)
+    }
+
+    /// The file exists but its bytes could not be read, so we cannot tell what a write
+    /// would be replacing. An atomic write only needs the *directory* to be writable, so
+    /// "read failed" must not fall through to "overwrite it anyway".
+    public static func unreadable(_ path: String) -> FileServiceError {
+        FileServiceError("unreadable", "cannot read \(path)")
+    }
+
+    /// The file on disk is not UTF-8 text, so a text write would not be replacing
+    /// content — it would be *inventing* it. Named after `GitConflictError.notUTF8`
+    /// so the editor and the conflict path refuse in the same words.
+    public static func notUTF8(_ path: String) -> FileServiceError {
+        FileServiceError(
+            "not_utf8",
+            "\(path) is not UTF-8 text, so saving decoded text over it would rewrite "
+                + "bytes nobody edited. Edit it with a tool that works in bytes.")
     }
 
     public static let fileTooLarge = FileServiceError("file_too_large", "file exceeds preview budget")
