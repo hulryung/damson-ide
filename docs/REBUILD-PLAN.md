@@ -826,6 +826,36 @@ extractable. Owns: Sources/OrchardApp/main.swift (window creation sites), a smal
 test where extractable, docs note. Does not touch AutomationEditorSheet.swift,
 OrchardRuntime, or OrchardTerminals.
 
+### Wave 17 (T63–T65, parallel)
+
+**T63 — Dogfood cycle 5 (wave-16 verification, report-only).** On the current build via
+the CLI only (never launch/quit the app; never touch terminals/worktrees you did not
+create): (1) full supervised claude cycle to settlement with archive fidelity spot-check;
+(2) hardened automations live: a `once` automation on damson-ide fires exactly once,
+settles on exit, auto-disables; verify a concurrent manual `run --id` during the fire
+window is refused as automation_fire_in_flight; (3) `repo remove`: add a temp repo, verify
+in-use refusal while its worktree exists, then clean removal after; (4) typed errors exit
+non-zero (spot-check 3 verbs). Report docs/reports/dogfood-5.md with a findings table.
+Owns only the report. Does not modify sources or tests.
+
+**T64 — workspaceStatus board columns (cardStatus).** Orca parity (inventory §2): user-set
+board columns on worktree cards — defaults todo/in-progress/in-review/completed plus
+user-defined {id,label,color} — DISTINCT from the derived live status. Runtime: status
+field in user-authored worktree meta (orchard-data.json) + `worktree set --status` CLI +
+spec; App: sidebar card shows the column (color chip), context menu to change it, a
+group-by-status toggle in the sidebar. Owns: OrchardCore worktree meta files,
+Sources/orchard worktree set verb + CommandSpec entry, SidebarView.swift + AppStore
+wiring, matching tests. Does not touch PaletteSources.swift, Automations, or
+OrchardTerminals.
+
+**T65 — Jump palette parity (cmd-j).** Orca parity (inventory §6): the palette must cover
+worktrees, files, agents, and commands with correct routing — worktree → select workspace,
+file → open in editor, agent → focus its pane, command → execute (the Go-menu surface at
+minimum). Ranking via existing PaletteRanking; sources in PaletteSources. Owns:
+OrchardCore/Support/PaletteSources.swift + PaletteRanking if needed, the palette view
+files in OrchardApp, matching tests. Does not touch SidebarView.swift, worktree meta, or
+CommandSpec.
+
 ### Wave 16 source findings (from dogfood-4, docs/reports/dogfood-4.md)
 
 Automations hardening: (1) fire-due races the in-process scheduler → double fire in
