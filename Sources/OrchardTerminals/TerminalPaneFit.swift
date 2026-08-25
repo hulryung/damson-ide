@@ -116,23 +116,50 @@ public enum TerminalPaneFit {
         return min(max(anchorLine, 0), maxTop)
     }
 
-    /// One-shot latch for keeper-adopted panes. Damson delivers the restoration
-    /// preamble on the next main-queue turn (`PTYHost.adopt` →
-    /// `DispatchQueue.main.async`), so the first layout sees an empty parser.
-    /// The host re-applies cell-snap / top-align when this consumes the first
-    /// `gridChanged`; later changes keep using the same fit path without a
-    /// special case.
-    public struct AdoptionFit: Equatable {
-        private var consumed = false
+    /// One-shot re-fit latch for a surface attaching to a session (T31 → T59).
+    ///
+    /// A fresh spawn's surface exists before anything is painted: its first
+    /// `layout()` sizes the PTY, and the prompt paints into a grid that already
+    /// matches the viewport. A keeper-adopted session is the other way round —
+    /// its replay (`PTYHost.adopt` → next main-queue turn) and the child's
+    /// post-SIGWINCH repaint can land while the surface has no frame yet, so the
+    /// surface's own fit pass (size report, follow re-pin, dedupe-keyed render)
+    /// ran against a placeholder geometry or never ran against that content at
+    /// all. The same shape recurs when a window is re-opened over a live session
+    /// (T51).
+    ///
+    /// The latch fires exactly once per surface, when BOTH facts hold: the
+    /// surface has a real frame, and the grid holds painted content. Whichever
+    /// arrives last triggers the re-fit; a resize's own contentless
+    /// `gridChanged` never counts as a paint. After it fires, later changes use
+    /// the ordinary path without a special case.
+    public struct AttachFit: Equatable {
+        public enum Event: Equatable {
+            /// The surface's frame changed; `ready` is "non-zero width and height".
+            case frame(ready: Bool)
+            /// The session's grid changed; `hasContent` is "something is painted".
+            case gridChange(hasContent: Bool)
+        }
+
+        private var frameReady = false
+        private var contentSeen = false
+        private var fired = false
 
         public init() {}
 
-        public var isPending: Bool { !consumed }
+        public var isPending: Bool { !fired }
 
-        /// True exactly once — the first grid-change after adoption.
-        public mutating func consumeGridChange() -> Bool {
-            if consumed { return false }
-            consumed = true
+        /// Record an event. True exactly once — the moment a framed surface has
+        /// painted content to fit.
+        public mutating func note(_ event: Event) -> Bool {
+            switch event {
+            case .frame(let ready):
+                frameReady = ready
+            case .gridChange(let hasContent):
+                if hasContent { contentSeen = true }
+            }
+            guard !fired, frameReady, contentSeen else { return false }
+            fired = true
             return true
         }
     }

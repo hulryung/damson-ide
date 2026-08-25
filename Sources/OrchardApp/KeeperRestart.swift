@@ -119,6 +119,15 @@ enum KeeperRestart {
                                      endingObserved: claimed.endingObserved(pane.keeperUUID))
                 continue
             }
+            // Same presentation config a fresh spawn gets (the factory template is
+            // `settings.terminalConfig()` too), so the pane host measures the same
+            // cell size for both. Geometry is deliberately the RECORDED one, not the
+            // live workbench's: the replay (mode preamble + bytes buffered while we
+            // were gone) was painted for that grid and must parse against it. The
+            // surface reconciles on attach exactly as it does for a fresh spawn whose
+            // spawn-size guess was wrong — one resize, one SIGWINCH (plus damson's
+            // adoption jiggle) — and `TerminalFitHost`'s attach re-fit (T59) runs the
+            // surface's fit pass once that repaint has landed.
             var config = store.settings.terminalConfig()
             config.cwd = pane.cwd
             config.argv = pane.argv
