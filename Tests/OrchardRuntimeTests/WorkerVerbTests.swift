@@ -879,6 +879,8 @@ final class WorkerVerbTests: XCTestCase {
         let chrome = try XCTUnwrap(read.result?.field("chromeStripped"))
         XCTAssertGreaterThan(try XCTUnwrap(chrome.field("separatorLines")?.numberValue), 0)
         XCTAssertGreaterThan(try XCTUnwrap(chrome.field("spinnerLines")?.numberValue), 0)
+        XCTAssertNotNil(chrome.field("respacedLines"),
+                        "T55: respacedLines belongs on the chromeStripped receipt")
 
         // …and --raw still serves every captured byte.
         let raw = await call("worker-read", ["dispatch": .string(dispatchID),
@@ -889,6 +891,43 @@ final class WorkerVerbTests: XCTestCase {
         for line in noise {
             XCTAssertTrue(rawLines.contains(line), "the raw capture lost: \(line)")
         }
+    }
+
+    /// T55: Report.respacedLines is serialized on the chromeStripped receipt.
+    /// A collapsed TUI paint of the same letters as a well-spaced capture line
+    /// is counted (and the spaced paint is the one served).
+    func testChromeStrippedReceiptSerializesRespacedLines() async throws {
+        let taskID = try await makeTask()
+        let started = try await startReadyWorker(taskID: taskID)
+        let dispatchID = try XCTUnwrap(started.result?.field("dispatchId")?.stringValue)
+        let handle = try agentHandle(started)
+        let fake = try await session(handle)
+
+        let noise = [
+            "Update available! Run: brew upgrade claude-code@latest",
+            "Updateavailable!Run:brewupgradeclaude-code@latest",
+            "all tests passed",
+        ]
+        await MainActor.run { fake.emitOutput(noise.joined(separator: "\n") + "\n") }
+        try await reportDone(taskID: taskID, dispatchID: dispatchID, handle: handle)
+        let release = await call("worker-release", ["dispatch": .string(dispatchID)])
+        XCTAssertTrue(release.ok, String(describing: release.error))
+
+        let read = await call("worker-read", ["dispatch": .string(dispatchID),
+                                              "limit": .number(500)])
+        XCTAssertTrue(read.ok, String(describing: read.error))
+        let clean = read.result?.field("lines")?.arrayValue?.compactMap(\.stringValue) ?? []
+        XCTAssertTrue(clean.contains("Update available! Run: brew upgrade claude-code@latest"))
+        XCTAssertFalse(clean.contains("Updateavailable!Run:brewupgradeclaude-code@latest"),
+                       "the collapsed paint reached the readable archive: \(clean)")
+        let chrome = try XCTUnwrap(read.result?.field("chromeStripped"))
+        XCTAssertEqual(try XCTUnwrap(chrome.field("respacedLines")?.numberValue), 1)
+
+        // The CLI has no dedicated chromeStripped layout; worker-read falls through
+        // to the pretty JSON receipt. That dump must carry respacedLines too.
+        let rendered = OrchardHumanFormatter.json(read.result)
+        let parsed = try JSONDecoder().decode(JSONValue.self, from: Data(rendered.utf8))
+        XCTAssertEqual(parsed.field("chromeStripped")?.field("respacedLines")?.numberValue, 1)
     }
 
     // MARK: - worker-show

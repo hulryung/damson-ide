@@ -510,6 +510,7 @@ extension LiveOrchestrationStore {
                         "duplicateLines": .number(Double(cleaned.duplicateLines)),
                         "blankLines": .number(Double(cleaned.blankLines)),
                         "escapeRemnantLines": .number(Double(cleaned.escapeRemnantLines)),
+                        "respacedLines": .number(Double(cleaned.respacedLines)),
                     ]),
                     "truncated": .bool(page.truncated || (page.oldestCursor ?? 0) > 0),
                     "terminalStatus": .string(page.status),
