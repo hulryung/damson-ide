@@ -34,6 +34,9 @@ sites consult:
 AppKit's actual UserDefaults write/restore is not unit-tested (needs a
 window server and would pollute the test runner's defaults).
 
+`swift build && swift test`: 990 tests, 2 skipped, 0 failures (4 new
+`WindowFrameAutosaveTests` cases).
+
 ## Human visual pass
 
 Use a build of this commit (not the currently running Orchard). Do **not**
