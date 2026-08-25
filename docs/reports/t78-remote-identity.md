@@ -68,36 +68,37 @@ so the two local-env paths cannot drift.
 
 ## Live harness (orchard-loopback, 127.0.0.1:2222)
 
-`orchard host check --name orchard-loopback`: reachable, authenticated, 104 ms.
+`orchard host check --name orchard-loopback`: reachable after the coordinator
+relaunch (`rt_678cb3ca-…`, pid 22666).
 
-**Quoting + CLI callback, proven over the real sshd** (same export string the
-factory emits). All five variables appear, and `$ORCHARD_CLI_COMMAND status`
-reaches the running runtime (`rt_9749b202-…`, pid 29881). Bare `orchard` is
-**not** on the remote login PATH — the injected `ORCHARD_CLI_COMMAND` is what
-makes the callback work.
+**Acceptance pane** `t78-identity-accept` on
+`2fae36b9-…::/Users/dkkang/dev/damson-ide` (`executionHostId:
+ssh:orchard-loopback`, handle `term_5ad4dbef-…`):
 
-**Reverse-forward hook grant is now reachable.** A remote Claude pane on
-`damson-ide-remote` opened with `statusDetection.mode: hooks` and
-`tunnelPort: 47110` (the first fixed-range candidate). The grant does not
-depend on identity; identity is what lets an agent *use* the CLI on top of
-that channel. Reconnect grant / rebind were not exercised (would need an app
-restart, which this task must not perform).
+```
+ORCHARD_CLI_COMMAND=/Users/dkkang/Library/Caches/orchard/Orchard.app/Contents/Helpers/orchard
+ORCHARD_DATA_PATH=/Users/dkkang/Library/Application Support/Orchard
+ORCHARD_PANE_KEY=tab_4bd6df4b-…:99afd270-…
+ORCHARD_TERMINAL_HANDLE=term_5ad4dbef-383c-48ce-9cb6-69f38b94a853
+ORCHARD_WORKTREE_ID=2fae36b9-280b-4339-b6d7-661107eefbe7::/Users/dkkang/dev/damson-ide
+```
 
-**Pane-level `env | grep ORCHARD` against the running app still prints nothing.**
-The live factory is the trampoline binary at
-`~/Library/Caches/orchard/Orchard.app` (started 22:55, binary dated 22:43).
-This task must not launch or quit Orchard, so the new factory is not yet the
-process that `terminal create` hits. A pane created on
-`2fae36b9-…::/Users/dkkang/dev/damson-ide` confirmed the pre-T78 behaviour
-(`T78-NO-ORCHARD`). After the running runtime loads this commit, the same
-create + `env | grep ORCHARD` is the remaining acceptance check.
+`$ORCHARD_CLI_COMMAND status` inside that pane reached
+`rt_678cb3ca-a52e-4f46-9a5b-0ac362a93b95` (`ok: true`, `mode: app`). Bare
+`orchard` is **not** on the remote login PATH (`zsh: command not found:
+orchard`) — the injected `ORCHARD_CLI_COMMAND` is what makes the callback
+work. A pre-reload pane on the old trampoline binary printed `T78-NO-ORCHARD`.
+
+**Reverse-forward hook grant completes.** A remote Claude pane on the same
+worktree opened with `statusDetection.mode: hooks` and `tunnelPort: 47110`
+(first fixed-range candidate), both before and after the relaunch. The grant
+does not depend on identity; identity is what lets an agent *use* the CLI on
+top of that channel. Reconnect grant / rebind were not exercised here (those
+need an ended `ssh` plus a second app generation, which this task must not
+drive).
 
 ## What is left
 
-- `swift build && swift test`: **1158 tests, 2 skipped, 0 failures** (retry;
-  a first run hit two unrelated load flakes — FileWatcher budget and
-  ServerRuntime FD-bound — that passed on the second full suite).
-- Reload the running Orchard app (coordinator-owned) and re-verify a remote
-  pane lists the five variables, then `$ORCHARD_CLI_COMMAND status` inside it.
 - Supervised remote dispatch is still refused typed; identity is necessary but
   not sufficient for that (the far side still has no lifecycle worker contract).
+- `swift build && swift test`: **1158 tests, 2 skipped, 0 failures**.
