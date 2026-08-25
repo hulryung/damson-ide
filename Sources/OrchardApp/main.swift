@@ -154,112 +154,58 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
     @MainActor @objc func showMainWindow(_ sender: Any?) { orderFrontMainWindow() }
 
     @MainActor @objc func showSettings(_ sender: Any?) {
-        if let settingsWindow {
-            settingsWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-        let hosting = NSHostingController(
+        presentAuxiliaryWindow(
+            existing: &settingsWindow,
+            title: "Settings",
+            styleMask: [.titled, .closable],
+            role: .settings,
             rootView: SettingsView(settings: store.settings)
                 .environmentObject(store)
                 .preferredColorScheme(.dark))
-        let win = NSWindow(contentViewController: hosting)
-        win.title = "Settings"
-        win.styleMask = [.titled, .closable]
-        win.appearance = NSAppearance(named: .darkAqua)
-        win.isReleasedWhenClosed = false
-        win.center()
-        win.makeKeyAndOrderFront(nil)
-        settingsWindow = win
-        NSApp.activate(ignoringOtherApps: true)
     }
 
     @MainActor @objc func showDashboard(_ sender: Any?) {
-        if let dashboardWindow {
-            dashboardWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-        let hosting = NSHostingController(
+        presentAuxiliaryWindow(
+            existing: &dashboardWindow,
+            title: "Agent Dashboard",
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            role: .dashboard,
             rootView: AgentDashboardView()
                 .environmentObject(store)
                 .preferredColorScheme(.dark))
-        let win = NSWindow(contentViewController: hosting)
-        win.title = "Agent Dashboard"
-        win.setContentSize(NSSize(width: 960, height: 520))
-        win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        win.appearance = NSAppearance(named: .darkAqua)
-        win.isReleasedWhenClosed = false
-        win.center()
-        win.makeKeyAndOrderFront(nil)
-        dashboardWindow = win
-        NSApp.activate(ignoringOtherApps: true)
     }
 
     @MainActor @objc func showOrchestration(_ sender: Any?) {
-        if let orchestrationWindow {
-            orchestrationWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-        let hosting = NSHostingController(
+        presentAuxiliaryWindow(
+            existing: &orchestrationWindow,
+            title: "Orchestration",
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            role: .orchestration,
             rootView: OrchestrationView()
                 .environmentObject(store)
                 .preferredColorScheme(.dark))
-        let win = NSWindow(contentViewController: hosting)
-        win.title = "Orchestration"
-        win.setContentSize(NSSize(width: 1040, height: 620))
-        win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        win.appearance = NSAppearance(named: .darkAqua)
-        win.isReleasedWhenClosed = false
-        win.center()
-        win.makeKeyAndOrderFront(nil)
-        orchestrationWindow = win
-        NSApp.activate(ignoringOtherApps: true)
     }
 
     @MainActor @objc func showAutomations(_ sender: Any?) {
-        if let automationsWindow {
-            automationsWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-        let hosting = NSHostingController(
+        presentAuxiliaryWindow(
+            existing: &automationsWindow,
+            title: "Automations",
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            role: .automations,
             rootView: AutomationsView()
                 .environmentObject(store)
                 .preferredColorScheme(.dark))
-        let win = NSWindow(contentViewController: hosting)
-        win.title = "Automations"
-        win.setContentSize(NSSize(width: 1040, height: 620))
-        win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        win.appearance = NSAppearance(named: .darkAqua)
-        win.isReleasedWhenClosed = false
-        win.center()
-        win.makeKeyAndOrderFront(nil)
-        automationsWindow = win
-        NSApp.activate(ignoringOtherApps: true)
     }
 
     @MainActor @objc func showVault(_ sender: Any?) {
-        if let vaultWindow {
-            vaultWindow.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
-            return
-        }
-        let hosting = NSHostingController(
+        presentAuxiliaryWindow(
+            existing: &vaultWindow,
+            title: "Vault",
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            role: .vault,
             rootView: VaultView()
                 .environmentObject(store)
                 .preferredColorScheme(.dark))
-        let win = NSWindow(contentViewController: hosting)
-        win.title = "Vault"
-        win.setContentSize(NSSize(width: 1080, height: 640))
-        win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        win.appearance = NSAppearance(named: .darkAqua)
-        win.isReleasedWhenClosed = false
-        win.center()
-        win.makeKeyAndOrderFront(nil)
-        vaultWindow = win
-        NSApp.activate(ignoringOtherApps: true)
     }
 
     @MainActor @objc func zoomAllIn(_ sender: Any?) { surfaces().forEach { $0.zoomIn(nil) } }
@@ -275,7 +221,6 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
                 .preferredColorScheme(.dark))
         let win = NSWindow(contentViewController: hosting)
         win.title = "Orchard"
-        win.setContentSize(NSSize(width: 1180, height: 760))
         win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         // No window tabs: macOS otherwise adds its own "+" (new window tab)
         // beside the toolbar's New Worktree "+", reading as a duplicate.
@@ -283,13 +228,63 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
         win.appearance = NSAppearance(named: .darkAqua)
         win.titlebarAppearsTransparent = false
         win.isReleasedWhenClosed = false
-        win.center()
+        persistFrame(win, role: .main)
         self.window = win
+    }
+
+    /// T62: default size, then restore-or-center, then enable autosave.
+    /// Must not run on the T51 reopen path — that reuses the same NSWindow.
+    @MainActor
+    private func persistFrame(_ window: NSWindow, role: WindowFrameAutosave.Role) {
+        if let size = WindowFrameAutosave.defaultContentSize(for: role) {
+            window.setContentSize(NSSize(width: size.width, height: size.height))
+        }
+        let name = WindowFrameAutosave.name(for: role)
+        let restored = window.setFrameUsingName(name)
+        if WindowFrameAutosave.shouldCenter(didRestoreSavedFrame: restored) {
+            window.center()
+        }
+        window.setFrameAutosaveName(name)
+    }
+
+    /// T51 reuse: order-front the retained window. First creation this process
+    /// applies T62 restore-or-center + autosave.
+    @MainActor
+    private func presentAuxiliaryWindow<Content: View>(
+        existing: inout NSWindow?,
+        title: String,
+        styleMask: NSWindow.StyleMask,
+        role: WindowFrameAutosave.Role,
+        rootView: Content
+    ) {
+        switch WindowFrameAutosave.reopenStrategy(windowAlreadyCreated: existing != nil) {
+        case .orderFrontExisting:
+            existing?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        case .createAndRestore:
+            break
+        }
+        let hosting = NSHostingController(rootView: rootView)
+        let win = NSWindow(contentViewController: hosting)
+        win.title = title
+        win.styleMask = styleMask
+        win.appearance = NSAppearance(named: .darkAqua)
+        win.isReleasedWhenClosed = false
+        persistFrame(win, role: role)
+        win.makeKeyAndOrderFront(nil)
+        existing = win
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     @MainActor
     private func orderFrontMainWindow() {
-        if window == nil { createMainWindow() }
+        switch WindowFrameAutosave.reopenStrategy(windowAlreadyCreated: window != nil) {
+        case .createAndRestore:
+            createMainWindow()
+        case .orderFrontExisting:
+            break
+        }
         guard let window else { return }
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)

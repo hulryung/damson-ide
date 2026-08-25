@@ -160,6 +160,6 @@ Damson-side change; see "Where the fit lives").
   `layoutSubtreeIfNeeded()` and `repaintNow()`. If the visual pass still fails,
   the next lever is Damson exposing an explicit "re-pin follow" entry point
   (`alignScroll` to `followTargetY`) that the host can call unconditionally.
-* `main.swift` window creation has no frame autosave, so the window comes back at
-  1180×760 regardless of the size at quit — which is why case 2 above is the
-  common one, not the exception. Out of T59's ownership; noted for the backlog.
+* Window frame persistence is T62 (`docs/reports/t62-window-frames.md`): the
+  workbench and auxiliary windows now restore via `setFrameAutosaveName`, so
+  case 2 above is no longer the default relaunch path.
