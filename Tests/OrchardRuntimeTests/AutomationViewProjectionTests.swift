@@ -157,4 +157,39 @@ final class AutomationViewProjectionTests: XCTestCase {
         XCTAssertFalse(AutomationProjection.precheckSkipExplanation.contains("\n"))
         XCTAssertTrue(AutomationProjection.precheckSkipExplanation.lowercased().contains("skipped"))
     }
+
+    // MARK: - once (T60)
+
+    func testOnceSummaryAndListLabels() {
+        var item = automation(.once, "2026-08-26T07:05:00Z")
+        item.createdAt = date("2026-08-25T10:00:00Z")
+        XCTAssertEqual(AutomationProjection.triggerSummary(item), "Once at 2026-08-26 07:05 UTC")
+        XCTAssertEqual(AutomationProjection.triggerSummary(automation(.once, "garbage")), "Once at garbage")
+
+        let before = AutomationProjection.listRow(automation: item, runCount: 0,
+                                                  now: date("2026-08-26T07:00:00Z"), calendar: calendar)
+        XCTAssertEqual(before.nextFire, "in 5m · 2026-08-26 07:05 UTC")
+        XCTAssertEqual(before.nextFireDate, date("2026-08-26T07:05:00Z"))
+
+        let passedUnfired = AutomationProjection.listRow(automation: item, runCount: 0,
+                                                         now: date("2026-08-26T07:06:00Z"), calendar: calendar)
+        XCTAssertEqual(passedUnfired.nextFire, "due now")
+        XCTAssertNil(passedUnfired.nextFireDate)
+
+        var consumed = item
+        consumed.enabled = false
+        let fired = AutomationProjection.listRow(automation: consumed, runCount: 1,
+                                                 now: date("2026-08-26T07:06:00Z"), calendar: calendar)
+        XCTAssertEqual(fired.nextFire, "fired · once")
+        let paused = AutomationProjection.listRow(automation: consumed, runCount: 0,
+                                                  now: date("2026-08-26T07:06:00Z"), calendar: calendar)
+        XCTAssertEqual(paused.nextFire, "paused · once")
+
+        let draft = AutomationProjection.validateDraft(
+            name: "n", trigger: .once, time: "2026-08-26T07:05:00Z", day: nil,
+            provider: "shell", prompt: "true", hasTarget: true,
+            now: date("2026-08-26T07:00:00Z"), calendar: calendar)
+        XCTAssertTrue(draft.isValid)
+        XCTAssertEqual(draft.nextFireLabels, ["2026-08-26 07:05 UTC"])
+    }
 }

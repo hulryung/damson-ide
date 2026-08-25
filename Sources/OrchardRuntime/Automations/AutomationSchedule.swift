@@ -2,7 +2,24 @@ import Foundation
 
 public enum AutomationScheduleError: Error, CustomStringConvertible {
     case invalid(String)
-    public var description: String { switch self { case .invalid(let s): return s } }
+    /// T60: a scheduled or manual fire for this automation has not finished yet.
+    /// The slot is claimed in-actor before the fire callback runs, so a second
+    /// caller (CLI `fire-due` racing the in-process scheduler, or `run --id`
+    /// during a fire) is refused instead of starting a second worker.
+    case fireInFlight(automationId: String)
+    public var description: String {
+        switch self {
+        case .invalid(let s): return s
+        case .fireInFlight(let id): return "a fire for automation \(id) is already in flight"
+        }
+    }
+    /// Stable RPC error code for the CLI face.
+    public var code: String {
+        switch self {
+        case .invalid: return "automation_error"
+        case .fireInFlight: return "automation_fire_in_flight"
+        }
+    }
 }
 
 public struct CronSchedule: Equatable, Sendable {
@@ -47,7 +64,49 @@ extension Calendar {
 }
 
 public enum AutomationSchedule {
+    /// The single slot a `once` automation fires at, floored to the minute:
+    /// `now` is the creation minute, `HH:mm` the first such UTC minute at or after
+    /// the creation minute (today or tomorrow), anything else an ISO-8601 instant.
+    public static func onceFireDate(_ automation: Automation, calendar: Calendar = .utc) throws -> Date {
+        guard automation.trigger == .once else {
+            throw AutomationScheduleError.invalid("not a once schedule")
+        }
+        let raw = automation.time.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let creation = minute(of: automation.createdAt, calendar: calendar) else {
+            throw AutomationScheduleError.invalid("once schedule has no creation minute")
+        }
+        if raw.lowercased() == "now" { return creation }
+        if let instant = parseInstant(raw), let slot = minute(of: instant, calendar: calendar) {
+            return slot
+        }
+        let values = raw.split(separator: ":").compactMap { Int($0) }
+        if values.count == 2, (0...23).contains(values[0]), (0...59).contains(values[1]) {
+            var candidate = creation
+            for _ in 0..<(24 * 60) {
+                let c = calendar.dateComponents([.hour, .minute], from: candidate)
+                if c.hour == values[0] && c.minute == values[1] { return candidate }
+                candidate.addTimeInterval(60)
+            }
+        }
+        throw AutomationScheduleError.invalid("once requires an ISO-8601 instant, HH:mm, or now")
+    }
+
+    static func parseInstant(_ text: String) -> Date? {
+        let iso = ISO8601DateFormatter()
+        iso.formatOptions = [.withInternetDateTime]
+        if let date = iso.date(from: text) { return date }
+        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = iso.date(from: text) { return date }
+        // `2026-08-25T10:30Z` (no seconds) is a common hand-typed form.
+        let padded = text.replacingOccurrences(
+            of: #"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})(Z|[+-]\d{2}:\d{2})$"#,
+            with: "$1:00$2", options: .regularExpression)
+        iso.formatOptions = [.withInternetDateTime]
+        return padded == text ? nil : iso.date(from: padded)
+    }
+
     public static func validate(_ automation: Automation) throws {
+        if automation.trigger == .once { _ = try onceFireDate(automation); return }
         if automation.trigger == .cron { _ = try CronSchedule(automation.time); return }
         let values = automation.time.split(separator: ":").compactMap { Int($0) }
         guard values.count == 2, (0...23).contains(values[0]), (0...59).contains(values[1]) else {
@@ -59,6 +118,9 @@ public enum AutomationSchedule {
     }
     public static func matches(_ automation: Automation, _ date: Date, calendar: Calendar = .utc) throws -> Bool {
         try validate(automation)
+        if automation.trigger == .once {
+            return try onceFireDate(automation, calendar: calendar) == minute(of: date, calendar: calendar)
+        }
         if automation.trigger == .cron { return try CronSchedule(automation.time).matches(date, calendar: calendar) }
         let values = automation.time.split(separator: ":").map { Int($0)! }
         let c = calendar.dateComponents([.minute,.hour,.weekday], from: date)
@@ -68,10 +130,15 @@ public enum AutomationSchedule {
         case .daily: return c.hour == values[0]
         case .weekdays: return c.hour == values[0] && (2...6).contains(c.weekday!)
         case .weekly: return c.hour == values[0] && (c.weekday! - 1) == automation.day
-        case .cron: return false
+        case .cron, .once: return false
         }
     }
     public static func nextFire(for automation: Automation, after date: Date, calendar: Calendar = .utc) throws -> Date {
+        if automation.trigger == .once {
+            let slot = try onceFireDate(automation, calendar: calendar)
+            guard slot > date else { throw AutomationScheduleError.invalid("once schedule already passed") }
+            return slot
+        }
         var candidate = calendar.date(bySetting: .second, value: 0, of: date)!.addingTimeInterval(60)
         let limit = candidate.addingTimeInterval(366 * 24 * 3600)
         while candidate <= limit { if try matches(automation, candidate, calendar: calendar) { return candidate }; candidate.addTimeInterval(60) }
@@ -85,11 +152,21 @@ public enum AutomationSchedule {
     /// `* * * * *`, then `fireDue`) instead of waiting for the next occurrence
     /// after `createdAt`. `since` / `createdAt` still bound the historical walk
     /// so a restart only catches the latest missed slot.
+    ///
+    /// A `once` automation ignores `since`: its slot is due from the moment it has
+    /// passed until a run is recorded for it (a runtime that was down at the slot
+    /// fires it on the first pass after coming back), and never again after that.
+    /// Re-arming (edit `time`, re-enable) makes the new slot due once more.
     public static func due(_ automations: [Automation], since: Date, through now: Date,
                            lastRuns: [String: Date] = [:], calendar: Calendar = .utc) -> [(Automation, Date)] {
         automations.compactMap { automation in
             guard automation.enabled else { return nil }
             let last = lastRuns[automation.id]
+            if automation.trigger == .once {
+                guard let slot = try? onceFireDate(automation, calendar: calendar),
+                      slot <= now, last != slot else { return nil }
+                return (automation, slot)
+            }
             let lower = max(since, last ?? automation.createdAt)
             var latest: Date?
             if let slot = try? nextFire(for: automation, after: lower, calendar: calendar), slot <= now {

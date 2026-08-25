@@ -228,7 +228,8 @@ final class WorkerVerbTests: XCTestCase {
         let marker = "--dispatch-capability "
         let markerRange = try XCTUnwrap(text.range(of: marker),
                                         "no --dispatch-capability in the injected preamble")
-        let secret = text[markerRange.upperBound...]
+        // A shell-command dispatch line single-quotes the value; the preamble does not.
+        let secret = text[markerRange.upperBound...].drop { $0 == "'" }
             .prefix { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
         XCTAssertTrue(secret.hasPrefix("dcap_"), "unexpected capability shape: \(secret)")
         return String(secret)
@@ -1078,5 +1079,178 @@ final class WorkerVerbTests: XCTestCase {
         XCTAssertFalse(show.ok)
         XCTAssertEqual(show.error?.code, "dispatch_not_found")
         await MainActor.run { host.shutdown() }
+    }
+
+    // MARK: - T60: shell-command dispatch input + settlement of automation-fired shells
+
+    /// Route PTY ends into the T11 reconciler, as RuntimeAssembly does.
+    private func wireTerminalExits() async {
+        let live = live!
+        await MainActor.run { [terminalHarness] in
+            terminalHarness!.service.onTerminalExit = { event in
+                Task { await live.handleWorkerTerminalExit(event) }
+            }
+        }
+    }
+
+    /// `worker-start --agent shell` with `dispatch-input shell-command`: drive the
+    /// scripted shell to idle and wait for the command line (not a preamble) to land.
+    private func startShellCommandWorker(taskID: String) async throws -> RPCResponse {
+        let known = await MainActor.run { [terminalHarness] in Set(terminalHarness!.sessions.keys) }
+        let handler = handler!
+        let request = RPCRequest(method: "worker-start", params: .object([
+            "task": .string(taskID),
+            "agent": .string("shell"),
+            "worktree": .string("new-top-level"),
+            "repo": .string("demo"),
+            "dispatch-input": .string("shell-command"),
+        ]))
+        let pending = Task { await handler.handle(request) }
+        try await waitUntil("shell terminal spawn") { [terminalHarness] in
+            terminalHarness!.sessions.keys.contains { !known.contains($0) }
+        }
+        let session = await MainActor.run { [terminalHarness] () -> ScriptedTerminalSession in
+            let handle = terminalHarness!.sessions.keys.first { !known.contains($0) }!
+            return terminalHarness!.sessions[handle]!
+        }
+        await MainActor.run { session.emitOSC(["9999", "idle"]) }
+        try await waitUntil("shell command injection") {
+            session.writtenText.contains("orchard_automation_command")
+        }
+        return await pending.value
+    }
+
+    /// Poll `worker-show` (an actor call) until the worker state is one of `states`.
+    private func waitForWorkerState(_ dispatchID: String, in states: Set<String>,
+                                    timeout: TimeInterval = 5,
+                                    file: StaticString = #filePath, line: UInt = #line) async throws -> JSONValue {
+        let deadline = Date().addingTimeInterval(timeout)
+        var last: JSONValue = .null
+        while Date() < deadline {
+            let shown = await call("worker-show", ["dispatch": .string(dispatchID)])
+            last = shown.result ?? .null
+            if let state = last.field("worker")?.field("state")?.stringValue, states.contains(state) {
+                return last
+            }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        XCTFail("timed out waiting for worker state \(states); last: \(last)", file: file, line: line)
+        throw CancellationError()
+    }
+
+    func testShellCommandDispatchTypesAnExecutableLineNotThePreamble() async throws {
+        let taskID = try await makeTask(spec: "printf 'hi'")
+        let response = try await startShellCommandWorker(taskID: taskID)
+        XCTAssertTrue(response.ok, String(describing: response.error))
+        let receipt = try XCTUnwrap(response.result)
+        XCTAssertEqual(receipt.field("state")?.stringValue, "ready")
+        let input = receipt.field("effects")?.arrayValue?
+            .first { $0.field("kind")?.stringValue == "dispatch_input" }
+        XCTAssertEqual(input?.field("mode")?.stringValue, "shell-command")
+        let dispatchID = try XCTUnwrap(receipt.field("dispatchId")?.stringValue)
+
+        let handle = try agentHandle(response)
+        let typed = try await session(handle).writtenText
+        XCTAssertFalse(typed.contains("=== TASK ==="), "a shell must not receive the agent prose")
+        XCTAssertTrue(typed.contains("eval 'printf '\\''hi'\\'''"), typed)
+        XCTAssertTrue(typed.contains("--type worker_done"))
+        XCTAssertTrue(typed.contains("--task-id '\(taskID)' --dispatch-id '\(dispatchID)'"))
+        XCTAssertTrue(typed.contains("--dispatch-capability 'dcap_"))
+        XCTAssertTrue(typed.contains("exit \"$orchard_automation_status\""))
+        // Submitted: the line is followed by the CR that runs it; nothing is typed after.
+        let written = try await session(handle).written
+        XCTAssertEqual(written.last, Data([0x0D]), "the command line must be submitted")
+        // One newline-free line inside the paste frame: nothing can sit at a
+        // continuation prompt holding the capability.
+        let payload = typed.replacingOccurrences(of: "\u{1B}[200~", with: "")
+            .replacingOccurrences(of: "\u{1B}[201~", with: "")
+            .replacingOccurrences(of: "\r", with: "")
+        XCTAssertFalse(payload.contains("\n"), payload)
+    }
+
+    /// The decided settlement: the wrapper's worker_done settles the dispatch, the
+    /// following PTY exit is a no-op for the reconciler, and worker-release archives
+    /// the output and closes the exited pane (`closed_exited_terminal`).
+    func testShellCommandWorkerSettlesOnWorkerDoneThenExitAndReleases() async throws {
+        await wireTerminalExits()
+        let taskID = try await makeTask(spec: "swift test")
+        let started = try await startShellCommandWorker(taskID: taskID)
+        let dispatchID = try XCTUnwrap(started.result?.field("dispatchId")?.stringValue)
+        let runID = try XCTUnwrap(started.result?.field("runId")?.stringValue)
+        let handle = try agentHandle(started)
+        let fake = try await session(handle)
+        await MainActor.run { fake.emitOutput("Test Suite 'All tests' passed\n") }
+
+        // What the submitted line does: report worker_done with the exit status …
+        try await reportDone(taskID: taskID, dispatchID: dispatchID, handle: handle)
+        XCTAssertEqual(try store.workerDispatch(dispatchID)?.state, .succeeded)
+        // … then exit the shell.
+        await MainActor.run { fake.exit(code: 0) }
+        try await waitUntil("exited terminal") { [terminalHarness] in
+            (try? terminalHarness!.service.summary(handle: handle))?.connected == false
+        }
+        // Observe through the actor (the reconciler runs there), never the raw store
+        // while it may be mid-transaction.
+        let shown = try await waitForWorkerState(dispatchID, in: ["succeeded", "failed"])
+        XCTAssertEqual(shown.field("worker")?.field("state")?.stringValue, "succeeded",
+                       "an exit after settlement must not re-fail the dispatch")
+        XCTAssertEqual(shown.field("dispatch")?.field("status")?.stringValue, "completed")
+        let escalations = try await live.check([
+            "run": .string(runID), "types": .string("escalation"),
+        ])
+        XCTAssertEqual(escalations.field("count")?.numberValue, 0,
+                       "a settled shell exit is not an escalation")
+
+        let release = await call("worker-release", ["dispatch": .string(dispatchID)])
+        XCTAssertTrue(release.ok, String(describing: release.error))
+        XCTAssertEqual(release.result?.field("state")?.stringValue, "released")
+        XCTAssertEqual(release.result?.field("processAction")?.stringValue, "closed_exited_terminal")
+        XCTAssertEqual(release.result?.field("archive")?.field("status")?.stringValue, "captured")
+        let archive = try XCTUnwrap(try store.workerTerminalArchive(dispatchID: dispatchID))
+        XCTAssertTrue(archive.content.contains("passed"))
+        let exists = await terminalExists(handle)
+        XCTAssertFalse(exists, "release closes the exited pane")
+    }
+
+    /// If the wrapper never reaches the runtime (CLI missing, `exit` inside the
+    /// prompt), the PTY end alone settles the dispatch through the T11 reconciler,
+    /// and release still works: an automation-fired shell is never stranded.
+    func testShellCommandWorkerExitWithoutWorkerDoneStillSettlesAndReleases() async throws {
+        await wireTerminalExits()
+        let taskID = try await makeTask(spec: "exit 7")
+        let started = try await startShellCommandWorker(taskID: taskID)
+        let dispatchID = try XCTUnwrap(started.result?.field("dispatchId")?.stringValue)
+        let handle = try agentHandle(started)
+        let fake = try await session(handle)
+        await MainActor.run { fake.exit(code: 7) }
+        let shown = try await waitForWorkerState(dispatchID, in: ["failed"])
+        let worker = try XCTUnwrap(shown.field("worker"))
+        XCTAssertEqual(worker.field("state")?.stringValue, "failed")
+        XCTAssertTrue(worker.field("last_error")?.stringValue?.contains("exited (code 7)") == true,
+                      worker.field("last_error")?.stringValue ?? "")
+
+        let release = await call("worker-release", ["dispatch": .string(dispatchID)])
+        XCTAssertTrue(release.ok, String(describing: release.error))
+        XCTAssertEqual(release.result?.field("state")?.stringValue, "released")
+        XCTAssertEqual(release.result?.field("processAction")?.stringValue, "closed_exited_terminal")
+        let exists = await terminalExists(handle)
+        XCTAssertFalse(exists)
+    }
+
+    func testShellCommandDispatchInputRequiresTheShellEngine() async throws {
+        let taskID = try await makeTask()
+        let response = await call("worker-start", [
+            "task": .string(taskID),
+            "agent": .string("claude-code"),
+            "worktree": .string("new-top-level"),
+            "repo": .string("demo"),
+            "dispatch-input": .string("shell-command"),
+        ])
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.error?.code, "invalid_argument")
+        let sessions = await MainActor.run { [terminalHarness] in terminalHarness!.sessions.count }
+        XCTAssertEqual(sessions, 0, "refused before any terminal or worktree exists")
+        let creates = await MainActor.run { [terminalHarness] in terminalHarness!.worktreeCreates.count }
+        XCTAssertEqual(creates, 0)
     }
 }

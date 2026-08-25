@@ -100,6 +100,11 @@ public enum AutomationProjection {
             return "Weekly on \(weekdayName(automation.day)) at \(automation.time) UTC"
         case .cron:
             return "Cron \(automation.time)"
+        case .once:
+            if let slot = try? AutomationSchedule.onceFireDate(automation) {
+                return "Once at \(formatTimestamp(slot))"
+            }
+            return "Once at \(automation.time)"
         }
     }
 
@@ -162,12 +167,20 @@ public enum AutomationProjection {
     public static func listRow(automation: Automation, runCount: Int, now: Date,
                                calendar: Calendar = .utc) -> AutomationListRow {
         let next = try? AutomationSchedule.nextFire(for: automation, after: now, calendar: calendar)
+        let label: String
+        if automation.trigger == .once, next == nil {
+            // A once slot that has passed: consumed (the service disabled it after its
+            // single attempt), waiting for the scheduler's next pass, or paused by hand.
+            label = runCount > 0 ? "fired · once" : (automation.enabled ? "due now" : "paused · once")
+        } else {
+            label = formatNextFire(next, now: now, enabled: automation.enabled)
+        }
         return AutomationListRow(
             id: automation.id,
             name: automation.name,
             enabled: automation.enabled,
             triggerSummary: triggerSummary(automation),
-            nextFire: formatNextFire(next, now: now, enabled: automation.enabled),
+            nextFire: label,
             nextFireDate: next,
             targetSummary: targetSummary(automation.target),
             provider: automation.provider,

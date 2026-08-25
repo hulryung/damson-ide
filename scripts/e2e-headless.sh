@@ -107,8 +107,11 @@ poke_shell_terminals() {
         if [[ -n "$seen_file" ]] && grep -qx "$handle" "$seen_file" 2>/dev/null; then
             continue
         fi
-        receipt "shell-readiness-$handle" terminal send --terminal "$handle" \
-            --text "printf 'orchard-e2e-shell-ready\\n'" --enter --json >/dev/null
+        # T60: an automation shell that already ran its command line and exited
+        # refuses input — that is the fix working, not a harness failure.
+        HOME="$E2E_HOME" CFFIXED_USER_HOME="$E2E_HOME" "$ORCHARD_BIN" terminal send \
+            --terminal "$handle" --text "printf 'orchard-e2e-shell-ready\\n'" --enter --json \
+            >/dev/null 2>&1 || true
         if [[ -n "$seen_file" ]]; then
             printf '%s\n' "$handle" >> "$seen_file"
         fi
@@ -245,19 +248,28 @@ receipt check-ack check --run "$run_id" --ack "$delivery_id" --json >/dev/null
 rm_json=$(receipt worktree-rm worktree rm --worktree "$worktree_id" --force --json)
 assert_eq "$(field "$rm_json" result.removed)" true "worktree removal"
 
-# T56: create an automation whose trigger matches the current UTC minute, then
-# drive due/fireDue (not automations-run) and require a history row that names
-# the worktree and terminal the fire callback produced.
+# T56/T60: create a `once` automation due in the current UTC minute, with a shell
+# provider whose prompt is a real command, then drive due/fireDue (not
+# automations-run) and require:
+#   - a fired history row naming the worktree, terminal, and dispatch (T56 + T60);
+#   - the dispatch settles on the shell's own exit — the submitted command line
+#     runs the prompt, reports worker_done with the exit status, and exits
+#     (dogfood-4 findings 3 and 5; nothing is left as an unsubmitted paste);
+#   - worker-release archives the exited pane (closed_exited_terminal);
+#   - the once automation disabled itself and no path fires it again (finding 4);
+#   - a paused cron automation is never due (create --disabled, then remove).
 auto_json=$(receipt automations-create automations create \
-    --name "e2e-fire-now" \
-    --trigger five-field-cron \
-    --time '* * * * *' \
+    --name "e2e-fire-once" \
+    --trigger once \
+    --time now \
     --provider shell \
-    --prompt "orchard-e2e-automation" \
+    --prompt "printf 'orchard-e2e-%s\\n' \"\$((6*7))\"" \
     --repo "$repo_id" \
     --json)
 auto_id=$(field "$auto_json" result.id)
 [[ "$auto_id" == auto_* ]] || fail "unexpected automation id: $auto_id"
+assert_eq "$(field "$auto_json" result.trigger)" once "automation trigger"
+assert_eq "$(field "$auto_json" result.enabled)" true "automation starts enabled"
 
 due_json=$(receipt automations-due automations due --json)
 due_count=$(RECEIPT="$due_json" python3 - <<'PY'
@@ -295,25 +307,100 @@ if [[ "$already_fired" != "true" ]]; then
     fi
     fire_json=$(python3 -c 'import json,sys; value=json.load(open(sys.argv[1])); assert value.get("ok") is True, json.dumps(value,indent=2); print(json.dumps(value))' "$fire_receipt") \
         || fail "automations fire-due receipt assertion failed"
-    RECEIPT="$fire_json" python3 - <<'PY' || fail "automations fire-due did not persist a fired run with worktree/terminal"
+    RECEIPT="$fire_json" python3 - <<'PY' || fail "automations fire-due did not persist a fired run with worktree/terminal/dispatch"
 import json, os
 runs=json.loads(os.environ["RECEIPT"])["result"].get("runs") or []
-assert any(r.get("outcome") == "fired" and r.get("worktreeId") and r.get("terminalId") for r in runs), json.dumps(runs, indent=2)
+assert any(r.get("outcome") == "fired" and r.get("worktreeId") and r.get("terminalId") and r.get("dispatchId") for r in runs), json.dumps(runs, indent=2)
 PY
 fi
 
 runs_json=$(receipt automations-runs automations runs --id "$auto_id" --json)
-auto_worktree=$(RECEIPT="$runs_json" python3 - <<'PY'
+auto_run_fields=$(RECEIPT="$runs_json" python3 - <<'PY'
 import json, os, sys
 runs=json.loads(os.environ["RECEIPT"])["result"].get("runs") or []
 for run in runs:
     if run.get("outcome") == "fired" and run.get("worktreeId") and run.get("terminalId"):
-        print(run["worktreeId"])
+        print(run["worktreeId"], run["terminalId"], run.get("dispatchId") or "", run.get("orchestrationRunId") or "")
         sys.exit(0)
 raise SystemExit("run history has no fired row with worktreeId and terminalId")
 PY
 )
+read -r auto_worktree auto_terminal auto_dispatch auto_orun <<<"$auto_run_fields"
 [[ -n "$auto_worktree" ]] || fail "automation run history missing worktree id"
+[[ "$auto_dispatch" == ctx_* ]] || fail "automation run history missing dispatch id (got '$auto_dispatch')"
+[[ "$auto_orun" == run_* ]] || fail "automation run history missing orchestration run id (got '$auto_orun')"
+[[ "$(RECEIPT="$runs_json" python3 -c 'import json,os; print(len(json.loads(os.environ["RECEIPT"])["result"]["runs"]))')" == "1" ]] \
+    || fail "the once automation must have exactly one run row"
+
+# T60: the shell worker settles on its own exit. Its submitted command line ran
+# the prompt, sent worker_done with the exit status, and exited; the dispatch is
+# therefore `succeeded` without anyone else touching it.
+auto_state=""
+for _ in {1..400}; do
+    auto_show=$(receipt automation-worker-show worker-show --dispatch "$auto_dispatch" --json)
+    auto_state=$(field "$auto_show" result.worker.state)
+    case "$auto_state" in succeeded|failed|stopped|abandoned) break ;; esac
+    sleep 0.05
+done
+assert_eq "$auto_state" succeeded "automation shell worker settled on exit"
+assert_eq "$(field "$auto_show" result.dispatch.status)" completed "automation dispatch completed"
+auto_done=$(receipt automation-check check --run "$auto_orun" --types worker_done --json)
+assert_eq "$(find_key "$auto_done" type)" worker_done "automation worker_done delivered to its run"
+auto_outcome=$(RECEIPT="$auto_done" python3 - <<'PY'
+import json, os
+def find(value, needle):
+    if isinstance(value, dict):
+        if needle in value: return value[needle]
+        for child in value.values():
+            found = find(child, needle)
+            if found is not None: return found
+    elif isinstance(value, list):
+        for child in value:
+            found = find(child, needle)
+            if found is not None: return found
+    return None
+value = json.loads(os.environ["RECEIPT"])
+payload = find(value, "payload")
+if isinstance(payload, str):
+    try: payload = json.loads(payload)
+    except Exception: payload = {}
+print((payload or {}).get("outcome") or find(value, "outcome") or "")
+PY
+)
+assert_eq "$auto_outcome" succeeded "automation worker_done outcome"
+auto_exit=$(receipt automation-terminal-wait terminal wait --terminal "$auto_terminal" --for exit --timeout-ms 10000 --json)
+assert_eq "$(field "$auto_exit" result.satisfied)" true "automation shell exited after worker_done"
+
+# Release must not strand the exited pane: archive first, then close it.
+auto_release=$(receipt automation-worker-release worker-release --dispatch "$auto_dispatch" --json)
+assert_eq "$(field "$auto_release" result.state)" released "automation worker release state"
+assert_eq "$(field "$auto_release" result.processAction)" closed_exited_terminal "automation worker release closed the exited pane"
+auto_archive=$(receipt automation-worker-read worker-read --dispatch "$auto_dispatch" --source terminal --limit 2000 --json)
+assert_eq "$(field "$auto_archive" result.archived)" true "automation worker archive presence"
+RECEIPT="$auto_archive" python3 - <<'PY' || fail "automation archive lacks the prompt's own output (the command did not execute)"
+import json, os
+r=json.loads(os.environ['RECEIPT'])['result']
+lines=[line.strip() for line in r['lines']]
+assert 'orchard-e2e-42' in lines, lines[-40:]
+PY
+
+# T60 (finding 4): once → auto-disabled; nothing fires it a second time.
+auto_show_json=$(receipt automations-show automations show "$auto_id" --json)
+assert_eq "$(field "$auto_show_json" result.enabled)" false "once automation auto-disabled after firing"
+refire_json=$(receipt automations-fire-due-again automations fire-due --json)
+[[ "$(RECEIPT="$refire_json" python3 -c 'import json,os; print(len(json.loads(os.environ["RECEIPT"])["result"].get("runs") or []))')" == "0" ]] \
+    || fail "a consumed once automation fired again"
+cron_json=$(receipt automations-create-paused automations create \
+    --name "e2e-cron-paused" --trigger five-field-cron --time '* * * * *' \
+    --provider shell --prompt "true" --repo "$repo_id" --disabled --json)
+cron_id=$(field "$cron_json" result.id)
+assert_eq "$(field "$cron_json" result.enabled)" false "paused cron automation created disabled"
+due_after=$(receipt automations-due-after automations due --json)
+[[ "$(RECEIPT="$due_after" python3 -c 'import json,os; print(len(json.loads(os.environ["RECEIPT"])["result"].get("due") or []))')" == "0" ]] \
+    || fail "a consumed once automation or a paused cron automation was listed as due"
+rm_cron=$(receipt automations-remove-paused automations remove "$cron_id" --json)
+assert_eq "$(field "$rm_cron" result.removed)" true "paused cron automation removal"
+
 rm_auto=$(receipt automation-worktree-rm worktree rm --worktree "$auto_worktree" --force --json)
 assert_eq "$(field "$rm_auto" result.removed)" true "automation worktree removal"
 
@@ -325,4 +412,4 @@ SERVE_PID=""
 rm -rf "$E2E_ROOT"
 [[ ! -e "$E2E_ROOT" ]] || fail "temporary directory was not removable"
 trap - EXIT
-echo "e2e-headless: PASS (repo → run/task → shell worker_done → archive/release → worktree rm → automations due/fireDue → clean SIGINT)"
+echo "e2e-headless: PASS (repo → run/task → shell worker_done → archive/release → worktree rm → automations once due/fireDue → shell worker settled on exit → release/archive → auto-disabled → clean SIGINT)"
