@@ -780,7 +780,19 @@ Sources/OrchardApp/TerminalPaneHost.swift, Sources/OrchardApp/KeeperRestart.swif
 minimal OrchardTerminals adoption touchpoints if strictly needed, matching tests.
 Does not touch TerminalStreamBuffer.swift, fixtures, or main.swift.
 
-### Wave 16 (T60–T62, parallel)
+### Wave 16 (T60–T62, parallel) — MERGED 2026-08-25, 1022 tests, e2e PASS
+
+All three landed. T60: atomic minute-slot claim (concurrent due→fire proves one run;
+in-flight fires refuse as automation_fire_in_flight), shell fires now EXECUTE via a
+dispatch-input stage (one quote-balanced line; no capability left in pane input),
+`once` trigger (ISO|HH:mm|now, auto-disables after firing; e2e exercises it),
+settlement: shell workers settle via worker_done or the T11 exit reconciler and
+release closes the exited pane. T61: repo remove (repo_in_use typed refusal),
+ok:false envelopes exit 1 centrally, help nits. T62: frame autosave on all windows
+(center only without a saved frame; T51 reopen keeps the retained window).
+Coordinator added `once` to the automations help (T60 leftover, T61's file).
+Not done (deliberate): auto-disable-after-N-failures — `once` covers the dogfood
+case; revisit only if recurring automations misbehave in practice.
 
 **T60 — Automations hardening (dogfood-4 findings 1–4).** (1) Single-fire guarantee:
 fire-due and the in-process scheduler must not both fire one minute slot — claim the
