@@ -129,13 +129,24 @@ public actor AutomationService {
         return await run(automation)
     }
 
-    public func fireDue(since: Date, through now: Date = Date()) async {
+    /// Slots `fireDue` would start. Observation only — does not persist or fire.
+    public func due(since: Date, through now: Date = Date()) -> [(automation: Automation, scheduledAt: Date)] {
         let data = store.load()
         let latest = Dictionary(grouping: data.automationRuns, by: \.automationId)
             .compactMapValues { $0.map(\.scheduledAt).max() }
-        for (automation, slot) in AutomationSchedule.due(data.automations, since: since, through: now, lastRuns: latest) {
-            _ = await run(automation, scheduledAt: slot)
+        return AutomationSchedule.due(data.automations, since: since, through: now, lastRuns: latest)
+            .map { (automation: $0.0, scheduledAt: $0.1) }
+    }
+
+    /// Fire every due slot in `(since, now]`, including a matching current minute.
+    /// Returns the persisted run records (empty when nothing was due).
+    @discardableResult
+    public func fireDue(since: Date, through now: Date = Date()) async -> [AutomationRun] {
+        var runs: [AutomationRun] = []
+        for (automation, slot) in due(since: since, through: now) {
+            runs.append(await run(automation, scheduledAt: slot))
         }
+        return runs
     }
 
     private func persist(_ run: AutomationRun) {

@@ -94,6 +94,36 @@ assert_eq() {
     [[ "$1" == "$2" ]] || fail "$3 (expected '$2', got '$1')"
 }
 
+# Headless PTYs have no pane repaint. A raw write gives the generic shell
+# readiness detector the same quiescent output a visible prompt would.
+# `$1` is a file of already-poked handles so fireDue can poll without
+# re-injecting into a pane that is already idle.
+poke_shell_terminals() {
+    local seen_file=${1:-}
+    local terminals_json handle
+    terminals_json=$(receipt terminal-list terminal list --json)
+    while IFS= read -r handle; do
+        [[ -z "$handle" ]] && continue
+        if [[ -n "$seen_file" ]] && grep -qx "$handle" "$seen_file" 2>/dev/null; then
+            continue
+        fi
+        receipt "shell-readiness-$handle" terminal send --terminal "$handle" \
+            --text "printf 'orchard-e2e-shell-ready\\n'" --enter --json >/dev/null
+        if [[ -n "$seen_file" ]]; then
+            printf '%s\n' "$handle" >> "$seen_file"
+        fi
+    done < <(RECEIPT="$terminals_json" python3 - <<'PY'
+import json, os
+r=json.loads(os.environ['RECEIPT'])['result']
+items=r.get('terminals', r if isinstance(r, list) else [])
+for item in items:
+    handle=item.get('handle')
+    if handle:
+        print(handle)
+PY
+)
+}
+
 [[ -x "$ORCHARD_BIN" ]] || fail "missing executable $ORCHARD_BIN (run swift build -c release)"
 mkdir -p "$DATA_DIR" "$SOURCE_REPO"
 # A headless PTY has no rendered pane to repaint its first prompt. Emit one stable
@@ -215,6 +245,78 @@ receipt check-ack check --run "$run_id" --ack "$delivery_id" --json >/dev/null
 rm_json=$(receipt worktree-rm worktree rm --worktree "$worktree_id" --force --json)
 assert_eq "$(field "$rm_json" result.removed)" true "worktree removal"
 
+# T56: create an automation whose trigger matches the current UTC minute, then
+# drive due/fireDue (not automations-run) and require a history row that names
+# the worktree and terminal the fire callback produced.
+auto_json=$(receipt automations-create automations create \
+    --name "e2e-fire-now" \
+    --trigger five-field-cron \
+    --time '* * * * *' \
+    --provider shell \
+    --prompt "orchard-e2e-automation" \
+    --repo "$repo_id" \
+    --json)
+auto_id=$(field "$auto_json" result.id)
+[[ "$auto_id" == auto_* ]] || fail "unexpected automation id: $auto_id"
+
+due_json=$(receipt automations-due automations due --json)
+due_count=$(RECEIPT="$due_json" python3 - <<'PY'
+import json, os
+print(len(json.loads(os.environ["RECEIPT"])["result"].get("due") or []))
+PY
+)
+runs_before=$(receipt automations-runs-before automations runs --id "$auto_id" --json)
+already_fired=$(RECEIPT="$runs_before" python3 - <<'PY'
+import json, os
+runs=json.loads(os.environ["RECEIPT"])["result"].get("runs") or []
+print("true" if any(r.get("outcome") == "fired" and r.get("worktreeId") and r.get("terminalId") for r in runs) else "false")
+PY
+)
+if [[ "$due_count" == "0" && "$already_fired" != "true" ]]; then
+    fail "automation $auto_id was not due immediately and has no fired run yet"
+fi
+
+if [[ "$already_fired" != "true" ]]; then
+    fire_receipt="$E2E_ROOT/automation-fire-due.json"
+    poked_handles="$E2E_ROOT/poked-handles"
+    : >"$poked_handles"
+    HOME="$E2E_HOME" CFFIXED_USER_HOME="$E2E_HOME" "$ORCHARD_BIN" automations fire-due --json \
+        >"$fire_receipt" 2>&1 &
+    fire_pid=$!
+    for _ in {1..400}; do
+        poke_shell_terminals "$poked_handles"
+        kill -0 "$fire_pid" 2>/dev/null || break
+        sleep 0.05
+    done
+    if ! wait "$fire_pid"; then
+        echo "e2e-headless: automations fire-due receipt:" >&2
+        cat "$fire_receipt" >&2
+        fail "automations fire-due command failed"
+    fi
+    fire_json=$(python3 -c 'import json,sys; value=json.load(open(sys.argv[1])); assert value.get("ok") is True, json.dumps(value,indent=2); print(json.dumps(value))' "$fire_receipt") \
+        || fail "automations fire-due receipt assertion failed"
+    RECEIPT="$fire_json" python3 - <<'PY' || fail "automations fire-due did not persist a fired run with worktree/terminal"
+import json, os
+runs=json.loads(os.environ["RECEIPT"])["result"].get("runs") or []
+assert any(r.get("outcome") == "fired" and r.get("worktreeId") and r.get("terminalId") for r in runs), json.dumps(runs, indent=2)
+PY
+fi
+
+runs_json=$(receipt automations-runs automations runs --id "$auto_id" --json)
+auto_worktree=$(RECEIPT="$runs_json" python3 - <<'PY'
+import json, os, sys
+runs=json.loads(os.environ["RECEIPT"])["result"].get("runs") or []
+for run in runs:
+    if run.get("outcome") == "fired" and run.get("worktreeId") and run.get("terminalId"):
+        print(run["worktreeId"])
+        sys.exit(0)
+raise SystemExit("run history has no fired row with worktreeId and terminalId")
+PY
+)
+[[ -n "$auto_worktree" ]] || fail "automation run history missing worktree id"
+rm_auto=$(receipt automation-worktree-rm worktree rm --worktree "$auto_worktree" --force --json)
+assert_eq "$(field "$rm_auto" result.removed)" true "automation worktree removal"
+
 kill -INT "$SERVE_PID"
 if ! wait "$SERVE_PID"; then fail "serve did not exit cleanly after SIGINT"; fi
 SERVE_PID=""
@@ -223,4 +325,4 @@ SERVE_PID=""
 rm -rf "$E2E_ROOT"
 [[ ! -e "$E2E_ROOT" ]] || fail "temporary directory was not removable"
 trap - EXIT
-echo "e2e-headless: PASS (repo → run/task → shell worker_done → archive/release → worktree rm → clean SIGINT)"
+echo "e2e-headless: PASS (repo → run/task → shell worker_done → archive/release → worktree rm → automations due/fireDue → clean SIGINT)"
