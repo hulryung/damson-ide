@@ -89,7 +89,10 @@ public final class DamsonTerminalSession: TerminalSession {
                 case .text(let s): return .text(s)
                 case .execute(let byte): return .control(byte)
                 case .osc(let params): return .osc(params)
-                case .csi: return nil
+                case .csi(let params, let intermediates, let finalByte, let privateMarker):
+                    return .csi(TerminalControlSequence(
+                        params: params, intermediates: intermediates,
+                        finalByte: finalByte, privateMarker: privateMarker))
                 }
             }
             .eraseToAnyPublisher()
@@ -100,9 +103,7 @@ public final class DamsonTerminalSession: TerminalSession {
         var lines: [String] = []
         lines.reserveCapacity(grid.rows)
         for r in 0..<grid.rows {
-            var s = String(grid.row(r).map { $0.char })
-            while let last = s.last, last == " " { s.removeLast() }
-            lines.append(s)
+            lines.append(Self.rowText(grid.row(r)))
         }
         return TerminalGridSnapshot(
             lines: lines,
@@ -111,6 +112,35 @@ public final class DamsonTerminalSession: TerminalSession {
             cols: grid.cols,
             rows: grid.rows,
             isAltScreen: grid.isAltScreenActive,
-            inSyncOutputMode: grid.inSyncOutputMode)
+            inSyncOutputMode: grid.inSyncOutputMode,
+            // damson's cumulative scrollback push count IS the absolute line number of
+            // viewport row 0 (its prompt-mark bookkeeping relies on the same identity).
+            firstRowIndex: Int(clamping: grid.scrollbackPushCount))
+    }
+
+    public func scrolledOffLines(fromAbsoluteRow: Int) -> [String] {
+        let grid = session.grid
+        let scrollback = grid.scrollback
+        // scrollback[i] sits at absolute row `evicted + i`; the newest entry is the row
+        // just above the screen. Rows older than the ring's oldest entry are gone.
+        let evicted = Int(clamping: grid.linesEvictedFromTop)
+        let start = max(0, fromAbsoluteRow - evicted)
+        guard start < scrollback.count else { return [] }
+        return scrollback[start...].map { Self.rowText($0.cells) }
+    }
+
+    /// One grid row as the text a reader sees: the character in each cell, minus the
+    /// placeholder cells a wide glyph leaves behind (its trailing continuation cell and
+    /// the end-of-row spacer where it did not fit), with trailing blanks trimmed. Mapping
+    /// every cell's `char` — what this did before T54 — put a phantom space after each
+    /// wide character (`⏺  Bash`, `한 글`), which is a rewrite of the painted text.
+    static func rowText(_ cells: [Cell]) -> String {
+        var s = ""
+        s.reserveCapacity(cells.count)
+        for cell in cells where !cell.isContinuation && !cell.isWideSpacer {
+            s.append(cell.char)
+        }
+        while let last = s.last, last == " " { s.removeLast() }
+        return s
     }
 }

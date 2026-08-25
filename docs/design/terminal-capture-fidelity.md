@@ -67,6 +67,14 @@ in how a TUI frame is captured — not in a text pass that would have to invent 
 missing letters. The cleaner's obligation is to not add to the damage, and to be
 measured on it.
 
+**T54 (wave 14) found and fixed the upstream loss** — see
+`docs/design/capture-fidelity-upstream.md`. Both losses were one mechanism: the stream
+was assembled from the parser's *text events* with every cursor-motion sequence
+dropped, and a cell-diffing renderer's text events are cell writes, not lines. A paint
+is now captured from the rendered frame. The three fixtures above are pre-T54 captures
+and stay as they are: they are what the cleaner is measured against, and the cleaner's
+contract is unchanged.
+
 ## 3. What the cleaner still does
 
 Line-granularity drops, each counted in `Report` so the reader can see the size of what
