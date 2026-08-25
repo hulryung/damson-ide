@@ -688,7 +688,18 @@ sheet/flow files, Sources/OrchardCore where the formatter lives, matching Tests/
 Does not touch Sources/OrchardApp/main.swift, TerminalCaptureCleaner.swift, or
 OrchardRuntime/Orchestration verb logic.
 
-### Wave 14 (T54–T56, parallel)
+### Wave 14 (T54–T56, parallel) — MERGED 2026-08-25, 965 tests, e2e PASS
+
+All three landed. T54's root cause: the damage was ORCHARD-side, not damson's — the
+read stream was assembled from parsed text events with CSIs dropped at the seam, and
+a cell-diffing TUI sends cell writes (cursor motion over blanks, unchanged cells
+unsent), not lines. Fixed in OrchardTerminals: CSI-aware seam, TerminalCaptureCollector
+classifies bursts print vs paint and captures paints from the grid (row diff,
+scrollback, DECSET-2026 frames), wide-glyph phantom space fixed. damson unchanged, no
+pin change. T55: respacedLines serialized. T56: automations fire end-to-end headless
+(current-minute due + due/fire-due RPC). T54 follow-ups (design doc §6): stream ring
+capacity under a 10fps spinner, pin a post-T54 live capture as a fourth fixture on the
+next dogfood cycle.
 
 **T54 — Upstream capture fidelity (investigation + fix).** T52 proved the cleaner
 faithful and localized the real damage upstream: wide pastes reach the captured
