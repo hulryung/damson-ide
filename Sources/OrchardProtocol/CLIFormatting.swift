@@ -54,8 +54,11 @@ public enum OrchardHumanFormatter {
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    /// Compact receipt for `orchard send` without `--json`.
-    public static func send(_ result: JSONValue?) -> String {
+    /// Compact receipt for `orchard send` without `--json`. `--verbose` prints the
+    /// pretty JSON result instead — never `String(describing:)` of `JSONValue`,
+    /// which is the dogfood-2 Swift-debug leak.
+    public static func send(_ result: JSONValue?, verbose: Bool = false) -> String {
+        if verbose { return json(result) }
         let object = result?.objectValue ?? [:]
         let type = object["type"]?.stringValue ?? "message"
         let count = object["count"]?.numberValue.map { Int($0) } ?? 0
@@ -106,13 +109,38 @@ public enum OrchardHumanFormatter {
             }
         }
         if let warning = object?["warning"]?.stringValue, !warning.isEmpty {
-            lines += ["", "Warning: \(warning)"]
+            // Remote `worktree-list`: an unreachable host returns the last-known set
+            // plus this warning. JSON-only until T36/T53; keep it on the human face.
+            let stale = warning.localizedCaseInsensitiveContains("last known")
+            lines += ["", stale ? "Warning (stale): \(warning)" : "Warning: \(warning)"]
         }
         if object?["truncated"]?.boolValue == true {
             let total = object?["totalCount"]?.numberValue.map(Int.init) ?? rows.count
             lines += ["", "Truncated: showing \(rows.count) of \(total)."]
         }
         return lines.joined(separator: "\n")
+    }
+
+    /// Compact receipt for `orchard worktree rm` without `--json`.
+    public static func worktreeRm(_ result: JSONValue?) -> String {
+        let object = result?.objectValue ?? [:]
+        let removed = object["removed"]?.boolValue == true
+        let branch = object["branch"]?.stringValue ?? ""
+        let branchDeleted = object["branchDeleted"]?.boolValue == true
+        var line: String
+        if !removed {
+            line = "Worktree was not removed."
+        } else if branchDeleted {
+            line = "Removed worktree. Deleted branch '\(branch)'."
+        } else if !branch.isEmpty {
+            line = "Removed worktree. Branch '\(branch)' was kept."
+        } else {
+            line = "Removed worktree."
+        }
+        if let warning = object["warning"]?.stringValue, !warning.isEmpty {
+            line += "\nWarning: \(warning)"
+        }
+        return line
     }
 
     /// `orchard host list` without `--json`. Live status + age when the periodic

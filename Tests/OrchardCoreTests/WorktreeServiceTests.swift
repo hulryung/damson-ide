@@ -105,4 +105,31 @@ final class WorktreeServiceTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(
             atPath: record.path.appendingPathComponent("setup-proof.txt").path))
     }
+
+    /// T53: the app sheet drives this same path as `worktree rm --delete-branch`,
+    /// so the result must name the branch and whether it was deleted.
+    func testDeleteWorktreeReportsBranchDeletionLikeCLI() throws {
+        let repo = try makeRepo()
+        let service = try makeService(repo)
+
+        let keep = try service.createWorktree(name: "keep-branch")
+        let kept = try service.deleteWorktree(keep, force: true, deleteBranch: false)
+        XCTAssertTrue(kept.removed)
+        XCTAssertFalse(kept.branchDeleted)
+        XCTAssertEqual(kept.branch, keep.branch)
+        XCTAssertTrue(service.branchStillExists(keep.branch))
+
+        let drop = try service.createWorktree(name: "drop-branch")
+        let dropped = try service.deleteWorktree(drop, force: true, deleteBranch: true)
+        XCTAssertTrue(dropped.removed)
+        XCTAssertTrue(dropped.branchDeleted)
+        XCTAssertTrue(dropped.branchMerged)
+        XCTAssertEqual(dropped.branch, drop.branch)
+        XCTAssertFalse(service.branchStillExists(drop.branch))
+        XCTAssertEqual(
+            WorktreeDeleteFormatter.resultMessage(
+                branch: dropped.branch, removed: dropped.removed,
+                branchDeleted: dropped.branchDeleted),
+            "Removed worktree. Deleted branch '\(drop.branch)'.")
+    }
 }

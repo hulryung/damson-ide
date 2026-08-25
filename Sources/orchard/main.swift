@@ -4,7 +4,7 @@ import OrchardProtocol
 import OrchardOrchestration
 
 let toolVersion = "2.0.0-dev"
-struct ParsedCommand { let spec: CommandSpec; let params: [String: JSONValue]; let json: Bool }
+struct ParsedCommand { let spec: CommandSpec; let params: [String: JSONValue]; let json: Bool; let verbose: Bool }
 enum CLIError: Error, CustomStringConvertible {
     case usage(String), runtime(String)
     var description: String { switch self { case .usage(let v), .runtime(let v): return v } }
@@ -25,7 +25,9 @@ func parse(_ arguments: [String]) throws -> ParsedCommand {
     }
     for flag in spec.flags where flag.required && params[flag.name] == nil { throw CLIError.usage("missing required --\(flag.name)") }
     if !positionals.isEmpty { params["_args"] = .array(positionals) }
-    return ParsedCommand(spec: spec, params: params, json: params["json"]?.boolValue == true)
+    return ParsedCommand(spec: spec, params: params,
+                         json: params["json"]?.boolValue == true,
+                         verbose: params["verbose"]?.boolValue == true)
 }
 
 func jsonValue(_ text: String, hint: String?) -> JSONValue {
@@ -59,7 +61,7 @@ func callRuntime(method: String, params: JSONValue) throws -> RPCResponse {
 
 func printUsage() { print("usage: orchard <command> [options]\n"); OrchardCommands.all.forEach { print("  \($0.name.padding(toLength: 18, withPad: " ", startingAt: 0)) \($0.summary)") } }
 
-func formatHuman(method: String, result: JSONValue?) -> String {
+func formatHuman(method: String, result: JSONValue?, verbose: Bool = false) -> String {
     let object = result?.objectValue
     switch method {
     case "file-open":
@@ -104,6 +106,8 @@ func formatHuman(method: String, result: JSONValue?) -> String {
         return formatHostCheck(result)
     case "worktree-list":
         return OrchardHumanFormatter.worktreeList(result)
+    case "worktree-rm":
+        return OrchardHumanFormatter.worktreeRm(result)
     case "worktree-ps":
         return formatWorktreePs(result)
     case "workspace-ports":
@@ -113,7 +117,7 @@ func formatHuman(method: String, result: JSONValue?) -> String {
     case "terminal-read":
         return (object?["lines"]?.arrayValue ?? []).compactMap(\.stringValue).joined(separator: "\n")
     case "send":
-        return OrchardHumanFormatter.send(result)
+        return OrchardHumanFormatter.send(result, verbose: verbose)
     default:
         return OrchardHumanFormatter.json(result)
     }
@@ -276,7 +280,9 @@ do {
             if parsed.json { let data = try JSONEncoder.pretty.encode(["topic": "orchestration", "content": OrchestrationContract.coordinatorGuide]); FileHandle.standardOutput.write(data + Data("\n".utf8)) } else { print(OrchestrationContract.coordinatorGuide) }
         } else { throw CLIError.usage("usage: orchard guide list | orchard guide get orchestration [--json]") }
     default:
-        var method = parsed.spec.name, params = parsed.params; params.removeValue(forKey: "json")
+        var method = parsed.spec.name, params = parsed.params
+        params.removeValue(forKey: "json")
+        params.removeValue(forKey: "verbose")
         if method == "repo" || method == "browser" || method == "automations" || method == "worktree" || method == "terminal" || method == "host", case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue {
             method = "\(method)-\(subcommand)"
             let rest = Array(values.dropFirst())
@@ -338,7 +344,7 @@ do {
         }
         let response = try callRuntime(method: method, params: .object(params))
         if parsed.json { let data = try JSONEncoder.pretty.encode(response); FileHandle.standardOutput.write(data + Data("\n".utf8)) }
-        else if response.ok { print(formatHuman(method: method, result: response.result)) }
+        else if response.ok { print(formatHuman(method: method, result: response.result, verbose: parsed.verbose)) }
         else { throw CLIError.runtime("\(response.error?.code ?? "error"): \(response.error?.message ?? "unknown error")") }
     }
 } catch { FileHandle.standardError.write(Data("orchard: \(error)\n".utf8)); exit(64) }
