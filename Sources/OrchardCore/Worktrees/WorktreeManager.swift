@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 /// A git worktree allocated for an agent's task.
@@ -496,6 +497,12 @@ public final class WorktreeManager {
                 throw error
             }
             clearMeta(repo: wt.baseRepo, id: wt.id.uuidString)
+            // The worktree directory is gone. If this was the last checkout in the
+            // per-repo container (`~/Orchard/worktrees/<repo>/`), drop that empty
+            // directory too. Never recursive: a sibling worktree or leftover file
+            // leaves the container in place. Runs on the branch-delete throw path
+            // as well — the checkout is already gone.
+            defer { Self.removeEmptyDirectory(self.root) }
             if dropBranch {
                 let flag = forceBranch ? "-D" : "-d"
                 do {
@@ -509,6 +516,22 @@ public final class WorktreeManager {
             }
             return true
         }
+    }
+
+    /// Remove `url` only if it is an empty directory. Never recursive: a
+    /// non-empty directory, a file, or a missing path is left alone.
+    ///
+    /// Used after `worktree rm` of the last extra worktree and on `repo remove`
+    /// so `~/Orchard/worktrees/<repo>/` does not sit empty.
+    public static func removeEmptyDirectory(_ url: URL) {
+        let standardized = url.standardizedFileURL
+        let path = standardized.path
+        guard standardized.pathComponents.count >= 3, !path.isEmpty else { return }
+        let home = FileManager.default.homeDirectoryForCurrentUser.standardizedFileURL.path
+        // Same class of refusal as `assertRemovable`: never rmdir `/`, `$HOME`,
+        // or a directory that contains `$HOME`.
+        if path == "/" || path == home || home.hasPrefix(path + "/") { return }
+        _ = path.withCString { rmdir($0) }
     }
 
     /// Pull git's unmerged first line out of a wrapped `GitError` message.

@@ -12,7 +12,7 @@ public struct AutomationCommandHandler: CommandHandler {
         catch let error as AutomationScheduleError {
             return .failure(id: request.id, error: RPCError(code: error.code, message: error.description))
         }
-        catch { return .failure(id: request.id, error: RPCError(code: "automation_error", message: String(describing: error))) }
+        catch { return .failure(id: request.id, error: RPCError(code: "internal_error", message: String(describing: error))) }
     }
     private func route(_ request: RPCRequest) async throws -> JSONValue {
         let p = request.params?.objectValue ?? [:]
@@ -60,7 +60,7 @@ public struct AutomationCommandHandler: CommandHandler {
         guard let id = p["id"]?.stringValue ?? p["name"]?.stringValue else { throw AutomationScheduleError.invalid("--id is required") }; return id
     }
     private func required(_ value: Automation?) throws -> Automation {
-        guard let value else { throw AutomationScheduleError.invalid("automation not found") }; return value
+        guard let value else { throw AutomationScheduleError.notFound("automation not found") }; return value
     }
     private func automation(_ p: [String: JSONValue], existing: Automation? = nil) throws -> Automation {
         func string(_ key: String, _ fallback: String? = nil) throws -> String {

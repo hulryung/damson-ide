@@ -2,6 +2,10 @@ import Foundation
 
 public enum AutomationScheduleError: Error, CustomStringConvertible {
     case invalid(String)
+    /// Show / run / edit of an id that is not in the store.
+    case notFound(String)
+    /// Manual `run --id` of a disabled automation (including a consumed `once`).
+    case disabled(id: String)
     /// T60: a scheduled or manual fire for this automation has not finished yet.
     /// The slot is claimed in-actor before the fire callback runs, so a second
     /// caller (CLI `fire-due` racing the in-process scheduler, or `run --id`
@@ -10,13 +14,17 @@ public enum AutomationScheduleError: Error, CustomStringConvertible {
     public var description: String {
         switch self {
         case .invalid(let s): return s
+        case .notFound(let s): return s
+        case .disabled(let id): return "automation \(id) is disabled"
         case .fireInFlight(let id): return "a fire for automation \(id) is already in flight"
         }
     }
     /// Stable RPC error code for the CLI face.
     public var code: String {
         switch self {
-        case .invalid: return "automation_error"
+        case .invalid: return "automation_invalid_input"
+        case .notFound: return "automation_not_found"
+        case .disabled: return "automation_disabled"
         case .fireInFlight: return "automation_fire_in_flight"
         }
     }

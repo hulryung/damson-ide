@@ -331,6 +331,39 @@ final class WorkspaceServiceTests: XCTestCase {
         XCTAssertNil(service.store.load().worktreeLineageById[created.workspace.id])
         XCTAssertNil(service.store.load().retiredWorktreeNamesByRepo[gitRepo.id])
         XCTAssertTrue(FileManager.default.fileExists(atPath: created.workspace.path))
+        let leftoverContainer = URL(fileURLWithPath: created.workspace.path).deletingLastPathComponent()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: leftoverContainer.path),
+                      "a still-occupied container must not be rmdir'd")
+    }
+
+    func testRemoveLastWorktreeRmdirsEmptyContainer() async throws {
+        let repo = try makeRepo()
+        let service = makeService()
+        let record = try service.addRepo(path: repo)
+        let created = try await service.create(WorkspaceCreateRequest(repo: record.id, name: "only-wt"))
+        let container = URL(fileURLWithPath: created.workspace.path).deletingLastPathComponent()
+        XCTAssertTrue(FileManager.default.fileExists(atPath: container.path))
+        let removed = try service.remove(selector: created.workspace.id, force: true)
+        XCTAssertTrue(removed.removed)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: created.workspace.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: container.path),
+                       "empty per-repo container must be rmdir'd after the last extra worktree")
+    }
+
+    func testRemoveRepoRmdirsEmptyWorktreeContainer() async throws {
+        let repo = try makeRepo(name: "git-empty-container")
+        let service = makeService()
+        let record = try service.addRepo(path: repo)
+        let created = try await service.create(WorkspaceCreateRequest(repo: record.id, name: "temp"))
+        let container = URL(fileURLWithPath: created.workspace.path).deletingLastPathComponent()
+        _ = try service.remove(selector: created.workspace.id, force: true)
+        // worktree rm already rmdirs; recreate an empty leftover so repo remove is
+        // the path under test (crash between rm and rmdir, or an outside delete).
+        try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: container.path))
+        _ = try service.removeRepo(record.id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: container.path),
+                       "repo remove must rmdir the empty per-repo container")
     }
 
     func testRepoChangesEmitsSnapshotOnSubscribeThenAddAndRemove() async throws {

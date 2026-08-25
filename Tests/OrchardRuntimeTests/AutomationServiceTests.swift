@@ -214,6 +214,33 @@ final class AutomationServiceTests: XCTestCase {
         XCTAssertEqual(run.outcome, .skipped)
         let stored = await service.show(item.id)
         XCTAssertEqual(stored?.enabled, false)
+        do {
+            _ = try await service.run(id: item.id)
+            XCTFail("a consumed once must not fire again via run --id")
+        } catch let error as AutomationScheduleError {
+            XCTAssertEqual(error.code, "automation_disabled")
+        }
+    }
+
+    func testManualRunRefusesADisabledAutomation() async throws {
+        let (service, root) = try fixture { _ in XCTFail("must not fire"); return AutomationFireReceipt() }
+        defer { try? FileManager.default.removeItem(at: root) }
+        let item = Automation(name: "paused", trigger: .daily, time: "12:00", provider: "shell",
+                              prompt: "true", target: .repo("repo"))
+        _ = try await service.create(item)
+        _ = try await service.setEnabled(item.id, enabled: false)
+        do {
+            _ = try await service.run(id: item.id)
+            XCTFail("run --id on a disabled automation must be refused")
+        } catch let error as AutomationScheduleError {
+            XCTAssertEqual(error.code, "automation_disabled")
+        }
+        do {
+            _ = try await service.run(id: "auto_missing")
+            XCTFail("run --id on a missing automation must be refused")
+        } catch let error as AutomationScheduleError {
+            XCTAssertEqual(error.code, "automation_not_found")
+        }
     }
 
     func testAutomationRunDecodesWithoutDispatchFields() throws {

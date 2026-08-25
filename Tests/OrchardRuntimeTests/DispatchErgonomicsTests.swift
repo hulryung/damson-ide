@@ -44,6 +44,12 @@ final class DispatchErgonomicsTests: XCTestCase {
         XCTAssertEqual(source.allowedValues, ["auto", "transcript", "terminal"])
         let raw = try XCTUnwrap(spec.flags.first { $0.name == "raw" })
         XCTAssertNil(raw.valueHint, "--raw is a boolean flag")
+        let limit = try XCTUnwrap(spec.flags.first { $0.name == "limit" })
+        XCTAssertTrue(limit.summary.contains("\(WorkerReadPaging.defaultLimit)"),
+                      "CommandSpec --limit must name the default (\(limit.summary))")
+        XCTAssertEqual(WorkerReadPaging.defaultLimit, 200)
+        XCTAssertTrue(spec.notes.contains { $0.contains("\(WorkerReadPaging.defaultLimit)") },
+                      spec.notes.joined(separator: " | "))
     }
 
     /// `allowedValues` is additive on the wire: metadata written by an older runtime

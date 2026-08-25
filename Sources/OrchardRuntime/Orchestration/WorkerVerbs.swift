@@ -70,7 +70,7 @@ extension LiveOrchestrationStore {
                 code: "invalid_argument", message: "--source must be auto|transcript|terminal.")
         }
         let cursor = p.int("cursor")
-        let limit = max(1, p.int("limit") ?? 200)
+        let limit = max(1, p.int("limit") ?? WorkerReadPaging.defaultLimit)
         let raw = p["raw"]?.boolValue == true
         return try await mapped {
             guard let dispatch = try self.store.dispatchContext(dispatchID) else {

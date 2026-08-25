@@ -91,6 +91,12 @@ public enum OrchardAgentEngines {
     ]
 }
 
+/// Default `--limit` for `worker-read` when the flag is omitted. Live and
+/// archived terminal windows share this bound; `--cursor` pages older lines.
+public enum WorkerReadPaging {
+    public static let defaultLimit = 200
+}
+
 /// The shape `orchard agent-context --json` serializes — a pure local read that works
 /// with no runtime running.
 public struct AgentContextDocument: Codable, Equatable, Sendable {
@@ -168,7 +174,16 @@ public enum OrchardCommands {
             command("gate-list", "List decision gates", [flag("task", "Task identifier", "id"), flag("status", "Gate status", "status")]),
             command("worker-start", "Start a supervised worker", [flag("task", "Task identifier", "id", required: true), flag("on", "Environment", "environment"), flag("worktree", "Workspace placement", "selector"), enumerated("agent", "Agent engine id or alias", "agent", OrchardAgentEngines.acceptedIdentifiers), flag("terminal", "Existing terminal", "handle"), flag("model", "Model", "id"), flag("effort", "Reasoning effort", "level"), flag("name", "Worktree name", "name"), flag("repo", "Repository", "selector"), flag("base-branch", "Git base", "ref"), flag("setup", "Setup policy", "run|skip|inherit"), flag("retry-of", "Prior dispatch", "id"), flag("timeout-ms", "Agent readiness timeout", "ms"), retry]),
             command("worker-show", "Show a supervised worker", [flag("dispatch", "Dispatch identifier", "id", required: true)]),
-            command("worker-read", "Read archived or live worker output", [flag("dispatch", "Dispatch identifier", "id", required: true), enumerated("source", "Output source; transcript fails typed rather than falling back", "auto|transcript|terminal", ["auto", "transcript", "terminal"]), flag("raw", "Serve the untouched capture instead of the chrome-stripped text"), flag("cursor", "Paging cursor", "cursor"), flag("limit", "Maximum entries", "n")]),
+            command("worker-read", "Read archived or live worker output", [
+                flag("dispatch", "Dispatch identifier", "id", required: true),
+                enumerated("source", "Output source; transcript fails typed rather than falling back", "auto|transcript|terminal", ["auto", "transcript", "terminal"]),
+                flag("raw", "Serve the untouched capture instead of the chrome-stripped text"),
+                flag("cursor", "Paging cursor; combine with --limit to walk older lines", "cursor"),
+                flag("limit", "Maximum lines to return (default \(WorkerReadPaging.defaultLimit))", "n"),
+            ], notes: [
+                "Without --limit, worker-read returns the newest \(WorkerReadPaging.defaultLimit) lines.",
+                "Use --limit and --cursor to page older output. truncated describes the requested window, not whether older lines exist.",
+            ]),
             command("worker-stop", "Stop a worker", [flag("dispatch", "Dispatch identifier", "id", required: true), retry]),
             command("worker-abandon", "Abandon uncertain worker resources", [flag("dispatch", "Dispatch identifier", "id", required: true), retry]),
             command("worker-release", "Archive and release worker resources", [flag("dispatch", "Dispatch identifier", "id", required: true), retry]),
@@ -186,6 +201,7 @@ public enum OrchardCommands {
             ], positionals: ["list|add|show|remove"], notes: [
                 "repo remove drops the registry row and orchard-data owned by the repo.",
                 "It refuses while extra worktrees or automations still reference the repo (typed repo_in_use, naming them). There is no --force.",
+                "A successful remove also rmdirs the empty ~/Orchard/worktrees/<repo>/ container (never recursively).",
             ]),
             command("worktree", "List worktrees or show agent/shell processes and listening ports", [
                 flag("repo", "Repository selector", "selector"),
@@ -215,6 +231,7 @@ public enum OrchardCommands {
             ], positionals: ["list|show|current|create|set|rm|ps"], notes: [
                 "worktree set --status <id> writes the user-authored board column (todo, in-progress, in-review, completed, or a custom vocabulary id).",
                 "Board column is distinct from derived live status (active|working|permission|done|inactive).",
+                "worktree rm rmdirs ~/Orchard/worktrees/<repo>/ when that container is empty; it never deletes recursively.",
             ]),
             command("workspace-ports", "List listening TCP ports attributed to workspaces", [
                 flag("repo", "Repository selector", "selector"),
@@ -272,7 +289,10 @@ public enum OrchardCommands {
                 flag("timeout", "Precheck timeout seconds (1...300)", "n"),
                 flag("enabled", "Enable the automation (default on create)"),
                 flag("disabled", "Disable the automation"),
-            ], positionals: ["list|show|create|edit|remove|run|runs|due|fire-due"]),
+            ], positionals: ["list|show|create|edit|remove|run|runs|due|fire-due"], notes: [
+                "Typed errors: automation_not_found, automation_invalid_input, automation_disabled, automation_fire_in_flight.",
+                "run --id on a disabled automation (including a consumed once schedule) is refused as automation_disabled.",
+            ]),
             // T29 remote hosts. `host check` is bounded: it reports
             // reachable|auth-required|unreachable and never waits on a human, because
             // BatchMode makes OpenSSH fail instead of prompting. Unreachable is loss of

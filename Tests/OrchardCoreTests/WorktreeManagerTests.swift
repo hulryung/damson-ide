@@ -65,6 +65,34 @@ final class WorktreeManagerTests: XCTestCase {
 
         XCTAssertTrue(try mgr.remove(wt))
         XCTAssertFalse(FileManager.default.fileExists(atPath: wt.path.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: mgr.root.path),
+                       "empty per-repo container must be rmdir'd after the last worktree")
+    }
+
+    func testRemoveEmptyDirectoryIsNonRecursive() throws {
+        let dir = tmp.appendingPathComponent("container")
+        let nested = dir.appendingPathComponent("keep")
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        WorktreeManager.removeEmptyDirectory(dir)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: dir.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: nested.path))
+        try FileManager.default.removeItem(at: nested)
+        WorktreeManager.removeEmptyDirectory(dir)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: dir.path))
+    }
+
+    func testRemoveLeavesContainerWhenASiblingWorktreeRemains() throws {
+        let repo = try makeRepo()
+        let mgr = WorktreeManager(root: tmp.appendingPathComponent("worktrees"))
+        let base = try mgr.detectBaseRepo(from: repo)
+        let ref = try mgr.resolveRef("HEAD", in: base)
+        let first = try mgr.create(base: base, branch: "orchard/first", from: ref)
+        let second = try mgr.create(base: base, branch: "orchard/second", from: ref)
+        XCTAssertTrue(try mgr.remove(first))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: mgr.root.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: second.path.path))
+        XCTAssertTrue(try mgr.remove(second))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: mgr.root.path))
     }
 
     func testDirtyWorktreePreservedWithoutForce() throws {

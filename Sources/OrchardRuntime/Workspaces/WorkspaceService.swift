@@ -107,6 +107,8 @@ public final class WorkspaceService {
     /// Drop a registered repo. Git worktrees on disk are left intact (Close
     /// Project, not delete). Folder rows, meta, lineage, and retired names
     /// owned by this repo id are removed so a later re-add starts clean.
+    /// The empty per-repo worktree container (`~/Orchard/worktrees/<repo>/`,
+    /// or the test override) is rmdir'd when empty; never recursively.
     @discardableResult
     public func removeRepo(_ selector: String) throws -> RepoRecord {
         let record = try resolveRepo(selector)
@@ -139,6 +141,7 @@ public final class WorkspaceService {
         for key in cached {
             gitServices.removeValue(forKey: key)?.shutdown(removeWorktrees: false)
         }
+        WorktreeManager.removeEmptyDirectory(worktreeContainerURL(for: record))
         publishReposChanged()
         return record
     }
@@ -746,15 +749,19 @@ public final class WorkspaceService {
             }
     }
 
+    /// Per-repo container: `~/Orchard/worktrees/<repo>/` in production, or
+    /// `worktreesRoot/<repo-id>/` when tests override the root.
+    func worktreeContainerURL(for repo: RepoRecord) -> URL {
+        if let worktreesRoot {
+            return worktreesRoot.appendingPathComponent(repo.id, isDirectory: true)
+        }
+        return WorktreeManager.defaultRoot(for: URL(fileURLWithPath: repo.path))
+    }
+
     private func gitService(for repo: RepoRecord) throws -> WorktreeService {
         if let existing = gitServices[repo.id] { return existing }
         let url = URL(fileURLWithPath: repo.path)
-        let root: URL
-        if let worktreesRoot {
-            root = worktreesRoot.appendingPathComponent(repo.id, isDirectory: true)
-        } else {
-            root = WorktreeManager.defaultRoot(for: url)
-        }
+        let root = worktreeContainerURL(for: repo)
         let service = WorktreeService(baseRepo: url, worktreesRoot: root)
         try service.start()
         if repo.baseRef != "HEAD" {

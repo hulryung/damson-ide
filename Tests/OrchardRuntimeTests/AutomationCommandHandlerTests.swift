@@ -89,7 +89,7 @@ final class AutomationCommandHandlerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let response = await call(handler, "automations-due", ["through": .string("not-a-date")])
         XCTAssertFalse(response.ok)
-        XCTAssertEqual(response.error?.code, "automation_error")
+        XCTAssertEqual(response.error?.code, "automation_invalid_input")
     }
 
     // MARK: - T60
@@ -139,7 +139,57 @@ final class AutomationCommandHandlerTests: XCTestCase {
             "provider": .string("shell"), "prompt": .string("true"), "repo": .string("repo"),
         ])
         XCTAssertFalse(invalid.ok)
-        XCTAssertEqual(invalid.error?.code, "automation_error")
+        XCTAssertEqual(invalid.error?.code, "automation_invalid_input")
+    }
+
+    func testShowAndRunMissingIdAreTypedNotFound() async throws {
+        let (handler, _, root) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let show = await call(handler, "automations-show", ["id": .string("auto_nope")])
+        XCTAssertFalse(show.ok)
+        XCTAssertEqual(show.error?.code, "automation_not_found")
+        let run = await call(handler, "automations-run", ["id": .string("auto_nope")])
+        XCTAssertFalse(run.ok)
+        XCTAssertEqual(run.error?.code, "automation_not_found")
+    }
+
+    func testInvalidTriggerIsTypedInvalidInput() async throws {
+        let (handler, _, root) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let response = await call(handler, "automations-create", [
+            "name": .string("bad"), "trigger": .string("fortnightly"), "time": .string("12:00"),
+            "provider": .string("shell"), "prompt": .string("true"), "repo": .string("repo"),
+        ])
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.error?.code, "automation_invalid_input")
+    }
+
+    func testManualRunOfDisabledAndConsumedOnceIsTypedDisabled() async throws {
+        let (handler, _, root) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let created = await call(handler, "automations-create", [
+            "name": .string("paused"), "trigger": .string("daily"), "time": .string("12:00"),
+            "provider": .string("shell"), "prompt": .string("true"), "repo": .string("repo"),
+            "disabled": .bool(true),
+        ])
+        XCTAssertTrue(created.ok, created.error?.message ?? "")
+        let id = try XCTUnwrap(created.result?.objectValue?["id"]?.stringValue)
+        let paused = await call(handler, "automations-run", ["id": .string(id)])
+        XCTAssertFalse(paused.ok)
+        XCTAssertEqual(paused.error?.code, "automation_disabled")
+
+        let once = await call(handler, "automations-create", [
+            "name": .string("one-shot-run"), "trigger": .string("once"), "time": .string("now"),
+            "provider": .string("shell"), "prompt": .string("true"), "repo": .string("repo"),
+        ])
+        let onceId = try XCTUnwrap(once.result?.objectValue?["id"]?.stringValue)
+        let fired = await call(handler, "automations-run", ["id": .string(onceId)])
+        XCTAssertTrue(fired.ok, fired.error?.message ?? "")
+        let shown = await call(handler, "automations-show", ["id": .string(onceId)])
+        XCTAssertEqual(shown.result?.objectValue?["enabled"]?.boolValue, false)
+        let again = await call(handler, "automations-run", ["id": .string(onceId)])
+        XCTAssertFalse(again.ok)
+        XCTAssertEqual(again.error?.code, "automation_disabled")
     }
 
     func testManualRunDuringAFireIsRefusedTyped() async throws {
