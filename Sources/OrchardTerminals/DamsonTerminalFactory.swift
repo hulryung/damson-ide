@@ -44,40 +44,53 @@ public enum DamsonTerminalFactory {
     public static func make(template: DamsonConfig = DamsonConfig(),
                             context: TerminalHostContext = TerminalHostContext()) -> TerminalSessionFactory {
         { spec, engine in
-            var config = template
-            let cwd = spec.cwd ?? config.cwd
-            config.cwd = cwd
-            let task = AgentTask(title: spec.title ?? engine.displayName,
-                                 prompt: spec.prompt,
-                                 engineID: engine.id,
-                                 baseRepoPath: "")
-            // A spec-supplied argv wins: a remote agent pane is a Claude Code pane for
-            // readiness and sends, but its PTY child is `ssh`, and the engine cannot
-            // describe that launch (T39).
-            config.argv = spec.launchArgv ?? EngineLaunch.argv(
-                engine: engine, task: task,
-                worktree: URL(fileURLWithPath: cwd ?? FileManager.default.currentDirectoryPath))
-            // Engine env shaping first (e.g. Claude's inherited-session-marker
-            // stripping), then the Orchard identity the agent uses to find us. The
-            // handle is the value at spawn; after a remint the pane key remains the
-            // durable identity — which is exactly why both are injected.
-            var env = engine.env(base: config.env)
-            env["ORCHARD_TERMINAL_HANDLE"] = spec.handle
-            env["ORCHARD_PANE_KEY"] = spec.paneKey
-            if let worktreeId = spec.worktreeId {
-                env["ORCHARD_WORKTREE_ID"] = worktreeId
-            }
-            if let cli = context.cliCommand {
-                env["ORCHARD_CLI_COMMAND"] = cli
-            }
-            if let dataPath = context.dataPath {
-                env["ORCHARD_DATA_PATH"] = dataPath
-            }
-            config.env = env
+            let config = launchConfig(spec: spec, engine: engine,
+                                      template: template, context: context)
             return DamsonTerminalSession(
                 config: config,
                 initialCols: spec.initialCols ?? TerminalSpawnDefaults.cols,
                 initialRows: spec.initialRows ?? TerminalSpawnDefaults.rows)
         }
+    }
+
+    /// The argv/cwd/env the factory would spawn — extracted so tests can pin the
+    /// remote-identity wrap without forking a real `ssh`.
+    ///
+    /// Called on every spawn, including respawn and `reconnectRemote`: the recorded
+    /// spec keeps the unwrapped invocation (so keeper restoration and reconnect
+    /// surgery still see the far-side command they persisted), and this reapplies
+    /// the current handle/pane key at fork time.
+    public static func launchConfig(spec: TerminalCreateSpec, engine: AgentEngine,
+                                    template: DamsonConfig = DamsonConfig(),
+                                    context: TerminalHostContext = TerminalHostContext()) -> DamsonConfig {
+        var config = template
+        let cwd = spec.cwd ?? config.cwd
+        config.cwd = cwd
+        let task = AgentTask(title: spec.title ?? engine.displayName,
+                             prompt: spec.prompt,
+                             engineID: engine.id,
+                             baseRepoPath: "")
+        // A spec-supplied argv wins: a remote agent pane is a Claude Code pane for
+        // readiness and sends, but its PTY child is `ssh`, and the engine cannot
+        // describe that launch (T39).
+        var argv = spec.launchArgv ?? EngineLaunch.argv(
+            engine: engine, task: task,
+            worktree: URL(fileURLWithPath: cwd ?? FileManager.default.currentDirectoryPath))
+        let bindings = OrchardIdentity.bindings(spec: spec, context: context)
+        // Local env is still set — a local pane reads it, and it is harmless on the
+        // `ssh` client itself. For a remote pane it is not enough: ssh does not
+        // forward these, so the far-side command line has to carry them (T78).
+        if spec.isRemote {
+            argv = OrchardIdentity.carryThroughSSH(argv: argv, bindings: bindings)
+        }
+        config.argv = argv
+        // Engine env shaping first (e.g. Claude's inherited-session-marker
+        // stripping), then the Orchard identity the agent uses to find us. The
+        // handle is the value at spawn; after a remint the pane key remains the
+        // durable identity — which is exactly why both are injected.
+        var env = engine.env(base: config.env)
+        OrchardIdentity.apply(bindings, to: &env)
+        config.env = env
+        return config
     }
 }

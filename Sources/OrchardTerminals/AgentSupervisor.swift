@@ -161,17 +161,10 @@ public final class AgentSupervisor {
                                  workspaceID: String?,
                                  hostContext: TerminalHostContext) -> [String: String] {
         var env = base
-        env["ORCHARD_TERMINAL_HANDLE"] = handle
-        env["ORCHARD_PANE_KEY"] = paneKey
-        if let workspaceID {
-            env["ORCHARD_WORKTREE_ID"] = workspaceID
-        }
-        if let cli = hostContext.cliCommand {
-            env["ORCHARD_CLI_COMMAND"] = cli
-        }
-        if let dataPath = hostContext.dataPath {
-            env["ORCHARD_DATA_PATH"] = dataPath
-        }
+        OrchardIdentity.apply(
+            OrchardIdentity.bindings(handle: handle, paneKey: paneKey,
+                                     worktreeId: workspaceID, context: hostContext),
+            to: &env)
         return env
     }
 

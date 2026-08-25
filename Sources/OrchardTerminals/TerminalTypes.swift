@@ -1,9 +1,11 @@
 import Foundation
 
 /// Everything a session factory needs to spawn one terminal. The registry mints the
-/// identities before spawning so the factory can inject them into the child's
-/// environment (`ORCHARD_TERMINAL_HANDLE` / `ORCHARD_PANE_KEY` / …) — that injection is
-/// how an agent inside the PTY later finds itself in `orchard` CLI calls.
+/// identities before spawning so the factory can inject them (`ORCHARD_TERMINAL_HANDLE`
+/// / `ORCHARD_PANE_KEY` / …) — locally into the child's environment, and for a remote
+/// pane into the `ssh` remote command line, because ssh does not forward those
+/// variables. That is how an agent inside the PTY later finds itself in `orchard`
+/// CLI calls.
 public struct TerminalCreateSpec: Sendable {
     public let handle: String
     public let paneKey: String
