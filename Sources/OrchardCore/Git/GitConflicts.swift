@@ -650,7 +650,13 @@ public struct GitConflictService: Sendable {
     /// would have quietly substituted U+FFFD for every undecodable byte.
     static func text(of data: Data) -> String? {
         if data.prefix(8000).contains(0) { return nil }
-        return String(data: data, encoding: .utf8)
+        guard let text = String(data: data, encoding: .utf8) else { return nil }
+        // `String(data:encoding:.utf8)` is strict about undecodable bytes but still
+        // swallows a leading BOM, so a resolve would drop EF BB BF from a file whose
+        // header the user never touched. Anything that does not re-encode to the same
+        // bytes is refused (typed `notUTF8`) rather than silently rewritten.
+        guard Data(text.utf8) == data else { return nil }
+        return text
     }
 
     // MARK: Resolution

@@ -49,24 +49,34 @@ final class FileWatcherTests: XCTestCase {
     }
 
     func testEventCallbackBudgetAvoidsUnusedPathMaterialization() {
-        let paths = (0..<10_000).map { "/workspace/Sources/file-\($0).swift" }
-        let flags = Array(repeating: UInt32(0), count: paths.count)
-        let beforeStart = ContinuousClock.now
-        var legacyBytes = 0
-        for _ in 0..<20 { legacyBytes += paths.reduce(0) { $0 + $1.utf8.count } }
-        let before = beforeStart.duration(to: .now)
-        let afterStart = ContinuousClock.now
-        var rootChanges = 0
-        for _ in 0..<20 {
-            for flag in flags where flag & UInt32(kFSEventStreamEventFlagRootChanged) != 0 {
-                rootChanges += 1
-            }
+        // The budget this guards is "do not build a path string for an event the
+        // callback will discard". It used to be asserted by racing two synthetic
+        // loops on the wall clock, which flipped under load (3 failures in 40 runs)
+        // and involved no product code; counting the materializations states the
+        // same rule deterministically.
+        let count = 10_000
+        let flags = Array(repeating: UInt32(0), count: count)
+        var materializations = 0
+        func path(at index: Int) -> String {
+            materializations += 1
+            return "/workspace/Sources/file-\(index).swift"
         }
-        let after = afterStart.duration(to: .now)
-        XCTAssertGreaterThan(legacyBytes, 0)
+
+        // Legacy shape: every event's path is materialized before anything is decided.
+        for index in 0..<count { _ = path(at: index) }
+        XCTAssertEqual(materializations, count)
+
+        // Current shape: the flag decides first, so a burst carrying no root-changed
+        // event materializes nothing at all.
+        materializations = 0
+        var rootChanges = 0
+        for (index, flag) in flags.enumerated()
+        where flag & UInt32(kFSEventStreamEventFlagRootChanged) != 0 {
+            _ = path(at: index)
+            rootChanges += 1
+        }
         XCTAssertEqual(rootChanges, 0)
-        XCTAssertLessThan(after, before)
-        print("PERF file-event callback before \(before), after \(after), events=10000 bursts=20")
+        XCTAssertEqual(materializations, 0)
     }
 
     func testIdleWatchersDoNotReconcileWithoutFilesystemChanges() async throws {

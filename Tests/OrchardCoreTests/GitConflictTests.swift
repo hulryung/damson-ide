@@ -843,4 +843,13 @@ final class GitRunnerDataTests: GitConflictRepoCase {
         XCTAssertEqual(String(decoding: raw.stdout, as: UTF8.self), string.stdout)
         XCTAssertEqual(raw.stderr, string.stderr)
     }
+    /// A BOM survives a refused resolve: `String(data:encoding:.utf8)` swallows EF BB BF,
+    /// so decoding without a round-trip check would drop a header byte the user never
+    /// touched (handed over by T75's audit).
+    func testBOMPrefixedFileIsRefusedRatherThanSilentlyStripped() throws {
+        let bom = Data([0xEF, 0xBB, 0xBF])
+        let body = Data("hello\n".utf8)
+        XCTAssertNil(GitConflictService.text(of: bom + body))
+        XCTAssertEqual(GitConflictService.text(of: body), "hello\n")
+    }
 }
