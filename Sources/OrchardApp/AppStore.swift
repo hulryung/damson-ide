@@ -93,6 +93,12 @@ final class AppStore: ObservableObject {
     var showAutomations: (() -> Void)?
     var showVault: (() -> Void)?
     var showSettings: (() -> Void)?
+    var showFloatingTerminal: (() -> Void)?
+    var hideFloatingTerminal: (() -> Void)?
+
+    /// The one floating-terminal window's binding. Nil means the window is
+    /// closed; the pane's session is not terminated.
+    @Published var floatingTerminal: FloatingTerminalTarget?
 
     /// Truthful control-plane presence for the Dock / app menu (T51).
     /// "Alive" only when this process has a listening runtime socket — not merely
@@ -136,6 +142,14 @@ final class AppStore: ObservableObject {
         let id: UUID
         let projectID: UUID
         let record: WorktreeRecord
+    }
+
+    /// Which existing pane the floating terminal is showing. The window never
+    /// owns a PTY of its own.
+    struct FloatingTerminalTarget: Equatable {
+        let tabID: UUID
+        let key: WorkbenchKey
+        let title: String
     }
 
     init(settings: OrchardSettings, meta: WorkspaceMetaStore? = nil) {
@@ -432,6 +446,40 @@ final class AppStore: ObservableObject {
             }
         }
         return DashboardProjection.board(from: inputs)
+    }
+
+    /// Status-bar workspace chip: selected worktree title + branch, or the
+    /// project checkout name + `rootSubtitle` (branch / folder / remote).
+    var statusBarWorkspace: (name: String?, branch: String?) {
+        switch selection {
+        case .worktree:
+            guard let record = selectedRecord else { return (nil, nil) }
+            return (record.title, record.branch)
+        case .projectRoot(let id):
+            guard let project = projects.first(where: { $0.id == id }) else { return (nil, nil) }
+            return (project.name, project.rootSubtitle)
+        case nil:
+            return (nil, nil)
+        }
+    }
+
+    /// Live agent counts by T67 dashboard bucket. Reads `dashboardBoard()`; does
+    /// not re-bucket.
+    func statusBarBucketCounts() -> [StatusBarBucketCount] {
+        let board = dashboardBoard()
+        return DashboardBucket.allCases.map { bucket in
+            let glyph: DashboardDotState
+            switch bucket {
+            case .attention: glyph = .blocked
+            case .working: glyph = .working
+            case .done: glyph = .done
+            case .idle: glyph = .idle
+            }
+            return StatusBarBucketCount(
+                id: bucket.rawValue,
+                glyph: DashboardProjection.glyph(for: glyph),
+                count: board.total(in: bucket))
+        }
     }
 
     func dashboardInput(for agent: AgentSession, in project: ProjectSession) -> DashboardCardInput {
@@ -1267,6 +1315,51 @@ final class AppStore: ObservableObject {
                 }
             }
         }
+        if floatingTerminal?.tabID == tabID {
+            closeFloatingTerminal()
+        }
+    }
+
+    /// Bind the floating window to this pane's existing session. No-op when the
+    /// tab is not a live terminal — we never spawn a PTY just to float it.
+    func openFloatingTerminal(tab: WorkbenchTab, key: WorkbenchKey) {
+        guard tab.kind == .terminal else { return }
+        guard existingDamsonSession(for: tab) != nil else { return }
+        let bound = FloatingTerminalPolicy.binding(
+            current: floatingTerminal?.tabID, opening: tab.id)
+        floatingTerminal = FloatingTerminalTarget(tabID: bound, key: key, title: tab.title)
+        showFloatingTerminal?()
+    }
+
+    func closeFloatingTerminal(orderOut: Bool = true) {
+        guard floatingTerminal != nil else { return }
+        // `bindingAfterClose` is nil: drop the window binding, keep the session.
+        floatingTerminal = nil
+        if orderOut { hideFloatingTerminal?() }
+    }
+
+    func revealFloatingTerminal() {
+        guard floatingTerminal != nil else { return }
+        showFloatingTerminal?()
+    }
+
+    func floatingWorkbenchTab() -> WorkbenchTab? {
+        guard let target = floatingTerminal else { return nil }
+        return layout(for: target.key).tab(id: target.tabID)
+    }
+
+    /// Lookup only. Creating a session belongs to `damsonSession(for:key:cwd:)`
+    /// so the floating window cannot mint a second PTY for the same pane.
+    func existingDamsonSession(for tab: WorkbenchTab) -> DamsonSession? {
+        if let agentID = tab.agentID {
+            for project in projects {
+                if let agent = project.agents.agents.first(where: { $0.id == agentID }),
+                   let session = (agent.terminal as? DamsonTerminalSession)?.session {
+                    return session
+                }
+            }
+        }
+        return shells[tab.id]
     }
 
     func split(_ groupID: UUID, key: WorkbenchKey, axis: SplitAxis) {

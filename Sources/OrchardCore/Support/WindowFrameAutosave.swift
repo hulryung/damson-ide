@@ -16,6 +16,7 @@ public enum WindowFrameAutosave {
         case orchestration
         case automations
         case vault
+        case floatingTerminal
     }
 
     /// Stable UserDefaults keys (`NSWindow Frame <name>`). Changing a name
@@ -28,6 +29,7 @@ public enum WindowFrameAutosave {
         case .orchestration: return "OrchardOrchestrationWindow"
         case .automations: return "OrchardAutomationsWindow"
         case .vault: return "OrchardVaultWindow"
+        case .floatingTerminal: return "OrchardFloatingTerminalWindow"
         }
     }
 
@@ -51,6 +53,7 @@ public enum WindowFrameAutosave {
         case .orchestration: return Size(width: 1040, height: 620)
         case .automations: return Size(width: 1040, height: 620)
         case .vault: return Size(width: 1080, height: 640)
+        case .floatingTerminal: return Size(width: 560, height: 320)
         }
     }
 

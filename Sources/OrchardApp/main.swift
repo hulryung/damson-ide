@@ -23,7 +23,7 @@ app.setActivationPolicy(.regular)
 app.activate(ignoringOtherApps: true)
 app.run()
 
-final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
+final class OrchardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var store: AppStore!
     private var window: NSWindow?
     private var settingsWindow: NSWindow?
@@ -31,6 +31,7 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
     private var orchestrationWindow: NSWindow?
     private var automationsWindow: NSWindow?
     private var vaultWindow: NSWindow?
+    private var floatingWindow: NSWindow?
     /// T51: disabled app-menu row; title is refreshed from `runtimePresence`.
     private var appRuntimeMenuItem: NSMenuItem?
 
@@ -63,6 +64,12 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
             }
             store.showSettings = { [weak self] in
                 MainActor.assumeIsolated { self?.showSettings(nil) }
+            }
+            store.showFloatingTerminal = { [weak self] in
+                MainActor.assumeIsolated { self?.showFloatingTerminal(nil) }
+            }
+            store.hideFloatingTerminal = { [weak self] in
+                MainActor.assumeIsolated { self?.floatingWindow?.orderOut(nil) }
             }
             buildMenu()
 
@@ -208,6 +215,21 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
                 .preferredColorScheme(.dark))
     }
 
+    /// Always-on-top window bound to an existing pane. Close unbinds; the
+    /// session stays with the pane (T71).
+    @MainActor @objc func showFloatingTerminal(_ sender: Any?) {
+        guard store.floatingTerminal != nil else { return }
+        presentFloatingWindow()
+    }
+
+    /// T71: closing the floating window must not terminate the pane's session.
+    func windowWillClose(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            guard (notification.object as? NSWindow) === floatingWindow else { return }
+            store.closeFloatingTerminal(orderOut: false)
+        }
+    }
+
     @MainActor @objc func zoomAllIn(_ sender: Any?) { surfaces().forEach { $0.zoomIn(nil) } }
     @MainActor @objc func zoomAllOut(_ sender: Any?) { surfaces().forEach { $0.zoomOut(nil) } }
     @MainActor @objc func resetAllZoom(_ sender: Any?) { surfaces().forEach { $0.resetZoom(nil) } }
@@ -275,6 +297,49 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
         win.makeKeyAndOrderFront(nil)
         existing = win
         NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @MainActor
+    private func presentFloatingWindow() {
+        let title = Self.floatingWindowTitle(store.floatingTerminal?.title ?? "Terminal")
+        switch WindowFrameAutosave.reopenStrategy(windowAlreadyCreated: floatingWindow != nil) {
+        case .orderFrontExisting:
+            floatingWindow?.title = title
+            applyFloatingLevel(floatingWindow)
+            floatingWindow?.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        case .createAndRestore:
+            break
+        }
+        let hosting = NSHostingController(
+            rootView: FloatingTerminalView()
+                .environmentObject(store)
+                .preferredColorScheme(.dark))
+        let win = NSWindow(contentViewController: hosting)
+        win.title = title
+        win.styleMask = [.titled, .closable, .resizable]
+        win.appearance = NSAppearance(named: .darkAqua)
+        win.isReleasedWhenClosed = false
+        win.tabbingMode = .disallowed
+        win.delegate = self
+        persistFrame(win, role: .floatingTerminal)
+        applyFloatingLevel(win)
+        win.makeKeyAndOrderFront(nil)
+        floatingWindow = win
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @MainActor
+    private func applyFloatingLevel(_ window: NSWindow?) {
+        guard FloatingTerminalPolicy.staysOnTop, let window else { return }
+        window.level = .floating
+        window.hidesOnDeactivate = false
+        window.collectionBehavior = window.collectionBehavior.union(.canJoinAllSpaces)
+    }
+
+    private static func floatingWindowTitle(_ paneTitle: String) -> String {
+        "\(paneTitle) — Floating"
     }
 
     @MainActor
