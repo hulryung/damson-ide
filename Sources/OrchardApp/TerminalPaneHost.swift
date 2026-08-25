@@ -14,10 +14,22 @@ import SwiftUI
 /// visible; overflowing content bottom-aligns. Damson's own follow-bottom /
 /// content-anchor path keeps scroll stable when the snapped row count changes.
 ///
-/// Adopted panes need a second pass: keeper preamble replay is delivered on the
-/// next main-queue turn, so the first layout sees an empty grid. Subscribing to
-/// `gridChanged` re-applies the same snap/align once that grid arrives — the
-/// path fresh panes already get from their first prompt paint.
+/// Two things re-apply that fit after the first layout (T31 → T59):
+///
+/// * `gridChanged` bumps `gridGeneration` so the short-vs-overflow alignment is
+///   re-decided from the grid that is actually there (T31).
+/// * `AttachFitDriver` puts the surface itself through the pass a fresh spawn
+///   gets for free. A fresh pane is empty when its surface is framed: the
+///   surface's `layout()` sizes the PTY, then the prompt paints into a matching
+///   grid. A keeper-adopted pane carries content the other way round — its
+///   replay and post-SIGWINCH repaint can land before the surface has a frame,
+///   so Damson's size report, follow re-pin and version-keyed render either ran
+///   against a placeholder geometry or never ran against that content. The
+///   driver waits for both a real frame and painted content, then re-runs the
+///   surface's `layout()` and forces a render that bypasses the dedupe key —
+///   once per surface, for every session, so adopted and fresh panes take the
+///   same path by construction (this also covers a window re-opened over a live
+///   session, T51).
 struct TerminalFitHost: View {
     @ObservedObject var session: DamsonSession
     var isActive: Bool
@@ -33,7 +45,7 @@ struct TerminalFitHost: View {
             let metrics = TerminalCellMetrics.measure(config: session.config)
             let layout = TerminalPaneFit.layout(container: geo.size, metrics: metrics)
             let top = TerminalPaneFit.shouldTopAlign(
-                contentRows: Self.contentRows(in: session),
+                contentRows: TerminalPaneFit.contentRows(in: session.grid),
                 viewportRows: layout.rows)
             Color(nsColor: session.config.backgroundColor)
                 .overlay(alignment: top ? .topLeading : .bottomLeading) {
@@ -44,20 +56,6 @@ struct TerminalFitHost: View {
             gridGeneration += 1
         }
     }
-
-    static func contentRows(in session: DamsonSession) -> Int {
-        let grid = session.grid
-        var lastOccupied = max(grid.cursorRow, 0)
-        for r in (0..<grid.rows).reversed() {
-            if grid.row(r).contains(where: { $0.char != " " }) {
-                lastOccupied = max(lastOccupied, r)
-                break
-            }
-        }
-        return TerminalPaneFit.contentRowCount(
-            scrollback: grid.scrollback.count,
-            lastOccupiedViewportRow: lastOccupied)
-    }
 }
 
 private struct TerminalFitSurface: NSViewRepresentable {
@@ -65,11 +63,14 @@ private struct TerminalFitSurface: NSViewRepresentable {
     var isActive: Bool
     var onFocus: (() -> Void)?
 
+    func makeCoordinator() -> AttachFitDriver { AttachFitDriver() }
+
     func makeNSView(context: Context) -> DamsonSurfaceView {
         let view = DamsonSurfaceView(session: session)
         view.isActive = isActive
         view.onFocus = onFocus
         view.clipsToBounds = true
+        context.coordinator.attach(view: view, session: session)
         return view
     }
 
@@ -87,6 +88,68 @@ private struct TerminalFitSurface: NSViewRepresentable {
         let metrics = TerminalCellMetrics.measure(config: session.config)
         let layout = TerminalPaneFit.layout(container: proposed, metrics: metrics)
         return layout.contentSize
+    }
+}
+
+/// Drives `TerminalPaneFit.AttachFit` for one surface: feeds it the surface's
+/// frame changes and the session's grid changes, and when it fires, re-runs the
+/// surface's own fit pass. Everything it touches is Damson public API:
+/// `layout()` (size report + follow re-pin) via `needsLayout` /
+/// `layoutSubtreeIfNeeded()`, and `repaintNow()` (a render that ignores the
+/// grid-version dedupe, so a frame drawn for the wrong geometry is replaced
+/// even when the grid itself did not change).
+@MainActor
+final class AttachFitDriver {
+    private var fit = TerminalPaneFit.AttachFit()
+    private var subscriptions = Set<AnyCancellable>()
+    private weak var view: DamsonSurfaceView?
+
+    func attach(view: DamsonSurfaceView, session: DamsonSession) {
+        self.view = view
+        view.postsFrameChangedNotifications = true
+        NotificationCenter.default
+            .publisher(for: NSView.frameDidChangeNotification, object: view)
+            .sink { [weak self, weak view] _ in
+                MainActor.assumeIsolated {
+                    guard let self, let view else { return }
+                    self.note(.frame(ready: Self.hasFrame(view)))
+                }
+            }
+            .store(in: &subscriptions)
+        session.gridChanged
+            .sink { [weak self, weak session] in
+                MainActor.assumeIsolated {
+                    guard let self, let session else { return }
+                    self.note(.gridChange(hasContent: TerminalPaneFit.hasContent(session.grid)))
+                }
+            }
+            .store(in: &subscriptions)
+        // Seed with what is already true. An adopted session may hold replayed
+        // content before this surface exists; the frame then completes the pair.
+        note(.gridChange(hasContent: TerminalPaneFit.hasContent(session.grid)))
+        note(.frame(ready: Self.hasFrame(view)))
+    }
+
+    private static func hasFrame(_ view: NSView) -> Bool {
+        view.bounds.width > 0 && view.bounds.height > 0
+    }
+
+    private func note(_ event: TerminalPaneFit.AttachFit.Event) {
+        guard fit.note(event) else { return }
+        refit()
+    }
+
+    /// Deferred one turn: the frame notification arrives mid-layout, and the
+    /// grid change arrives inside the parser / resize call. Running the pass
+    /// after both have unwound means the size report sees the final frame and
+    /// the render sees the final grid.
+    private func refit() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self, let view = self.view else { return }
+            view.needsLayout = true
+            view.layoutSubtreeIfNeeded()
+            view.repaintNow()
+        }
     }
 }
 

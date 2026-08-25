@@ -166,16 +166,56 @@ final class TerminalPaneFitTests: XCTestCase {
         XCTAssertEqual(after, 50)
     }
 
-    // MARK: - Adoption re-fit (T31)
+    // MARK: - Attach re-fit (T31 → T59)
 
-    func testAdoptionFitConsumesOnlyTheFirstGridChange() {
-        var fit = TerminalPaneFit.AdoptionFit()
+    /// Fresh spawn order: the surface is framed while the grid is still empty,
+    /// the size report's own grid-change carries no paint, and the prompt paint
+    /// is what completes the pair.
+    func testAttachFitFiresOnTheFirstPaintIntoAFramedSurface() {
+        var fit = TerminalPaneFit.AttachFit()
         XCTAssertTrue(fit.isPending)
-        XCTAssertTrue(fit.consumeGridChange(),
-                      "the first grid-change after adoption must re-apply the pane fit")
+        XCTAssertFalse(fit.note(.frame(ready: true)), "a frame with nothing painted has nothing to fit")
+        XCTAssertFalse(fit.note(.gridChange(hasContent: false)),
+                       "a resize's own grid-change on an empty grid is not a paint")
+        XCTAssertTrue(fit.note(.gridChange(hasContent: true)),
+                      "the first paint into a framed surface re-runs the fit pass")
         XCTAssertFalse(fit.isPending)
-        XCTAssertFalse(fit.consumeGridChange(),
-                       "later grid-changes use the ordinary fit path, not a second latch")
+        XCTAssertFalse(fit.note(.gridChange(hasContent: true)),
+                       "later paints use the ordinary path, not a second latch")
+        XCTAssertFalse(fit.note(.frame(ready: true)), "nor do later frame changes")
+    }
+
+    /// Keeper-adoption order: the replay and the child's post-SIGWINCH repaint
+    /// are parsed before the surface has a frame. Content alone must not fire —
+    /// there is no geometry to fit against yet — and a zero frame is no frame.
+    func testAttachFitDefersToTheFrameWhenContentLandedFirst() {
+        var fit = TerminalPaneFit.AttachFit()
+        XCTAssertFalse(fit.note(.gridChange(hasContent: true)))
+        XCTAssertFalse(fit.note(.frame(ready: false)))
+        XCTAssertTrue(fit.isPending)
+        XCTAssertTrue(fit.note(.frame(ready: true)),
+                      "the frame completing the pair re-fits the already-painted grid")
+        XCTAssertFalse(fit.isPending)
+    }
+
+    func testAttachFitIgnoresContentlessChurnBeforeTheFirstPaint() {
+        var fit = TerminalPaneFit.AttachFit()
+        XCTAssertFalse(fit.note(.frame(ready: true)))
+        for _ in 0..<5 {
+            XCTAssertFalse(fit.note(.gridChange(hasContent: false)))
+        }
+        XCTAssertTrue(fit.isPending, "the adoption jiggle's resizes must not spend the latch")
+    }
+
+    /// A frame that comes and goes (the surface hidden, then shown) before any
+    /// paint still fires exactly once, on the paint.
+    func testAttachFitTracksTheLatestFrameState() {
+        var fit = TerminalPaneFit.AttachFit()
+        XCTAssertFalse(fit.note(.frame(ready: true)))
+        XCTAssertFalse(fit.note(.frame(ready: false)))
+        XCTAssertFalse(fit.note(.gridChange(hasContent: true)),
+                       "content while unframed waits for a frame")
+        XCTAssertTrue(fit.note(.frame(ready: true)))
     }
 
     func testEmptyPreReplayGridTopAlignsThenShortReplayStaysTopAligned() {
@@ -192,9 +232,10 @@ final class TerminalPaneFitTests: XCTestCase {
                 container: container, layout: layout, contentRows: empty).origin,
             .zero)
 
-        // First grid-change: keeper preamble + a short shell prompt at row 0.
-        var fit = TerminalPaneFit.AdoptionFit()
-        XCTAssertTrue(fit.consumeGridChange())
+        // First paint after attach: keeper preamble + a short shell prompt at row 0.
+        var fit = TerminalPaneFit.AttachFit()
+        XCTAssertFalse(fit.note(.frame(ready: true)))
+        XCTAssertTrue(fit.note(.gridChange(hasContent: true)))
         let short = TerminalPaneFit.contentRowCount(
             scrollback: 0, lastOccupiedViewportRow: 0)
         let frame = TerminalPaneFit.surfaceFrame(
