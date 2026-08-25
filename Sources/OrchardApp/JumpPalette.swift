@@ -4,8 +4,9 @@ import OrchardCore
 import OrchardRuntime
 import OrchardTerminals
 
-/// ⌘J — workspaces, agents, quickOpen files for the selected workspace, and commands.
-/// Every row is ranked by `PaletteRanking` through `PaletteSources`.
+/// ⌘J — worktrees, files, agents, and commands with T65 routing:
+/// worktree → select workspace, file → open in editor, agent → focus its pane,
+/// command → execute (Go-menu surface at minimum). Ranked by `PaletteRanking`.
 struct JumpPalette: View {
     @EnvironmentObject var store: AppStore
     @Environment(\.dismiss) private var dismiss
@@ -68,7 +69,7 @@ struct JumpPalette: View {
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(Tokens.textTertiary)
-                TextField("Jump to a workspace, file, or command…", text: $query)
+                TextField("Jump to a worktree, file, agent, or command…", text: $query)
                     .textFieldStyle(.plain)
                     .font(.system(size: 15))
                     .focused($queryFocused)
@@ -136,15 +137,17 @@ struct JumpPalette: View {
 
     private func activateSelection() {
         guard results.indices.contains(selection) else { return }
-        let item = results[selection]
-        if let id = PaletteSources.parseWorkspaceID(item.id) {
+        switch PaletteSources.activation(for: results[selection]) {
+        case .selectWorkspace(let id):
             activateWorkspace(id)
-        } else if let id = PaletteSources.parseAgentID(item.id) {
+        case .focusAgent(let id):
             store.focus(agentID: id)
-        } else if let path = PaletteSources.parseFilePath(item.id) {
+        case .openFile(let path):
             activateFile(path)
-        } else if let command = PaletteSources.parseCommand(item.id) {
+        case .execute(let command):
             store.runPaletteCommand(command)
+        case nil:
+            break
         }
         dismiss()
     }
@@ -153,6 +156,7 @@ struct JumpPalette: View {
         for project in store.projects {
             if let record = project.record(id: id) {
                 store.select(record, in: project)
+                store.focusMainWindow?()
                 return
             }
         }
@@ -165,6 +169,7 @@ struct JumpPalette: View {
         if let record = store.selectedRecord,
            let project = store.project(owning: record) {
             store.openPaletteFile(path, in: record, project: project, mode: mode)
+            store.focusMainWindow?()
             return
         }
         store.pendingOpenPath = path
@@ -173,8 +178,13 @@ struct JumpPalette: View {
         } else {
             store.openEditor(path)
         }
+        store.focusMainWindow?()
     }
 
+    /// Unfiltered listing (capped at `FileService.defaultListLimit`). Query
+    /// filtering is subsequence ranking in `PaletteRanking`, not a substring
+    /// `contains` walk — passing the query into `list` would drop "jmp" →
+    /// JumpPalette.swift hits.
     private func loadQuickOpen() {
         if let key = store.selection, store.isRemote(key) {
             quickOpenPaths = []
@@ -186,7 +196,8 @@ struct JumpPalette: View {
         }
         let files = store.runtime?.fileService ?? FileService()
         Task.detached {
-            let paths = (try? files.list(root: root, limit: 500).files) ?? []
+            let paths = (try? files.list(
+                root: root, limit: FileService.defaultListLimit).files) ?? []
             await MainActor.run { quickOpenPaths = paths }
         }
     }
@@ -240,8 +251,9 @@ struct PaletteRow: View {
         if item.kind == .workspace, let id = PaletteSources.parseWorkspaceID(item.id),
            let record = record(id) {
             DiffStatBadge(stat: record.status.stat)
-        } else if item.kind == .command {
-            Text("⌘")
+        } else if item.kind == .command,
+                  let command = PaletteSources.parseCommand(item.id) {
+            Text(command.shortcut ?? "⌘")
                 .font(Tokens.fontMeta)
                 .foregroundStyle(Tokens.textTertiary)
         }

@@ -29,9 +29,96 @@ final class PaletteSourcesTests: XCTestCase {
             files: ["Sources/OrchardApp/AppStore.swift", "README.md"],
             workspaceTitle: "fix-parser",
             includeFiles: true)
-        XCTAssertEqual(catalog.map(\.kind), [
-            .workspace, .agent, .command, .command, .command, .command, .command, .file, .file,
-        ])
+        let commandCount = PaletteCommand.allCases.count
+        XCTAssertEqual(catalog.map(\.kind),
+                       [.workspace, .agent]
+                       + Array(repeating: PaletteKind.command, count: commandCount)
+                       + [.file, .file])
+        XCTAssertGreaterThanOrEqual(commandCount, PaletteCommand.goMenuSurface.count)
+    }
+
+    func testGoMenuSurfaceIsCoveredAndRankable() {
+        let commands = PaletteSources.commands()
+        let ids = Set(commands.map(\.id))
+        XCTAssertEqual(PaletteCommand.goMenuSurface.count, 9)
+        for command in PaletteCommand.goMenuSurface {
+            XCTAssertTrue(ids.contains(command.id), "missing Go-menu command \(command.rawValue)")
+            XCTAssertTrue(command.isGoMenu)
+            XCTAssertEqual(command.subtitle, "Go")
+            let ranked = PaletteSources.rank(query: command.title, candidates: commands)
+            XCTAssertEqual(ranked.first?.id, command.id, "title \(command.title) should rank first")
+        }
+        XCTAssertFalse(PaletteCommand.settings.isGoMenu)
+        XCTAssertFalse(PaletteCommand.newWorktree.isGoMenu)
+        XCTAssertFalse(PaletteCommand.toggleChat.isGoMenu)
+
+        let orch = PaletteSources.rank(query: "orch", candidates: commands)
+        XCTAssertEqual(orch.first?.id, PaletteCommand.openOrchestration.id)
+        let vault = PaletteSources.rank(query: "vault", candidates: commands)
+        XCTAssertEqual(vault.first?.id, PaletteCommand.openVault.id)
+        let editor = PaletteSources.rank(query: "editor", candidates: commands)
+        XCTAssertEqual(editor.first?.id, PaletteCommand.showEditor.id)
+        let refresh = PaletteSources.rank(query: "refresh diff", candidates: commands)
+        XCTAssertEqual(refresh.first?.id, PaletteCommand.refreshDiff.id)
+    }
+
+    func testActivationRoutesFourKinds() {
+        let workspaceID = UUID()
+        let agentID = UUID()
+        let ws = PaletteSources.workspaces([
+            PaletteWorkspaceSeed(id: workspaceID, title: "fix-parser",
+                                 branch: "orchard/fix-parser", repo: "damson-ide"),
+        ])[0]
+        let ag = PaletteSources.agents([
+            PaletteAgentSeed(id: agentID, title: "Fix the parser",
+                             engine: "Claude", branch: "orchard/fix-parser",
+                             repo: "damson-ide", state: "Working"),
+        ])[0]
+        let file = PaletteSources.files(
+            ["Sources/OrchardApp/JumpPalette.swift"], workspaceTitle: "fix-parser")[0]
+        let command = PaletteSources.commands().first { $0.id == PaletteCommand.showTerminal.id }!
+
+        XCTAssertEqual(PaletteSources.activation(for: ws), .selectWorkspace(workspaceID))
+        XCTAssertEqual(PaletteSources.activation(for: ag), .focusAgent(agentID))
+        XCTAssertEqual(PaletteSources.activation(for: file),
+                       .openFile("Sources/OrchardApp/JumpPalette.swift"))
+        XCTAssertEqual(PaletteSources.activation(for: command), .execute(.showTerminal))
+        XCTAssertNil(PaletteSources.activation(for: "nope"))
+        XCTAssertNil(PaletteSources.activation(for: "file"))
+        for command in PaletteCommand.goMenuSurface {
+            XCTAssertEqual(PaletteSources.activation(for: command.id), .execute(command))
+        }
+    }
+
+    func testMixedCatalogRanksEachKind() {
+        let ws = PaletteWorkspaceSeed(id: UUID(), title: "fix-parser",
+                                      branch: "orchard/fix-parser", repo: "damson-ide")
+        let agent = PaletteAgentSeed(id: UUID(), title: "Review the diff",
+                                     engine: "Claude", branch: "orchard/fix-parser",
+                                     repo: "damson-ide", state: "Working")
+        let catalog = PaletteSources.catalog(
+            workspaces: [ws],
+            agents: [agent],
+            files: ["Sources/OrchardApp/JumpPalette.swift", "README.md"],
+            workspaceTitle: "fix-parser",
+            includeFiles: true)
+
+        let workspaceHit = PaletteSources.rank(query: "fix-parser", candidates: catalog)
+        XCTAssertEqual(workspaceHit.first?.kind, .workspace)
+        XCTAssertEqual(PaletteSources.activation(for: workspaceHit[0]), .selectWorkspace(ws.id))
+
+        let agentHit = PaletteSources.rank(query: "claude", candidates: catalog)
+        XCTAssertEqual(agentHit.first?.kind, .agent)
+        XCTAssertEqual(PaletteSources.activation(for: agentHit[0]), .focusAgent(agent.id))
+
+        let fileHit = PaletteSources.rank(query: "JumpPalette", candidates: catalog)
+        XCTAssertEqual(fileHit.first?.kind, .file)
+        XCTAssertEqual(PaletteSources.activation(for: fileHit[0]),
+                       .openFile("Sources/OrchardApp/JumpPalette.swift"))
+
+        let commandHit = PaletteSources.rank(query: "dashboard", candidates: catalog)
+        XCTAssertEqual(commandHit.first?.kind, .command)
+        XCTAssertEqual(PaletteSources.activation(for: commandHit[0]), .execute(.openDashboard))
     }
 
     func testEmptyQueryKeepsCallerOrder() {
@@ -82,6 +169,8 @@ final class PaletteSourcesTests: XCTestCase {
         XCTAssertEqual(PaletteSources.parseWorkspaceID(ws.id), workspaceID)
         XCTAssertEqual(PaletteSources.parseAgentID(ag.id), agentID)
         XCTAssertEqual(PaletteSources.parseCommand(PaletteCommand.toggleChat.id), .toggleChat)
+        XCTAssertEqual(PaletteSources.parseCommand(PaletteCommand.openVault.id), .openVault)
+        XCTAssertEqual(PaletteSources.parseCommand(PaletteCommand.showBrowser.id), .showBrowser)
         XCTAssertNil(PaletteSources.parseWorkspaceID("nope"))
         XCTAssertNil(PaletteSources.parseFilePath("ws:abc"))
     }
@@ -110,5 +199,16 @@ final class PaletteRankingTests: XCTestCase {
             [($0.title, 300), ($0.repo, 100)]
         }
         XCTAssertEqual(ranked.first?.title, "parser")
+    }
+
+    func testMidWordSubsequenceLosesToWordStart() {
+        // "cron" is a subsequence of "orchestration"; without the first-char
+        // penalty it outranked the Automations keyword.
+        XCTAssertNotNil(PaletteRanking.matchScore(query: "cron", in: "orchestration"))
+        XCTAssertGreaterThan(
+            PaletteRanking.matchScore(query: "cron", in: "cron") ?? 0,
+            PaletteRanking.matchScore(query: "cron", in: "orchestration") ?? 0)
+        let hay = "agent dashboard"
+        XCTAssertTrue(PaletteRanking.isWordStart(hay.firstIndex(of: "d")!, in: hay))
     }
 }

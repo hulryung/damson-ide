@@ -538,14 +538,32 @@ final class AppStore: ObservableObject {
 
     func runPaletteCommand(_ command: PaletteCommand) {
         switch command {
+        case .openDashboard:
+            showDashboard?()
+        case .openOrchestration:
+            showOrchestration?()
+        case .openAutomations:
+            showAutomations?()
+        case .openVault:
+            showVault?()
+        case .showTerminal:
+            focusMainWindow?()
+            selectKind(.terminal)
+        case .showDiff:
+            focusMainWindow?()
+            selectKind(.diff)
+        case .showEditor:
+            focusMainWindow?()
+            selectKind(.editor)
+        case .showBrowser:
+            focusMainWindow?()
+            selectKind(.browser)
+        case .refreshDiff:
+            if let key = selection { Task { await refreshGit(for: key) } }
         case .newWorktree:
             requestNewWorktree()
         case .toggleChat:
             toggleFocusedViewMode()
-        case .openDashboard:
-            showDashboard?()
-        case .openAutomations:
-            showAutomations?()
         case .settings:
             showSettings?()
         }

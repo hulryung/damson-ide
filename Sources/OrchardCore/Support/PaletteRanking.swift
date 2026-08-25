@@ -31,29 +31,42 @@ public enum PaletteRanking {
     }
 
     /// `nil` when `query` isn't a subsequence of `text`. Otherwise a score that prefers
-    /// matches which are contiguous and start early.
+    /// matches which are contiguous and start early. A first-character hit that is
+    /// not a word start is penalized so "cron" ranks Automations over Orchestration.
     public static func matchScore(query: String, in text: String) -> Int? {
         if query.isEmpty { return 0 }
         var score = 0
         var lastIndex: String.Index?
         var searchStart = text.startIndex
+        var isFirst = true
 
         for char in query {
             guard let found = text[searchStart...].firstIndex(of: char) else { return nil }
+            let atWord = isWordStart(found, in: text)
             // Contiguous with the previous match, or sitting on a word boundary.
             if let last = lastIndex, text.index(after: last) == found {
                 score += 12
-            } else if found == text.startIndex
-                        || text[text.index(before: found)] == "-"
-                        || text[text.index(before: found)] == "/"
-                        || text[text.index(before: found)] == "_" {
+            } else if atWord {
                 score += 8
             }
+            if isFirst && !atWord {
+                score -= 100
+            }
+            isFirst = false
             lastIndex = found
             searchStart = text.index(after: found)
         }
         // Earlier overall matches beat later ones.
         let offset = text.distance(from: text.startIndex, to: lastIndex ?? text.startIndex)
         return score + max(0, 40 - offset)
+    }
+
+    /// Start of the string, or immediately after a path/word separator.
+    public static func isWordStart(_ index: String.Index, in text: String) -> Bool {
+        if index == text.startIndex { return true }
+        switch text[text.index(before: index)] {
+        case "-", "/", "_", " ", ".", "\\": return true
+        default: return false
+        }
     }
 }

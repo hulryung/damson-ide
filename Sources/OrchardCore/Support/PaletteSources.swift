@@ -71,46 +71,118 @@ public struct PaletteAgentSeed: Equatable, Sendable {
 }
 
 /// Built-in palette commands. Ids are stable so the app can switch on them.
+///
+/// T65: the Go-menu surface is the minimum command set (`goMenuSurface`). Extra
+/// File/View/App-menu verbs stay available so ⌘J remains a single jump target.
 public enum PaletteCommand: String, CaseIterable, Sendable, Identifiable {
+    // Go menu (inventory §6 / T65 minimum).
+    case openDashboard
+    case openOrchestration
+    case openAutomations
+    case openVault
+    case showTerminal
+    case showDiff
+    case showEditor
+    case showBrowser
+    case refreshDiff
+    // File / View / App extras (kept from T26).
     case newWorktree
     case toggleChat
-    case openDashboard
-    case openAutomations
     case settings
 
     public var id: String { "cmd:\(rawValue)" }
 
+    /// Go-menu items the palette must execute. Order matches `buildMenu()` in
+    /// `OrchardAppDelegate` (Jump itself is the palette, so it is omitted).
+    public static let goMenuSurface: [PaletteCommand] = [
+        .openDashboard, .openOrchestration, .openAutomations, .openVault,
+        .showTerminal, .showDiff, .showEditor, .showBrowser, .refreshDiff,
+    ]
+
+    public var isGoMenu: Bool { Self.goMenuSurface.contains(self) }
+
     public var title: String {
         switch self {
+        case .openDashboard: return "Agent Dashboard"
+        case .openOrchestration: return "Orchestration"
+        case .openAutomations: return "Automations"
+        case .openVault: return "Vault"
+        case .showTerminal: return "Terminal"
+        case .showDiff: return "Diff"
+        case .showEditor: return "Editor"
+        case .showBrowser: return "Browser"
+        case .refreshDiff: return "Refresh Diff"
         case .newWorktree: return "New Worktree"
         case .toggleChat: return "Toggle Chat"
-        case .openDashboard: return "Open Dashboard"
-        case .openAutomations: return "Open Automations"
         case .settings: return "Settings"
         }
     }
 
-    public var subtitle: String { "Command" }
+    public var subtitle: String { isGoMenu ? "Go" : "Command" }
 
     public var symbol: String {
         switch self {
+        case .openDashboard: return "rectangle.split.3x1"
+        case .openOrchestration: return "list.bullet.indent"
+        case .openAutomations: return "clock.arrow.2.circlepath"
+        case .openVault: return "archivebox"
+        case .showTerminal: return "terminal"
+        case .showDiff: return "plusminus"
+        case .showEditor: return "doc.text"
+        case .showBrowser: return "globe"
+        case .refreshDiff: return "arrow.clockwise"
         case .newWorktree: return "plus.square"
         case .toggleChat: return "bubble.left.and.bubble.right"
-        case .openDashboard: return "rectangle.split.3x1"
-        case .openAutomations: return "clock.arrow.2.circlepath"
         case .settings: return "gearshape"
+        }
+    }
+
+    /// Optional menubar chord shown on the row; nil when the Go item has none.
+    public var shortcut: String? {
+        switch self {
+        case .openDashboard: return "⇧⌘D"
+        case .showTerminal: return "⌘1"
+        case .showDiff: return "⌘2"
+        case .showEditor: return "⌘3"
+        case .showBrowser: return "⌘4"
+        case .refreshDiff: return "⌘R"
+        case .newWorktree: return "⌘N"
+        case .toggleChat: return "⇧⌘J"
+        case .settings: return "⌘,"
+        case .openOrchestration, .openAutomations, .openVault: return nil
         }
     }
 
     public var keywords: [String] {
         switch self {
+        case .openDashboard: return ["open dashboard", "agents", "kanban", "go"]
+        case .openOrchestration: return ["orchestration", "tasks", "run", "dispatch", "go"]
+        case .openAutomations: return ["automations", "schedule", "cron", "scheduled", "go"]
+        case .openVault: return ["vault", "archives", "transcripts", "go"]
+        case .showTerminal: return ["terminal", "shell", "pty", "go 1"]
+        case .showDiff: return ["diff", "changes", "git diff", "go 2"]
+        case .showEditor: return ["editor", "edit file", "go 3"]
+        case .showBrowser: return ["browser", "web", "go 4"]
+        case .refreshDiff: return ["refresh diff", "reload diff", "git status"]
         case .newWorktree: return ["new worktree", "create", "compose", "command-n"]
         case .toggleChat: return ["toggle chat", "chat view", "terminal overlay"]
-        case .openDashboard: return ["open dashboard", "agents", "kanban"]
-        case .openAutomations: return ["automations", "schedule", "cron", "scheduled"]
         case .settings: return ["settings", "preferences", "ports", "browser"]
         }
     }
+}
+
+/// What activating a ranked row should do. Classification lives here so routing
+/// can be unit-tested without AppKit; the app executes the cases.
+public enum PaletteActivation: Equatable, Sendable {
+    /// Select that worktree as the current workspace.
+    case selectWorkspace(UUID)
+    /// Focus the agent's pane (select its worktree and bind its tab).
+    case focusAgent(UUID)
+    /// Open the worktree-relative path in the editor (Option still maps to diff
+    /// in the view; this case is the default file route).
+    case openFile(String)
+    /// Run a built-in command (Go-menu surface at minimum).
+    case execute(PaletteCommand)
 }
 
 /// Builds the ⌘J catalog. Workspaces, agents, files (quickOpen paths), and
@@ -232,5 +304,19 @@ public enum PaletteSources {
     public static func parseCommand(_ id: String) -> PaletteCommand? {
         guard id.hasPrefix("cmd:") else { return nil }
         return PaletteCommand(rawValue: String(id.dropFirst(4)))
+    }
+
+    /// Map a catalog row id onto the T65 activation: worktree → select workspace,
+    /// file → open in editor, agent → focus its pane, command → execute.
+    public static func activation(for id: String) -> PaletteActivation? {
+        if let workspaceID = parseWorkspaceID(id) { return .selectWorkspace(workspaceID) }
+        if let agentID = parseAgentID(id) { return .focusAgent(agentID) }
+        if let path = parseFilePath(id) { return .openFile(path) }
+        if let command = parseCommand(id) { return .execute(command) }
+        return nil
+    }
+
+    public static func activation(for candidate: PaletteCandidate) -> PaletteActivation? {
+        activation(for: candidate.id)
     }
 }
