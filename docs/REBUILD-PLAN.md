@@ -630,7 +630,16 @@ class must stay dead), run the full live cycle again, verify the Orchestration w
 reflects the run live (screenshot evidence), confirm remote_unsupported guards, and
 write docs/reports/dogfood-3.md with comparisons to cycle 2 and any new findings.
 
-### Wave 13 (T51–T53, parallel)
+### Wave 13 (T51–T53, parallel) — T51/T53 merged 2026-08-25 (925 tests); T52 retry in flight
+
+Status: T53 merged (delete-branch surfaced in the app sheet, human remote
+worktree-list with staleness warning, send quiet unless --verbose). T51 merged and
+VERIFIED LIVE: close main window → process alive, runtime socket answers, 0 windows;
+activate → workbench restored with state; app menu truthfully shows
+"Runtime alive · rt_…" matching the live runtimeId. T52's first dispatch (codex)
+failed at startup — "Agent startup blocked: codex-update-prompt" (the codex CLI's
+update prompt blocks supervised launch; consider updating codex before next use) —
+re-dispatched on claude in the same worktree.
 
 **T51 — Runtime survives window close.** Closing the main window today terminates the
 app (applicationShouldTerminateAfterLastWindowClosed), killing the runtime and every
