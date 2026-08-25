@@ -985,7 +985,8 @@ final class AppStore: ObservableObject {
     }
 
     func deleteWorktree(_ record: WorktreeRecord, in project: ProjectSession,
-                        force: Bool, deleteBranch: Bool, forceBranch: Bool = false) throws -> Bool {
+                        force: Bool, deleteBranch: Bool, forceBranch: Bool = false)
+                        throws -> WorktreeService.DeletionResult {
         if project.isRemote {
             throw GitError("remote worktrees are removed through the orchard CLI")
         }
@@ -995,14 +996,14 @@ final class AppStore: ObservableObject {
         // delete; it is the same flag the CLI sends.
         let deletion = try project.worktrees.deleteWorktree(
             record, force: force, deleteBranch: deleteBranch, forceBranch: forceBranch)
-        guard deletion.removed else { return false }
+        guard deletion.removed else { return deletion }
         meta.remove(record.id)
         layouts[.worktree(record.id)] = nil
         if case .worktree(let id) = selection, id == record.id {
             selection = defaultSelection(for: project)
         }
         project.syncRecords()
-        return true
+        return deletion
     }
 
     // MARK: - Workbench

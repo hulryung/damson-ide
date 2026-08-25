@@ -39,7 +39,48 @@ final class CLIFormattingTests: XCTestCase {
         XCTAssertTrue(output.contains("HOST"), output)
         XCTAssertTrue(output.contains("ssh:build"), output)
         XCTAssertTrue(output.contains("/home/ci/worktrees/apricot"), output)
-        XCTAssertTrue(output.contains("Warning: ssh:build: unreachable. Showing the last known worktrees."), output)
+        XCTAssertTrue(output.contains("Warning (stale): ssh:build: unreachable. Showing the last known worktrees."), output)
+        XCTAssertFalse(output.contains("OrchardProtocol.JSONValue"), output)
+    }
+
+    func testWorktreeListIgnoresExtraWorkspaceFieldsAndOmitsEmptyWarning() {
+        let fixture: JSONValue = .object([
+            "worktrees": .array([.object([
+                "displayName": .string("apricot"),
+                "name": .string("ignored-when-displayName-present"),
+                "branch": .string("ci/apricot"),
+                "hostId": .string("ssh:build"),
+                "path": .string("/home/ci/worktrees/apricot"),
+                "instanceId": .string("11111111-1111-1111-1111-111111111111"),
+                "lastActivityAt": .number(1_724_000_000),
+                "kind": .string("worktree"),
+            ])]),
+            "totalCount": .number(1),
+        ])
+        let output = OrchardHumanFormatter.worktreeList(fixture)
+        XCTAssertTrue(output.contains("apricot"), output)
+        XCTAssertFalse(output.contains("Warning"), output)
+        XCTAssertFalse(output.contains("ignored-when-displayName-present"), output)
+    }
+
+    func testWorktreeRmFormatsBranchDeletedResult() {
+        let deleted: JSONValue = .object([
+            "removed": .bool(true),
+            "branch": .string("orchard/wt"),
+            "branchMerged": .bool(true),
+            "branchDeleted": .bool(true),
+        ])
+        XCTAssertEqual(
+            OrchardHumanFormatter.worktreeRm(deleted),
+            "Removed worktree. Deleted branch 'orchard/wt'.")
+        let kept: JSONValue = .object([
+            "removed": .bool(true),
+            "branch": .string("orchard/wt"),
+            "branchDeleted": .bool(false),
+        ])
+        XCTAssertEqual(
+            OrchardHumanFormatter.worktreeRm(kept),
+            "Removed worktree. Branch 'orchard/wt' was kept.")
     }
 
     func testWorktreeRmAdvertisesDeleteBranchFlags() throws {
@@ -74,6 +115,30 @@ final class CLIFormattingTests: XCTestCase {
         XCTAssertTrue(output.contains("task:task_abc"), output)
         XCTAssertFalse(output.contains("OrchardProtocol.JSONValue"), output)
         XCTAssertFalse(output.contains("object(["), output)
+    }
+
+    func testSendVerboseIsPrettyJSONNotASwiftDump() throws {
+        let result: JSONValue = .object([
+            "type": .string("worker_done"),
+            "count": .number(1),
+            "lifecycle": .object(["status": .string("settled")]),
+        ])
+        let output = OrchardHumanFormatter.send(result, verbose: true)
+        XCTAssertTrue(output.contains("\"type\""), output)
+        XCTAssertTrue(output.contains("worker_done"), output)
+        XCTAssertFalse(output.contains("sent worker_done"), output)
+        XCTAssertFalse(output.contains("OrchardProtocol.JSONValue"), output)
+        XCTAssertFalse(output.contains("object(["), output)
+        let parsed = try JSONDecoder().decode(JSONValue.self, from: Data(output.utf8))
+        XCTAssertEqual(parsed.objectValue?["type"]?.stringValue, "worker_done")
+    }
+
+    func testSendAdvertisesVerboseFlag() throws {
+        let spec = try XCTUnwrap(OrchardCommands.all.first { $0.name == "send" })
+        XCTAssertTrue(spec.flags.map(\.name).contains("verbose"), spec.flags.map(\.name).joined(separator: ","))
+        let help = CommandHelpRenderer.render(spec)
+        XCTAssertTrue(help.contains("--verbose"), help)
+        XCTAssertTrue(help.contains("compact receipt"), help)
     }
 
     func testHostListShowsLiveStatusAndAge() {

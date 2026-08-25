@@ -203,6 +203,7 @@ struct DeleteWorktreeSheet: View {
     @State private var deleteBranch = false
     @State private var forceBranch = false
     @State private var errorMessage: String?
+    @State private var resultMessage: String?
 
     private var preflight: WorktreeDeletionPreflight {
         project.worktrees.deletionPreflight(record)
@@ -212,11 +213,15 @@ struct DeleteWorktreeSheet: View {
         let flight = preflight
         return VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 9) {
-                Image(systemName: flight.isSafe ? "trash" : "exclamationmark.triangle.fill")
+                Image(systemName: resultMessage != nil
+                      ? "checkmark.circle.fill"
+                      : (flight.isSafe ? "trash" : "exclamationmark.triangle.fill"))
                     .font(.system(size: 20))
-                    .foregroundStyle(flight.isSafe ? Tokens.textSecondary : .orange)
+                    .foregroundStyle(resultMessage != nil
+                                     ? .green
+                                     : (flight.isSafe ? Tokens.textSecondary : .orange))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("Delete “\(record.title)”?")
+                    Text(resultMessage != nil ? "Deleted “\(record.title)”" : "Delete “\(record.title)”?")
                         .font(.system(size: 13, weight: .semibold))
                     Text(record.branch)
                         .font(Tokens.fontMono)
@@ -224,36 +229,51 @@ struct DeleteWorktreeSheet: View {
                 }
             }
 
-            if flight.warnings.isEmpty {
-                Text("This worktree has no changes — nothing will be lost.")
+            if let resultMessage {
+                Text(resultMessage)
                     .font(Tokens.fontMeta)
                     .foregroundStyle(Tokens.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
-                VStack(alignment: .leading, spacing: 5) {
-                    ForEach(flight.warnings, id: \.self) { warning in
-                        Label(warning, systemImage: "exclamationmark.circle.fill")
-                            .font(Tokens.fontMeta)
-                            .foregroundStyle(.orange)
+                if flight.warnings.isEmpty {
+                    Text("This worktree has no changes — nothing will be lost.")
+                        .font(Tokens.fontMeta)
+                        .foregroundStyle(Tokens.textSecondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 5) {
+                        ForEach(flight.warnings, id: \.self) { warning in
+                            Label(warning, systemImage: "exclamationmark.circle.fill")
+                                .font(Tokens.fontMeta)
+                                .foregroundStyle(.orange)
+                        }
                     }
+                    .padding(9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        RoundedRectangle(cornerRadius: Tokens.radius)
+                            .fill(Color.orange.opacity(0.1))
+                    )
                 }
-                .padding(9)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    RoundedRectangle(cornerRadius: Tokens.radius)
-                        .fill(Color.orange.opacity(0.1))
-                )
-            }
 
-            Text(flight.branchStatusMessage)
-                .font(Tokens.fontMeta)
-                .foregroundStyle(flight.branchMerged ? Tokens.textSecondary : .orange)
-
-            Toggle("Also delete the branch", isOn: $deleteBranch)
-                .font(Tokens.fontMeta)
-
-            if deleteBranch && !flight.branchMerged {
-                Toggle("Force delete unmerged branch", isOn: $forceBranch)
+                Text(flight.branchStatusMessage)
                     .font(Tokens.fontMeta)
+                    .foregroundStyle(flight.branchMerged ? Tokens.textSecondary : .orange)
+
+                Toggle("Also delete the branch", isOn: $deleteBranch)
+                    .font(Tokens.fontMeta)
+
+                if deleteBranch && !flight.branchMerged {
+                    Toggle("Force delete unmerged branch", isOn: $forceBranch)
+                        .font(Tokens.fontMeta)
+                }
+
+                Text(WorktreeDeleteFormatter.predictedOutcome(
+                    preflight: flight,
+                    deleteBranch: deleteBranch,
+                    forceBranch: forceBranch && deleteBranch))
+                    .font(Tokens.fontMeta)
+                    .foregroundStyle(Tokens.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if let errorMessage {
@@ -265,11 +285,17 @@ struct DeleteWorktreeSheet: View {
 
             HStack {
                 Spacer()
-                Button("Cancel") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                Button("Delete", role: .destructive) { performDelete(force: !flight.isSafe) }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.red)
+                if resultMessage != nil {
+                    Button("Done") { dismiss() }
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(.borderedProminent)
+                } else {
+                    Button("Cancel") { dismiss() }
+                        .keyboardShortcut(.cancelAction)
+                    Button("Delete", role: .destructive) { performDelete(force: !flight.isSafe) }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.red)
+                }
             }
         }
         .padding(18)
@@ -279,14 +305,17 @@ struct DeleteWorktreeSheet: View {
 
     private func performDelete(force: Bool) {
         do {
-            let removed = try store.deleteWorktree(
+            let deletion = try store.deleteWorktree(
                 record, in: project, force: force, deleteBranch: deleteBranch,
                 forceBranch: forceBranch && deleteBranch)
-            if !removed {
+            if !deletion.removed {
                 errorMessage = "This worktree has uncommitted changes. Press Delete again to discard them."
                 return
             }
-            dismiss()
+            resultMessage = WorktreeDeleteFormatter.resultMessage(
+                branch: deletion.branch.isEmpty ? record.branch : deletion.branch,
+                removed: deletion.removed,
+                branchDeleted: deletion.branchDeleted)
         } catch {
             errorMessage = String(describing: error)
         }

@@ -229,15 +229,24 @@ public final class WorktreeService {
     }
 
     /// Outcome of a delete, including the `--run-hooks` warning Orca surfaces when an
-    /// archive script exists but wasn't requested.
+    /// archive script exists but wasn't requested. `branchDeleted` is the same flag
+    /// `orchard worktree rm --delete-branch` reports, so the app sheet can show the
+    /// CLI result rather than guessing.
     public struct DeletionResult: Sendable {
         public let removed: Bool
         /// Archive-hook skip or failure. Empty when there was no archive script, or
         /// it ran successfully.
         public let warning: String?
-        public init(removed: Bool, warning: String? = nil) {
+        public let branch: String
+        public let branchMerged: Bool
+        public let branchDeleted: Bool
+        public init(removed: Bool, warning: String? = nil, branch: String = "",
+                    branchMerged: Bool = false, branchDeleted: Bool = false) {
             self.removed = removed
             self.warning = warning
+            self.branch = branch
+            self.branchMerged = branchMerged
+            self.branchDeleted = branchDeleted
         }
     }
 
@@ -260,6 +269,8 @@ public final class WorktreeService {
                                deleteBranch: Bool = false,
                                forceBranch: Bool = false,
                                runHooks: Bool = false) throws -> DeletionResult {
+        let preflight = deletionPreflight(record)
+        let dropBranch = deleteBranch || forceBranch
         var warning: String?
         if let script = manager.archiveScript(for: record.worktree) {
             if runHooks {
@@ -275,10 +286,16 @@ public final class WorktreeService {
         let removed = try manager.remove(record.worktree, force: force,
                                          deleteBranch: deleteBranch,
                                          forceBranch: forceBranch)
-        guard removed else { return DeletionResult(removed: false, warning: warning) }
+        let kept = DeletionResult(removed: false, warning: warning,
+                                  branch: record.branch, branchMerged: preflight.branchMerged,
+                                  branchDeleted: false)
+        guard removed else { return kept }
         worktrees.removeAll { $0.id == record.id }
         eventSink.yield(.worktreeRemoved(worktreeID: record.id, branch: record.branch))
-        return DeletionResult(removed: true, warning: warning)
+        let branchDeleted = dropBranch && !branchStillExists(record.branch)
+        return DeletionResult(removed: true, warning: warning,
+                              branch: record.branch, branchMerged: preflight.branchMerged,
+                              branchDeleted: branchDeleted)
     }
 
     /// Whether a branch survived a safe delete because it still holds unmerged commits.
