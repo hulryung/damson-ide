@@ -26,13 +26,12 @@ let package = Package(
         .library(name: "OrchardRuntime", targets: ["OrchardRuntime"]),
     ],
     dependencies: [
-        // damson's terminal engine + control wire, pinned to an exact revision so the
-        // daily churn in that repo can't break Orchard. Bump deliberately. This is the
-        // T17 merge (pane-addressed control, multi-subscriber `outputBytes`, sized
-        // spawn) — additions after v0.4.1 that Orchard adopts but no tag carries yet;
-        // move back to a `from:` tag pin once damson cuts its next release.
-        .package(url: "https://github.com/hulryung/damson.git",
-                 revision: "04831730455ca8cbadc8e3bcc98b8565919fb250"),
+        // damson's terminal engine + control wire. The T17 additions Orchard depends on
+        // (pane-addressed control, multi-subscriber `outputBytes`, sized spawn) shipped
+        // in v0.5.0, so the exact-revision pin they needed is retired. `exact:` rather
+        // than `from:`: daily churn in that repo must not reach Orchard without a
+        // deliberate bump.
+        .package(url: "https://github.com/hulryung/damson.git", exact: "0.5.0"),
     ],
     targets: [
         // UI-free foundation: git, worktrees, per-repo config, shared utilities.
