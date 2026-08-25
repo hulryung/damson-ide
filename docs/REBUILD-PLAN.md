@@ -630,7 +630,7 @@ class must stay dead), run the full live cycle again, verify the Orchestration w
 reflects the run live (screenshot evidence), confirm remote_unsupported guards, and
 write docs/reports/dogfood-3.md with comparisons to cycle 2 and any new findings.
 
-### Wave 13 (T51–T53, parallel) — T51/T53 merged 2026-08-25 (925 tests); T52 retry in flight
+### Wave 13 (T51–T53, parallel) — MERGED 2026-08-25, 932 tests
 
 Status: T53 merged (delete-branch surfaced in the app sheet, human remote
 worktree-list with staleness warning, send quiet unless --verbose). T51 merged and
@@ -639,7 +639,12 @@ activate → workbench restored with state; app menu truthfully shows
 "Runtime alive · rt_…" matching the live runtimeId. T52's first dispatch (codex)
 failed at startup — "Agent startup blocked: codex-update-prompt" (the codex CLI's
 update prompt blocks supervised launch; consider updating codex before next use) —
-re-dispatched on claude in the same worktree.
+re-dispatched on claude in the same worktree; the retry landed. T52's
+load-bearing finding: most archive mangling blamed on the cleaner is upstream in the
+raw capture (wide pastes reach the stream buffer pre-collapsed, torn repaints drop
+letters); the cleaner's own damage was invented word boundaries, now gone — every
+emitted line is a captured line minus chrome, respacing only with provenance.
+Follow-ups promoted to the backlog below.
 
 **T51 — Runtime survives window close.** Closing the main window today terminates the
 app (applicationShouldTerminateAfterLastWindowClosed), killing the runtime and every
@@ -684,6 +689,13 @@ Does not touch Sources/OrchardApp/main.swift, TerminalCaptureCleaner.swift, or
 OrchardRuntime/Orchestration verb logic.
 
 ### Wave 13+ backlog
+
+T52 follow-ups: (a) Report.respacedLines exists but the runtime's chromeStripped
+receipt does not serialize it (WorkerVerbs was outside T52 ownership) — small wire
+addition; (b) the real capture-fidelity fix is upstream: wide pastes arrive in the
+output stream already collapsed and torn repaints drop characters before the cleaner
+ever runs — needs investigation in the damson outputBytes/stream-buffer path (damson
+change; coordinate with the pin).
 
 From dogfood cycle 3: the "transient app exit" during the cycle matches a clean
 window-close (no crash log, metadata removed cleanly). T51 changes that
