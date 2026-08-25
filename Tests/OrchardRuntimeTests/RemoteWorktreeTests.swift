@@ -113,6 +113,7 @@ final class RemoteWorktreeTests: XCTestCase {
         registry.register(TerminalCommandHandler(service: terminals, workspaces: service,
                                                  hosts: hosts, hostRunner: runner))
         registry.register(FileCommandHandler(workspaces: service))
+        registry.register(ConflictsCommandHandler(workspaces: service))
         server = InMemoryRuntimeServer(registry: registry, runtimeId: "rt_remote")
     }
 
@@ -444,6 +445,16 @@ final class RemoteWorktreeTests: XCTestCase {
         XCTAssertEqual(read.error?.code, "remote_unsupported")
         XCTAssertTrue(read.error?.message.contains("ssh:build") ?? false,
                       read.error?.message ?? "")
+    }
+
+    func testConflictsRefuseARemoteWorkspace() async throws {
+        let repo = try await addRemoteRepo()
+        _ = await call("worktree-list", ["repo": .string(repo.id)])
+        let listed = await call("conflicts-list", [
+            "worktree": .string("\(repo.id)::/home/ci/Orchard/worktrees/orchard/apricot")])
+        XCTAssertEqual(listed.error?.code, "remote_unsupported")
+        XCTAssertTrue(listed.error?.message.contains("ssh:build") ?? false,
+                      listed.error?.message ?? "")
     }
 }
 

@@ -241,6 +241,7 @@ public final class OrchardRuntimeHost {
         registry.register(FileCommandHandler(files: fileService,
                                              workspaces: workspaceService,
                                              opens: fileOpenCenter))
+        registry.register(ConflictsCommandHandler(workspaces: workspaceService))
         registry.register(BrowserCommandHandler(service: browserService))
         registry.register(AutomationCommandHandler(service: automationService))
         registry.register(PortCommandHandler(

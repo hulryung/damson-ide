@@ -287,4 +287,78 @@ final class CLIFormattingTests: XCTestCase {
         XCTAssertTrue(flag.matches("id"))
         XCTAssertFalse(flag.matches("dispatch"))
     }
+
+    func testConflictsHelpEnumeratesSidesChoicesAndTypedErrors() throws {
+        let spec = try XCTUnwrap(OrchardCommands.all.first { $0.name == "conflicts" })
+        XCTAssertEqual(spec.positionalArgs, ["list|show|take|resolve|stage"])
+        XCTAssertEqual(spec.flag(named: "side")?.allowedValues, ["ours", "theirs"])
+        XCTAssertEqual(spec.flag(named: "choice")?.allowedValues, ["ours", "theirs", "both"])
+        let help = CommandHelpRenderer.render(spec)
+        XCTAssertTrue(help.contains("list|show|take|resolve|stage"), help)
+        XCTAssertTrue(help.contains("conflict_markers_remain"), help)
+        XCTAssertTrue(help.contains("not_conflicted"), help)
+        XCTAssertTrue(help.contains("hunk_not_found"), help)
+        XCTAssertTrue(help.contains("never stages a lie"), help)
+        XCTAssertTrue(ConflictsGuide.content.contains("conflicts list"), ConflictsGuide.content)
+        XCTAssertTrue(ConflictsGuide.content.contains("conflict_markers_remain"), ConflictsGuide.content)
+    }
+
+    func testConflictsHumanFaces() {
+        let listed: JSONValue = .object([
+            "headline": .string("Merge in progress — 1 conflicted file"),
+            "files": .array([.object([
+                "kindCode": .string("UU"),
+                "path": .string("file.txt"),
+                "kindLabel": .string("Both modified"),
+            ])]),
+        ])
+        let listOut = OrchardHumanFormatter.conflictsList(listed)
+        XCTAssertTrue(listOut.contains("Merge in progress — 1 conflicted file"), listOut)
+        XCTAssertTrue(listOut.contains("UU  file.txt  Both modified"), listOut)
+
+        let shown: JSONValue = .object([
+            "path": .string("file.txt"),
+            "kindLabel": .string("Both modified"),
+            "kindCode": .string("UU"),
+            "hunks": .array([.object([
+                "index": .number(0),
+                "startLine": .number(2),
+                "oursLabel": .string("HEAD"),
+                "theirsLabel": .string("feature"),
+                "ours": .array([.string("main line")]),
+                "theirs": .array([.string("feature line")]),
+            ])]),
+        ])
+        let showOut = OrchardHumanFormatter.conflictsShow(shown)
+        XCTAssertTrue(showOut.contains("file.txt  Both modified (UU)"), showOut)
+        XCTAssertTrue(showOut.contains("hunk 0  line 2"), showOut)
+        XCTAssertTrue(showOut.contains("ours (HEAD):"), showOut)
+        XCTAssertTrue(showOut.contains("feature line"), showOut)
+
+        XCTAssertEqual(
+            OrchardHumanFormatter.conflictsTake(.object([
+                "path": .string("file.txt"), "side": .string("ours"), "deleted": .bool(false),
+            ])),
+            "Took ours for file.txt (staged).")
+        XCTAssertEqual(
+            OrchardHumanFormatter.conflictsTake(.object([
+                "path": .string("doomed.txt"), "side": .string("theirs"), "deleted": .bool(true),
+            ])),
+            "Took theirs for doomed.txt (deleted, staged).")
+        XCTAssertEqual(
+            OrchardHumanFormatter.conflictsResolve(.object([
+                "path": .string("file.txt"), "hunk": .number(0), "choice": .string("theirs"),
+                "staged": .bool(true), "remainingHunks": .number(0),
+            ])),
+            "Resolved hunk 0 of file.txt as theirs (staged).")
+        XCTAssertEqual(
+            OrchardHumanFormatter.conflictsResolve(.object([
+                "path": .string("f.txt"), "hunk": .number(0), "choice": .string("ours"),
+                "staged": .bool(false), "remainingHunks": .number(1),
+            ])),
+            "Resolved hunk 0 of f.txt as ours (1 hunk remaining, not staged).")
+        XCTAssertEqual(
+            OrchardHumanFormatter.conflictsStage(.object(["path": .string("file.txt")])),
+            "Staged file.txt.")
+    }
 }
