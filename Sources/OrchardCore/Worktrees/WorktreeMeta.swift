@@ -29,6 +29,49 @@ public struct WorkspaceStatusDefinition: Codable, Equatable, Sendable, Identifia
     public static let defaultIDs: Set<String> = Set(defaults.map(\.id))
 }
 
+/// Sidebar / board grouping by user-set column. Distinct from the derived live
+/// status (`active|working|permission|done|inactive`) the terminal layer computes.
+public struct WorkspaceStatusGroup<Item>: Identifiable {
+    public var id: String { definition.id }
+    public var definition: WorkspaceStatusDefinition
+    public var items: [Item]
+
+    public init(definition: WorkspaceStatusDefinition, items: [Item]) {
+        self.definition = definition
+        self.items = items
+    }
+}
+
+public enum WorkspaceStatusGrouping {
+    /// Missing or unknown ids fall back to `todo` so a removed custom column
+    /// still has a slot (same rule the sidebar card uses).
+    public static func resolvedID(_ raw: String?,
+                                 vocabulary: [WorkspaceStatusDefinition]) -> String {
+        let id = raw ?? "todo"
+        if vocabulary.contains(where: { $0.id == id }) { return id }
+        return "todo"
+    }
+
+    /// Groups items by board-column id in vocabulary order. Empty lanes are
+    /// omitted so the sidebar stays compact (Orca's status grouping).
+    public static func groups<Item>(
+        _ items: [Item],
+        vocabulary: [WorkspaceStatusDefinition],
+        statusID: (Item) -> String?
+    ) -> [WorkspaceStatusGroup<Item>] {
+        let vocab = vocabulary.isEmpty ? WorkspaceStatusDefinition.defaults : vocabulary
+        var buckets: [String: [Item]] = [:]
+        for item in items {
+            let id = resolvedID(statusID(item), vocabulary: vocab)
+            buckets[id, default: []].append(item)
+        }
+        return vocab.compactMap { definition in
+            guard let grouped = buckets[definition.id], !grouped.isEmpty else { return nil }
+            return WorkspaceStatusGroup(definition: definition, items: grouped)
+        }
+    }
+}
+
 /// User-authored worktree fields. Persisted in `orchard-data.json`, keyed by
 /// worktree id (`<repoId>::<path>`). Git facts (path, branch, baseRef, title)
 /// stay in the repo's git-config so they cannot drift from disk.

@@ -49,6 +49,8 @@ final class AppStore: ObservableObject {
     @Published var filterStatusID: String?
     /// Archived cards stay hidden until this filter is on.
     @Published var showArchived = false
+    /// When on, cards are grouped by user-set board column instead of by repo.
+    @Published var groupByStatus = false
     @Published var ordering: CardOrdering = .manual
 
     @Published var composerProjectID: UUID?
@@ -222,6 +224,16 @@ final class AppStore: ObservableObject {
             cards.sort { meta.lastActivity(for: $0.id) > meta.lastActivity(for: $1.id) }
         }
         return cards
+    }
+
+    /// Flattened visible cards grouped by board column (empty lanes omitted).
+    var visibleStatusGroups: [WorkspaceStatusGroup<SidebarWorktreeCard>] {
+        let cards = visibleProjects.flatMap { project in
+            visibleRecords(in: project).map { SidebarWorktreeCard(project: project, record: $0) }
+        }
+        return WorkspaceStatusGrouping.groups(cards, vocabulary: statusVocabulary) {
+            meta.statusID(for: $0.record.id)
+        }
     }
 
     func project(owning record: WorktreeRecord) -> ProjectSession? {

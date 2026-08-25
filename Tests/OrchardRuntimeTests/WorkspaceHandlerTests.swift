@@ -107,6 +107,17 @@ final class WorkspaceHandlerTests: XCTestCase {
         XCTAssertEqual(setWT?["workspaceStatus"]?.stringValue, "in-review")
         XCTAssertEqual(setWT?["linkedIssue"]?.stringValue, "99")
 
+        let setByStatus = await server.perform(RPCRequest(
+            id: "5b", method: "worktree-set",
+            params: .object([
+                "worktree": .string(id),
+                "status": .string("completed"),
+            ])))
+        XCTAssertTrue(setByStatus.ok, setByStatus.error?.message ?? "")
+        XCTAssertEqual(
+            setByStatus.result?.objectValue?["worktree"]?.objectValue?["workspaceStatus"]?.stringValue,
+            "completed")
+
         let rm = await server.perform(RPCRequest(
             id: "6", method: "worktree-rm",
             params: .object(["worktree": .string(id), "force": .bool(true)])))

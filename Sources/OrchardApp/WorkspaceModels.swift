@@ -9,6 +9,15 @@ enum CardOrdering: String, CaseIterable, Identifiable {
     var label: String { self == .manual ? "Manual" : "Recent" }
 }
 
+/// One worktree card as the sidebar lists it — project + record — so status
+/// grouping can flatten across repos without losing the owning session.
+@MainActor
+struct SidebarWorktreeCard: Identifiable {
+    var id: UUID { record.id }
+    let project: ProjectSession
+    let record: WorktreeRecord
+}
+
 /// What the workbench is showing — a project's checkout or one of its worktrees.
 enum WorkbenchKey: Hashable {
     case projectRoot(UUID)

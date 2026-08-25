@@ -93,6 +93,19 @@ final class CLIFormattingTests: XCTestCase {
         XCTAssertTrue(help.contains("--force-branch"), help)
     }
 
+    func testWorktreeSetStatusFlagIsBoardColumnWithWorkspaceStatusAlias() throws {
+        let spec = try XCTUnwrap(OrchardCommands.all.first { $0.name == "worktree" })
+        let flag = try XCTUnwrap(spec.flag(named: "status"))
+        XCTAssertEqual(flag.name, "status")
+        XCTAssertEqual(flag.aliases, ["workspace-status"])
+        XCTAssertEqual(spec.flag(named: "workspace-status")?.name, "status")
+        let help = CommandHelpRenderer.render(spec)
+        XCTAssertTrue(help.contains("--status"), help)
+        XCTAssertTrue(help.contains("--workspace-status"), help)
+        XCTAssertTrue(help.contains("board column"), help.lowercased())
+        XCTAssertTrue(help.contains("distinct from derived live status"), help)
+    }
+
     /// Dogfood-2: `orchard send` without `--json` printed a Swift debug dump of
     /// `JSONValue`. The human face is a compact receipt; anything else is JSON.
     func testSendHumanOutputIsAReceiptNotASwiftDump() {
