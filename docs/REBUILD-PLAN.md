@@ -982,7 +982,30 @@ AppStore wiring, matching tests where extractable. Does not touch
 AgentDashboardView.swift, DashboardProjection.swift, SourceControl/**, or
 OrchardTerminals internals.
 
-### Wave 20 (T72–T74, parallel)
+### Wave 20 (T72–T74, parallel) — MERGED 2026-08-25, 1143 tests, e2e PASS
+
+T72 fixed the data loss against real git: GitRunner gained a raw-Data path
+(capture() is now a thin decode over it, so existing callers are untouched),
+whole-file take copies the chosen index stage byte for byte INCLUDING its mode
+(exec bit, 120000 symlink), and per-hunk resolve refuses non-UTF-8 with a typed
+error surfaced in the pane. The 768-byte binary now stays 768 bytes with a staged
+blob id equal to git's own. T73 added `orchard conflicts list|show|take|resolve|
+stage` over the same service, so the surface is no longer GUI-only. T74's visual
+pass could not confirm T70/T71 on screen — the running app predated them (workers
+may not relaunch it); the coordinator has since relaunched, and CommandSpec vs
+agent-context showed no drift.
+
+Coordinator integration fix: T73's handler matched GitError message strings for
+the staging refusal, which T72 turned into typed GitConflictError values — the
+verb answered internal_error until the two vocabularies were mapped.
+
+Known: one full-suite run reported a single failure that did not reproduce in the
+next two clean runs (1143/1143) and printed no assertion line — same intermittent
+flake noted in wave 11 and by T72. Capture the name when it recurs.
+
+Still owed from T72's audit (outside its ownership): the same decode-then-write
+defect exists in the editor path (FileService.preview → FileService.write), and
+WorktreeManager.ensureExcluded has a truncation risk.
 
 **T72 — Conflict resolution must be byte-exact (data-loss fix).** dogfood-6 found
 `GitRunner.Output.stdout` decodes with `String(decoding:as: UTF8.self)`, so
