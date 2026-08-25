@@ -84,14 +84,14 @@ public actor AutomationService {
         try AutomationSchedule.validate(automation)
         var found = false
         try store.modify { data in if let i = data.automations.firstIndex(where: { $0.id == automation.id }) { data.automations[i] = automation; found = true } }
-        if !found { throw AutomationScheduleError.invalid("automation not found") }
+        if !found { throw AutomationScheduleError.notFound("automation not found") }
         notifyChanges()
         return automation
     }
 
     /// Live enable/disable. Disabled items are skipped by `due`/`fireDue`.
     @discardableResult public func setEnabled(_ id: String, enabled: Bool) throws -> Automation {
-        guard var item = show(id) else { throw AutomationScheduleError.invalid("automation not found") }
+        guard var item = show(id) else { throw AutomationScheduleError.notFound("automation not found") }
         item.enabled = enabled
         return try replace(item)
     }
@@ -112,9 +112,13 @@ public actor AutomationService {
     }
 
     /// Manual fire (`automations run --id`). Refused typed while a fire for the
-    /// same automation is in flight.
+    /// same automation is in flight, and refused typed when the automation is
+    /// disabled (a consumed `once` schedule auto-disables after its one attempt).
     @discardableResult
     public func run(_ automation: Automation, scheduledAt: Date = Date()) async throws -> AutomationRun {
+        guard automation.enabled else {
+            throw AutomationScheduleError.disabled(id: automation.id)
+        }
         guard claim(automation.id, slot: scheduledAt) else {
             throw AutomationScheduleError.fireInFlight(automationId: automation.id)
         }
@@ -122,7 +126,7 @@ public actor AutomationService {
     }
 
     public func run(id: String) async throws -> AutomationRun {
-        guard let automation = show(id) else { throw AutomationScheduleError.invalid("automation not found") }
+        guard let automation = show(id) else { throw AutomationScheduleError.notFound("automation not found") }
         return try await run(automation)
     }
 

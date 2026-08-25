@@ -68,7 +68,8 @@ public enum OrchestrationContract {
     reason and the read that would answer; `terminal` returns terminal output; only
     `auto` may substitute one for the other, and it names `source` and
     `fallbackReason` when it does; on a live worker `auto` always answers with
-    bounded, cursor-paged terminal output. A released terminal archive keeps two
+    bounded, cursor-paged terminal output (newest 200 lines unless `--limit` is
+    set; `--cursor` pages older lines). A released terminal archive keeps two
     faces: the
     chrome-stripped readable text served by default (with a `chromeStripped` tally)
     and the untouched capture behind `--raw`.

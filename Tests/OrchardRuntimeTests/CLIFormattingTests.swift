@@ -91,6 +91,7 @@ final class CLIFormattingTests: XCTestCase {
         let help = CommandHelpRenderer.render(spec)
         XCTAssertTrue(help.contains("--delete-branch"), help)
         XCTAssertTrue(help.contains("--force-branch"), help)
+        XCTAssertTrue(help.contains("rmdirs"), help)
     }
 
     func testWorktreeSetStatusFlagIsBoardColumnWithWorkspaceStatusAlias() throws {
@@ -212,6 +213,18 @@ final class CLIFormattingTests: XCTestCase {
         let help = CommandHelpRenderer.render(spec)
         XCTAssertTrue(help.contains("due"), help)
         XCTAssertTrue(help.contains("fire-due"), help)
+        XCTAssertTrue(help.contains("automation_not_found"), help)
+        XCTAssertTrue(help.contains("automation_invalid_input"), help)
+        XCTAssertTrue(help.contains("automation_disabled"), help)
+        XCTAssertTrue(help.contains("automation_fire_in_flight"), help)
+    }
+
+    func testWorkerReadHelpDocumentsDefaultLimit() throws {
+        let spec = try XCTUnwrap(OrchardCommands.all.first { $0.name == "worker-read" })
+        let help = CommandHelpRenderer.render(spec)
+        XCTAssertTrue(help.contains("--limit"), help)
+        XCTAssertTrue(help.contains("default \(WorkerReadPaging.defaultLimit)"), help)
+        XCTAssertTrue(help.contains("newest \(WorkerReadPaging.defaultLimit) lines"), help)
     }
 
     func testDispatchShowAcceptsDispatchAsAliasOfId() throws {
@@ -234,6 +247,7 @@ final class CLIFormattingTests: XCTestCase {
         let help = CommandHelpRenderer.render(spec)
         XCTAssertTrue(help.contains("list|add|show|remove"), help)
         XCTAssertTrue(help.contains("repo_in_use") || help.contains("no --force"), help)
+        XCTAssertTrue(help.contains("rmdirs"), help)
     }
 
     func testRepoRemoveHumanFace() {

@@ -145,6 +145,7 @@ final class PreambleTests: XCTestCase {
             OrchestrationContract.workerDuties))
         XCTAssertTrue(OrchestrationContract.coordinatorGuide.contains("worker-start` receipt"))
         XCTAssertTrue(OrchestrationContract.coordinatorGuide.contains("check --ack"))
+        XCTAssertTrue(OrchestrationContract.coordinatorGuide.contains("newest 200 lines"))
         XCTAssertEqual(OrchestrationContract.topics, ["orchestration"])
     }
 }
