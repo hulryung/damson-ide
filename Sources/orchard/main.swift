@@ -38,7 +38,22 @@ func jsonValue(_ text: String, hint: String?) -> JSONValue {
 }
 
 struct Metadata: Decodable { let socketPath: String; let authToken: String }
-func metadataURL() -> URL { (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: NSTemporaryDirectory())).appendingPathComponent("Orchard/orchard-runtime.json") }
+/// Where this CLI looks for the runtime it should talk to.
+///
+/// `ORCHARD_DATA_PATH` wins when set: every managed pane carries it (a remote pane
+/// too, since T78), and it names the data directory of the runtime that spawned the
+/// pane. Without honoring it, a worker on a remote host would reach whatever runtime
+/// that host's own HOME points at instead of the one supervising it. Falling back to
+/// Application Support keeps a plain shell working with no environment at all.
+func metadataURL() -> URL {
+    if let dataPath = ProcessInfo.processInfo.environment["ORCHARD_DATA_PATH"],
+       !dataPath.isEmpty {
+        return URL(fileURLWithPath: dataPath).appendingPathComponent("orchard-runtime.json")
+    }
+    return (FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+        ?? URL(fileURLWithPath: NSTemporaryDirectory()))
+        .appendingPathComponent("Orchard/orchard-runtime.json")
+}
 
 func callRuntime(method: String, params: JSONValue) throws -> RPCResponse {
     let metadata = try JSONDecoder().decode(Metadata.self, from: Data(contentsOf: metadataURL()))
