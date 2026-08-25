@@ -169,7 +169,8 @@ final class WorkspaceServiceTests: XCTestCase {
         let repo = try makeRepo()
         let service = makeService()
         let record = try service.addRepo(path: repo)
-        try service.addStatusDefinition(WorkspaceStatusDefinition(id: "blocked", label: "Blocked"))
+        try service.addStatusDefinition(
+            WorkspaceStatusDefinition(id: "blocked", label: "Blocked", color: "rose"))
         let created = try await service.create(WorkspaceCreateRequest(repo: record.id, name: "meta"))
         let updated = try service.update(
             selector: created.workspace.id,
@@ -189,6 +190,12 @@ final class WorkspaceServiceTests: XCTestCase {
         XCTAssertThrowsError(try service.update(
             selector: created.workspace.id,
             WorkspaceUpdateRequest(workspaceStatus: "does-not-exist")))
+
+        let persisted = OrchardDataStore(url: storeURL).load()
+        XCTAssertEqual(persisted.worktreeMeta[created.workspace.id]?.workspaceStatus, "blocked")
+        XCTAssertTrue(persisted.workspaceStatusVocabulary.contains {
+            $0.id == "blocked" && $0.label == "Blocked" && $0.color == "rose"
+        })
     }
 
     // MARK: - Naming retirement

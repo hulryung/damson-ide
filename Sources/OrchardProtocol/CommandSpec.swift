@@ -197,7 +197,12 @@ public enum OrchardCommands {
                 flag("comment", "Comment", "text"),
                 flag("issue", "Linked issue", "text"),
                 flag("pr", "Linked pull request", "text"),
-                flag("workspace-status", "Board status", "status"),
+                // T64: `worktree set --status` is the board column (cardStatus).
+                // `--workspace-status` is the Orca-shaped alias; both store as `status`.
+                flag("status",
+                     "Board column: todo|in-progress|in-review|completed or a custom id",
+                     "status",
+                     aliases: ["workspace-status"]),
                 flag("parent-worktree", "Parent worktree", "selector"),
                 flag("no-parent", "Do not nest under a parent"),
                 flag("force", "Force remove a dirty worktree"),
@@ -207,7 +212,10 @@ public enum OrchardCommands {
                 flag("pinned", "Pinned"),
                 flag("unread", "Unread"),
                 flag("archived", "Archived"),
-            ], positionals: ["list|show|current|create|set|rm|ps"]),
+            ], positionals: ["list|show|current|create|set|rm|ps"], notes: [
+                "worktree set --status <id> writes the user-authored board column (todo, in-progress, in-review, completed, or a custom vocabulary id).",
+                "Board column is distinct from derived live status (active|working|permission|done|inactive).",
+            ]),
             command("workspace-ports", "List listening TCP ports attributed to workspaces", [
                 flag("repo", "Repository selector", "selector"),
                 flag("worktree", "Worktree selector", "selector"),

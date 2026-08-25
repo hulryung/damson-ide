@@ -95,6 +95,20 @@ struct SidebarView: View {
                   ? "Showing archived workspaces. Click to hide them."
                   : "Archived workspaces are hidden. Click to show them.")
 
+            Button {
+                store.groupByStatus.toggle()
+            } label: {
+                Image(systemName: store.groupByStatus
+                      ? "square.grid.3x1.fill"
+                      : "square.grid.3x1")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(store.groupByStatus ? Color.accentColor : Tokens.textSecondary)
+            }
+            .buttonStyle(.borderless)
+            .help(store.groupByStatus
+                  ? "Grouped by board status. Click to group by repo."
+                  : "Group cards by board status")
+
             Spacer(minLength: 2)
 
             Picker("", selection: $store.ordering) {
@@ -130,20 +144,35 @@ struct SidebarView: View {
             LazyVStack(alignment: .leading, spacing: 2, pinnedViews: [.sectionHeaders]) {
                 if store.projects.isEmpty {
                     emptyState
-                }
-                ForEach(store.visibleProjects) { project in
-                    Section {
-                        ProjectRootRow(
-                            project: project,
-                            isSelected: store.selection == .projectRoot(project.id))
-                        ForEach(store.visibleRecords(in: project)) { record in
-                            WorkspaceCard(
-                                project: project,
-                                record: record,
-                                isSelected: store.selection == .worktree(record.id))
+                } else if store.groupByStatus {
+                    ForEach(store.visibleStatusGroups) { group in
+                        Section {
+                            ForEach(group.items) { card in
+                                WorkspaceCard(
+                                    project: card.project,
+                                    record: card.record,
+                                    isSelected: store.selection == .worktree(card.record.id))
+                            }
+                        } header: {
+                            StatusGroupHeader(definition: group.definition,
+                                              count: group.items.count)
                         }
-                    } header: {
-                        RepoHeader(project: project)
+                    }
+                } else {
+                    ForEach(store.visibleProjects) { project in
+                        Section {
+                            ProjectRootRow(
+                                project: project,
+                                isSelected: store.selection == .projectRoot(project.id))
+                            ForEach(store.visibleRecords(in: project)) { record in
+                                WorkspaceCard(
+                                    project: project,
+                                    record: record,
+                                    isSelected: store.selection == .worktree(record.id))
+                            }
+                        } header: {
+                            RepoHeader(project: project)
+                        }
                     }
                 }
             }
@@ -276,6 +305,31 @@ struct RepoHeader: View {
     }
 }
 
+/// Section header when the sidebar is grouped by board column.
+struct StatusGroupHeader: View {
+    let definition: WorkspaceStatusDefinition
+    var count: Int
+
+    var body: some View {
+        HStack(spacing: 6) {
+            WorkspaceStatusSlot(definition: definition)
+            Text(definition.label)
+                .font(Tokens.fontHeader)
+                .foregroundStyle(Tokens.textSecondary)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Text("\(count)")
+                .font(Tokens.fontPill)
+                .foregroundStyle(Tokens.textTertiary)
+                .monospacedDigit()
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 5)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Tokens.sidebar)
+    }
+}
+
 struct ProjectRootRow: View {
     @EnvironmentObject var store: AppStore
     @ObservedObject var project: ProjectSession
@@ -328,6 +382,14 @@ struct WorkspaceCard: View {
     private var hasLiveAgent: Bool { agents.contains { !$0.state.isTerminal } }
     private var unseen: Bool { store.isUnread(workspace: record.id) }
     private var archived: Bool { store.meta.isArchived(for: record.id) }
+    private var moveAmongIDs: [UUID] {
+        if store.groupByStatus {
+            return store.visibleStatusGroups
+                .first { $0.definition.id == store.meta.statusID(for: record.id) }?
+                .items.map(\.record.id) ?? []
+        }
+        return store.visibleRecords(in: project).map(\.id)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -417,10 +479,10 @@ struct WorkspaceCard: View {
         }
         if store.ordering == .manual {
             Button("Move up") {
-                store.meta.move(record.id, delta: -1, among: store.visibleRecords(in: project).map(\.id))
+                store.meta.move(record.id, delta: -1, among: moveAmongIDs)
             }
             Button("Move down") {
-                store.meta.move(record.id, delta: 1, among: store.visibleRecords(in: project).map(\.id))
+                store.meta.move(record.id, delta: 1, among: moveAmongIDs)
             }
         }
         Divider()

@@ -115,7 +115,7 @@ public final class WorkspaceCommandHandler: CommandHandler, @unchecked Sendable 
             comment: params.string("comment"),
             linkedIssue: params.string("linkedIssue", "issue"),
             linkedPR: params.string("linkedPR", "pr"),
-            workspaceStatus: params.string("workspaceStatus", "workspace-status"),
+            workspaceStatus: params.string("workspaceStatus", "workspace-status", "status"),
             parentWorktree: params.string("parentWorktree", "parent-worktree"),
             noParent: params.bool("noParent", "no-parent") ?? false,
             origin: LineageOrigin(rawValue: params.string("origin") ?? "") ?? .cli,
@@ -136,7 +136,7 @@ public final class WorkspaceCommandHandler: CommandHandler, @unchecked Sendable 
         let update = WorkspaceUpdateRequest(
             displayName: params.string("displayName", "display-name"),
             comment: params.string("comment"),
-            workspaceStatus: params.string("workspaceStatus", "workspace-status"),
+            workspaceStatus: params.string("workspaceStatus", "workspace-status", "status"),
             linkedIssue: params.string("linkedIssue", "issue"),
             linkedPR: params.string("linkedPR", "pr"),
             isPinned: params.bool("isPinned", "pinned"),

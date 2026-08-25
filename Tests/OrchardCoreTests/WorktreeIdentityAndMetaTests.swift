@@ -39,6 +39,48 @@ final class WorkspaceStatusTests: XCTestCase {
         XCTAssertEqual(ids, ["todo", "in-progress", "in-review", "completed"])
         XCTAssertEqual(WorkspaceStatusDefinition.defaults.map(\.label),
                        ["Todo", "In progress", "In review", "Done"])
+        XCTAssertEqual(WorkspaceStatusDefinition.defaults.map(\.color),
+                       ["neutral", "blue", "violet", "emerald"])
+    }
+
+    func testDefaultBoardColumnsAreNotLiveRuntimeStatuses() {
+        let live: Set<String> = ["active", "working", "permission", "done", "inactive"]
+        XCTAssertTrue(live.isDisjoint(with: WorkspaceStatusDefinition.defaultIDs))
+    }
+
+    func testGroupsInVocabularyOrderOmittingEmpty() {
+        struct Card { let id: String; let status: String? }
+        let vocab = WorkspaceStatusDefinition.defaults + [
+            WorkspaceStatusDefinition(id: "blocked", label: "Blocked", color: "rose"),
+        ]
+        let items = [
+            Card(id: "a", status: "in-review"),
+            Card(id: "b", status: "blocked"),
+            Card(id: "c", status: nil),
+            Card(id: "d", status: "unknown"),
+            Card(id: "e", status: "in-review"),
+        ]
+        let groups = WorkspaceStatusGrouping.groups(items, vocabulary: vocab) { $0.status }
+        XCTAssertEqual(groups.map(\.definition.id), ["todo", "in-review", "blocked"])
+        XCTAssertEqual(groups[0].items.map(\.id), ["c", "d"])
+        XCTAssertEqual(groups[1].items.map(\.id), ["a", "e"])
+        XCTAssertEqual(groups[2].items.map(\.id), ["b"])
+        XCTAssertEqual(groups[2].definition.color, "rose")
+    }
+
+    func testResolvedIDFallsBackToTodo() {
+        let vocab = WorkspaceStatusDefinition.defaults
+        XCTAssertEqual(WorkspaceStatusGrouping.resolvedID(nil, vocabulary: vocab), "todo")
+        XCTAssertEqual(WorkspaceStatusGrouping.resolvedID("gone", vocabulary: vocab), "todo")
+        XCTAssertEqual(WorkspaceStatusGrouping.resolvedID("in-progress", vocabulary: vocab),
+                       "in-progress")
+    }
+
+    func testCustomDefinitionRoundTripsIdLabelColor() throws {
+        let original = WorkspaceStatusDefinition(id: "blocked", label: "Blocked", color: "rose")
+        let data = try JSONEncoder().encode(original)
+        let decoded = try JSONDecoder().decode(WorkspaceStatusDefinition.self, from: data)
+        XCTAssertEqual(decoded, original)
     }
 
     func testMetaDefaultsCopyGitFactsWithoutInventingLinks() {
