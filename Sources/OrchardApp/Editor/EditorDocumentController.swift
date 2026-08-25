@@ -50,11 +50,22 @@ final class EditorDocumentController: ObservableObject {
         commit(EditorDocument.applyEdit(state, draft: text))
     }
 
+    /// ⌘S. Refuses — loudly — anything the pane is only *describing*: a binary file, a
+    /// file whose bytes are not UTF-8, an over-budget file we only previewed. Writing an
+    /// editor buffer over any of those replaces content nobody typed, and returning
+    /// `false` without a word is how that ships unnoticed.
     @discardableResult
     func save() -> Bool {
-        guard let state else { return false }
-        isSaving = true
         saveError = nil
+        if let refusal = EditorDocument.saveRefusal(for: surface) {
+            saveError = refusal.displayText
+            return false
+        }
+        guard let state else {
+            saveError = EditorDocument.SaveRefusal.notLoaded("this file is not loaded").displayText
+            return false
+        }
+        isSaving = true
         defer { isSaving = false }
         do {
             let written = state.draft
@@ -63,6 +74,11 @@ final class EditorDocumentController: ObservableObject {
             surface = .text(written)
             conflict = nil
             return true
+        } catch let err as FileServiceError {
+            // The service refuses the same way the surface check does — a write that got
+            // this far raced the file changing kind underneath us.
+            saveError = "\(err.code) — \(err.message)"
+            return false
         } catch {
             saveError = String(describing: error)
             return false
@@ -137,7 +153,7 @@ final class EditorDocumentController: ObservableObject {
                 return
             }
             let own = EditorDocument.isOwnWrite(incomingText: text, state: state, incomingMTime: info.mtime)
-            let diskChanged = text != state.diskText
+            let diskChanged = !EditorDocument.bytesEqual(text, state.diskText)
             switch EditorDocument.decideExternalChange(isDirty: state.isDirty, isOwnWrite: own,
                                                        diskChanged: diskChanged) {
             case .ignore:

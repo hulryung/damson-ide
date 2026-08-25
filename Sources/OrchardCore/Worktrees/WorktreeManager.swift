@@ -583,19 +583,93 @@ public final class WorktreeManager {
         }
     }
 
-    /// Ensure `pattern` is in the repo's local `.git/info/exclude` (no commit, no change to
-    /// the tracked `.gitignore`) so in-repo worktrees never show up in `git status`.
-    public func ensureExcluded(_ pattern: String, in repo: URL) {
-        guard let gitDir = git.line(in: repo, ["rev-parse", "--git-dir"]) else { return }
-        let infoDir = URL(fileURLWithPath: gitDir, relativeTo: repo).appendingPathComponent("info")
-        try? FileManager.default.createDirectory(at: infoDir, withIntermediateDirectories: true)
-        let excludeFile = infoDir.appendingPathComponent("exclude")
-        let existing = (try? String(contentsOf: excludeFile, encoding: .utf8)) ?? ""
-        let lines = existing.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
-        if lines.contains(pattern) { return }
-        let appended = existing.isEmpty ? "\(pattern)\n"
-            : (existing.hasSuffix("\n") ? "\(existing)\(pattern)\n" : "\(existing)\n\(pattern)\n")
-        try? appended.write(to: excludeFile, atomically: true, encoding: .utf8)
+    /// What `ensureExcluded` did. Named outcomes because the interesting cases are the
+    /// ones that write *nothing*: a caller (or a test) that cannot tell "already there"
+    /// from "we refused to touch it" cannot tell a working exclude from a lost one.
+    public enum ExcludeOutcome: String, Equatable, Sendable {
+        /// The pattern was appended; every prior byte is still there.
+        case appended
+        /// The pattern was already listed — nothing written.
+        case alreadyPresent
+        /// `git rev-parse` failed: not a repo, or git is unavailable.
+        case notARepo
+        /// A pattern git could not have matched anyway (empty, or carrying a newline/NUL
+        /// that would smuggle extra lines into the file).
+        case invalidPattern
+        /// The file exists and could not be read. Refused on purpose — see the note.
+        case unreadable
+        /// The append itself failed; the file is whatever it was before.
+        case writeFailed
+    }
+
+    /// Ensure `pattern` is in the repo's local `info/exclude` (no commit, no change to the
+    /// tracked `.gitignore`) so in-repo worktrees never show up in `git status`.
+    ///
+    /// Two things this must not do, both of which the previous version did:
+    ///
+    /// 1. **Truncate.** It read the file with `String(contentsOf:encoding:.utf8)` and fell
+    ///    back to `""` on any failure, then wrote that plus one line — so an exclude file
+    ///    with a single non-UTF-8 byte in it (or one that simply could not be read at that
+    ///    moment) was replaced by a one-line file, silently deleting every other rule.
+    ///    This version works in bytes, and refuses rather than writing when it cannot read
+    ///    what it is appending to. An atomic write only needs the directory to be
+    ///    writable, so "read failed" cannot be allowed to fall through to "overwrite".
+    /// 2. **Write where git does not read.** `--git-dir` in a *linked worktree* is
+    ///    `.git/worktrees/<name>`, and git reads `info/exclude` from the common directory;
+    ///    a rule written to the per-worktree admin dir is simply never applied. Asking for
+    ///    `--git-path info/exclude` resolves to the file git actually consults, in a main
+    ///    repo and a linked worktree alike — the same thing `RemoteHookConfig` does.
+    @discardableResult
+    public func ensureExcluded(_ pattern: String, in repo: URL) -> ExcludeOutcome {
+        // Byte-level, because `String.contains` works in grapheme clusters: "a\r\nb" holds
+        // one Character for the CRLF, so `contains("\n")` is *false* for it and a pattern
+        // carrying a line break would sail through into the file as two rules.
+        let wanted = Array(pattern.utf8)
+        guard !wanted.isEmpty,
+              !wanted.contains(where: { $0 == 0x0A || $0 == 0x0D || $0 == 0x00 }) else {
+            return .invalidPattern
+        }
+        guard let excludePath = git.line(in: repo, ["rev-parse", "--git-path", "info/exclude"]) else {
+            return .notARepo
+        }
+        let excludeFile = URL(fileURLWithPath: excludePath, relativeTo: repo)
+        try? FileManager.default.createDirectory(at: excludeFile.deletingLastPathComponent(),
+                                                 withIntermediateDirectories: true)
+        // Follow a symlinked exclude file to its target: an atomic write would otherwise
+        // replace the link with a regular file and orphan whatever it pointed at.
+        let target = FileManager.default.fileExists(atPath: excludeFile.path)
+            ? excludeFile.resolvingSymlinksInPath() : excludeFile
+
+        var existing = Data()
+        if FileManager.default.fileExists(atPath: target.path) {
+            guard let data = try? Data(contentsOf: target) else { return .unreadable }
+            existing = data
+        }
+        if Self.excludeLines(in: existing).contains(wanted) { return .alreadyPresent }
+
+        var appended = existing
+        if let last = appended.last, last != UInt8(ascii: "\n") {
+            appended.append(UInt8(ascii: "\n"))
+        }
+        appended.append(contentsOf: wanted)
+        appended.append(UInt8(ascii: "\n"))
+        do {
+            try appended.write(to: target, options: .atomic)
+            return .appended
+        } catch {
+            return .writeFailed
+        }
+    }
+
+    /// Split exclude-file bytes into lines, dropping a trailing CR so a CRLF file still
+    /// matches. Byte-level throughout: a rule this cannot decode is still a rule, and
+    /// comparing decoded text is exactly how the bytes got lost before.
+    static func excludeLines(in data: Data) -> [[UInt8]] {
+        data.split(separator: UInt8(ascii: "\n"), omittingEmptySubsequences: false).map { line in
+            var bytes = Array(line)
+            if bytes.last == UInt8(ascii: "\r") { bytes.removeLast() }
+            return bytes
+        }
     }
 
     /// Drop stale worktree administrative entries left by crashes.

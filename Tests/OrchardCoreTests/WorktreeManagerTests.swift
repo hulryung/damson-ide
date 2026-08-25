@@ -294,6 +294,167 @@ final class WorktreeManagerTests: XCTestCase {
         XCTAssertFalse(mgr.localBranches(in: base).contains("orchard/unmerged"))
     }
 
+    // MARK: - ensureExcluded
+
+    /// The exclude file git actually consults, resolved the way git resolves it.
+    private func excludeFile(of repo: URL) throws -> URL {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        proc.arguments = ["rev-parse", "--git-path", "info/exclude"]
+        proc.currentDirectoryURL = repo
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = Pipe()
+        try proc.run()
+        let out = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        let path = String(decoding: out, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return URL(fileURLWithPath: path, relativeTo: repo)
+    }
+
+    func testEnsureExcludedAppendsWithoutTouchingExistingRules() throws {
+        let repo = try makeRepo()
+        let manager = WorktreeManager(root: tmp.appendingPathComponent("worktrees"))
+        let exclude = try excludeFile(of: repo)
+        let priorRules = Data("# comment\nbuild/\n*.tmp\n".utf8)
+        try FileManager.default.createDirectory(at: exclude.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try priorRules.write(to: exclude)
+
+        XCTAssertEqual(manager.ensureExcluded(".orchard/", in: repo), .appended)
+        XCTAssertEqual(try Data(contentsOf: exclude),
+                       priorRules + Data(".orchard/\n".utf8))
+
+        // Idempotent: a second call writes nothing at all.
+        XCTAssertEqual(manager.ensureExcluded(".orchard/", in: repo), .alreadyPresent)
+        XCTAssertEqual(try Data(contentsOf: exclude), priorRules + Data(".orchard/\n".utf8))
+    }
+
+    /// The T75 defect: the old implementation decoded the file as UTF-8, fell back to ""
+    /// on failure, and wrote that plus one line — deleting every other rule in the file.
+    func testEnsureExcludedKeepsUndecodableRulesInsteadOfTruncatingTheFile() throws {
+        let repo = try makeRepo()
+        let manager = WorktreeManager(root: tmp.appendingPathComponent("worktrees"))
+        let exclude = try excludeFile(of: repo)
+        try FileManager.default.createDirectory(at: exclude.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        // Latin-1 in a comment is enough: 0xE9 is not valid UTF-8.
+        let prior = Data([0x23, 0x20, 0x63, 0x61, 0x66, 0xE9, 0x0A]) + Data("build/\n*.tmp\n".utf8)
+        try prior.write(to: exclude)
+
+        // Byte-level line matching still recognises rules it cannot decode…
+        XCTAssertEqual(manager.ensureExcluded("build/", in: repo), .alreadyPresent)
+        XCTAssertEqual(try Data(contentsOf: exclude), prior)
+
+        // …and appending keeps every undecodable byte exactly where it was.
+        XCTAssertEqual(manager.ensureExcluded(".orchard/", in: repo), .appended)
+        XCTAssertEqual(try Data(contentsOf: exclude), prior + Data(".orchard/\n".utf8))
+    }
+
+    /// The other half of the truncation risk: an exclude file that cannot be read at all.
+    /// An atomic write replaces a directory entry, so it needs the *directory* writable,
+    /// not the file readable — "read failed" therefore must refuse, not overwrite.
+    func testEnsureExcludedRefusesToWriteOverAFileItCannotRead() throws {
+        let repo = try makeRepo()
+        let manager = WorktreeManager(root: tmp.appendingPathComponent("worktrees"))
+        let exclude = try excludeFile(of: repo)
+        try FileManager.default.createDirectory(at: exclude.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        let prior = Data("build/\n*.tmp\n".utf8)
+        try prior.write(to: exclude)
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: exclude.path)
+        defer {
+            try? FileManager.default.setAttributes([.posixPermissions: 0o644],
+                                                   ofItemAtPath: exclude.path)
+        }
+        try XCTSkipIf((try? Data(contentsOf: exclude)) != nil,
+                      "running with permission to read a mode-000 file (root?)")
+
+        XCTAssertEqual(manager.ensureExcluded(".orchard/", in: repo), .unreadable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644],
+                                              ofItemAtPath: exclude.path)
+        XCTAssertEqual(try Data(contentsOf: exclude), prior,
+                       "the rules we could not read must still be there")
+    }
+
+    func testEnsureExcludedAddsAMissingFinalNewlineInsteadOfJoiningLines() throws {
+        let repo = try makeRepo()
+        let manager = WorktreeManager(root: tmp.appendingPathComponent("worktrees"))
+        let exclude = try excludeFile(of: repo)
+        try FileManager.default.createDirectory(at: exclude.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try Data("build/".utf8).write(to: exclude)
+
+        XCTAssertEqual(manager.ensureExcluded(".orchard/", in: repo), .appended)
+        XCTAssertEqual(try Data(contentsOf: exclude), Data("build/\n.orchard/\n".utf8))
+    }
+
+    func testEnsureExcludedMatchesCRLFRulesAndCreatesAMissingFile() throws {
+        let repo = try makeRepo()
+        let manager = WorktreeManager(root: tmp.appendingPathComponent("worktrees"))
+        let exclude = try excludeFile(of: repo)
+        try? FileManager.default.removeItem(at: exclude)
+
+        XCTAssertEqual(manager.ensureExcluded(".orchard/", in: repo), .appended)
+        XCTAssertEqual(try Data(contentsOf: exclude), Data(".orchard/\n".utf8))
+
+        try Data("build/\r\n.orchard/\r\n".utf8).write(to: exclude)
+        XCTAssertEqual(manager.ensureExcluded(".orchard/", in: repo), .alreadyPresent,
+                       "a CRLF exclude file already lists this rule")
+    }
+
+    func testEnsureExcludedRejectsPatternsThatWouldSmuggleExtraLines() throws {
+        let repo = try makeRepo()
+        let manager = WorktreeManager(root: tmp.appendingPathComponent("worktrees"))
+        XCTAssertEqual(manager.ensureExcluded("", in: repo), .invalidPattern)
+        XCTAssertEqual(manager.ensureExcluded("a\nb", in: repo), .invalidPattern)
+        XCTAssertEqual(manager.ensureExcluded("ok\r\nevil", in: repo), .invalidPattern)
+    }
+
+    func testEnsureExcludedOutsideARepoIsANoOp() throws {
+        let outside = tmp.appendingPathComponent("not-a-repo")
+        try FileManager.default.createDirectory(at: outside, withIntermediateDirectories: true)
+        let manager = WorktreeManager(root: tmp.appendingPathComponent("worktrees"))
+        XCTAssertEqual(manager.ensureExcluded(".orchard/", in: outside), .notARepo)
+    }
+
+    /// A linked worktree's `--git-dir` is `.git/worktrees/<name>`, whose `info/exclude`
+    /// git never reads. The rule has to land in the common directory to have any effect —
+    /// which is the file `git status` in the worktree is then measured against.
+    func testEnsureExcludedInALinkedWorktreeWritesWhereGitReads() throws {
+        let repo = try makeRepo()
+        let manager = WorktreeManager(root: tmp.appendingPathComponent("worktrees"))
+        let worktree = tmp.appendingPathComponent("linked")
+        XCTAssertEqual(try git(["worktree", "add", "-q", worktree.path, "-b", "linked"], cwd: repo), 0)
+
+        XCTAssertEqual(manager.ensureExcluded(".claude/settings.local.json", in: worktree), .appended)
+
+        let common = repo.appendingPathComponent(".git/info/exclude")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: common.path))
+        XCTAssertTrue(try String(contentsOf: common, encoding: .utf8)
+            .contains(".claude/settings.local.json"))
+
+        // The proof that matters: git in the worktree now ignores the file.
+        let settings = worktree.appendingPathComponent(".claude/settings.local.json")
+        try FileManager.default.createDirectory(at: settings.deletingLastPathComponent(),
+                                                withIntermediateDirectories: true)
+        try "{}".write(to: settings, atomically: true, encoding: .utf8)
+
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        proc.arguments = ["status", "--porcelain"]
+        proc.currentDirectoryURL = worktree
+        let pipe = Pipe()
+        proc.standardOutput = pipe
+        proc.standardError = Pipe()
+        try proc.run()
+        let out = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        XCTAssertFalse(String(decoding: out, as: UTF8.self).contains("settings.local.json"),
+                       "the excluded path still shows in git status, so the rule went nowhere")
+    }
+
     func testLocalBranchesListsCurrentBranchFirst() throws {
         let repo = try makeRepo()
         let mgr = WorktreeManager(root: tmp.appendingPathComponent("worktrees"))

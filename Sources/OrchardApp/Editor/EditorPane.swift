@@ -72,6 +72,13 @@ private struct EditorDocumentView: View {
                 title: isImage ? "Image preview" : "Binary file",
                 detail: binaryDetail(bytes: bytes, mime: mime),
                 imageBase64: imageBase64)
+        case .notUTF8(let bytes):
+            EditorPreviewNotice(
+                title: "Not UTF-8 text",
+                detail: "\(byteCount(bytes)) that are not valid UTF-8 — Latin-1, UTF-16, or "
+                    + "another encoding. Opening it as text would show U+FFFD where those "
+                    + "bytes are, and saving that back would make the replacement permanent, "
+                    + "so it is shown read-only.")
         case .tooLarge:
             EditorPreviewNotice(
                 title: "File too large",
@@ -148,8 +155,12 @@ private struct EditorDocumentView: View {
         .background(Color.red.opacity(0.1))
     }
 
+    private func byteCount(_ bytes: Int) -> String {
+        bytes < 1024 ? "\(bytes) B" : "\(bytes / 1024) KB"
+    }
+
     private func binaryDetail(bytes: Int, mime: String?) -> String {
-        let size = bytes < 1024 ? "\(bytes) B" : "\(bytes / 1024) KB"
+        let size = byteCount(bytes)
         if let mime, !mime.isEmpty {
             return "\(mime) · \(size). Binary and over-budget files stay as a preview notice this wave."
         }

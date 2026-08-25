@@ -105,20 +105,71 @@ public struct FileService: Sendable {
             return FilePreview(content: data.base64EncodedString(), isBinary: true, isImage: true,
                                mimeType: mime, byteLength: data.count)
         }
-        if Self.containsNUL(data) {
+        guard let text = Self.text(of: data) else {
+            // Two refusals, one shape: a NUL in the head is git's binary heuristic, and
+            // everything else that fails a *strict* decode is content no String can carry
+            // back to disk unchanged. Either way `content` stays empty rather than
+            // handing the editor a buffer whose save would rewrite the file.
             return FilePreview(content: "", isBinary: true, isImage: false, mimeType: nil,
-                               byteLength: data.count)
+                               byteLength: data.count,
+                               notTextReason: Self.containsNUL(data) ? .nulBytes : .notUTF8)
         }
-        return FilePreview(content: String(decoding: data, as: UTF8.self),
+        return FilePreview(content: text,
                            isBinary: false, isImage: false, mimeType: "text/plain",
                            byteLength: data.count)
     }
 
-    /// Atomic UTF-8 write confined to `root`. Overwrites an existing file;
+    /// The file's bytes, exactly as they sit on disk, subject to the same budget as
+    /// `preview`. This is the read half of a byte-exact round trip: nothing here
+    /// decodes, so `write(root:relativePath:data:)` can put back what this returned.
+    public func readData(root: URL, relativePath: String, maxBytes: Int? = nil) throws -> Data {
+        let url = try resolve(root: root, relativePath: relativePath)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            throw FileServiceError.notFound(relativePath)
+        }
+        let values = try resourceValues(at: url)
+        if values.isDirectory ?? false { throw FileServiceError.notAFile }
+        let budget = maxBytes ?? Self.defaultBinaryBudget
+        let size = Int((try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?
+            .int64Value ?? 0)
+        if size > budget { throw FileServiceError.fileTooLarge }
+        let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+        if data.count > budget { throw FileServiceError.fileTooLarge }
+        return data
+    }
+
+    /// Atomic byte-exact write confined to `root`. Overwrites an existing file;
     /// creates a new file only when the parent directory already exists (the
     /// editor never mkdir's). Directories and path escapes are rejected.
+    ///
+    /// This is the primitive every write goes through: it puts down the caller's
+    /// bytes and nothing else.
+    @discardableResult
+    public func write(root: URL, relativePath: String, data: Data) throws -> FileStatInfo {
+        let url = try writeTarget(root: root, relativePath: relativePath)
+        try data.write(to: url, options: .atomic)
+        return try stat(root: root, relativePath: relativePath)
+    }
+
+    /// Atomic UTF-8 text write. Same confinement as the byte-exact overload, plus one
+    /// refusal: the file already on disk must itself be UTF-8 text.
+    ///
+    /// The guard is the whole point of this wave. `String` → UTF-8 is exact, but the
+    /// String an editor holds came from a *decode*, and a decode of non-UTF-8 bytes is
+    /// lossy — writing it back replaces every byte git could not decode with U+FFFD,
+    /// across the whole file, including regions nobody opened. `preview` already refuses
+    /// to hand out such a String; this refuses the write even if one reached us anyway.
+    /// Byte content that genuinely needs replacing goes through the `data:` overload.
     @discardableResult
     public func write(root: URL, relativePath: String, contents: String) throws -> FileStatInfo {
+        let url = try writeTarget(root: root, relativePath: relativePath)
+        try assertTextWritable(url: url, relativePath: relativePath)
+        try Data(contents.utf8).write(to: url, options: .atomic)
+        return try stat(root: root, relativePath: relativePath)
+    }
+
+    /// Confinement + existence checks shared by both writes.
+    private func writeTarget(root: URL, relativePath: String) throws -> URL {
         let url = try resolve(root: root, relativePath: relativePath)
         if FileManager.default.fileExists(atPath: url.path) {
             let values = try resourceValues(at: url)
@@ -131,8 +182,24 @@ public struct FileService: Sendable {
                 throw FileServiceError.notFound(relativePath)
             }
         }
-        try Data(contents.utf8).write(to: url, options: .atomic)
-        return try stat(root: root, relativePath: relativePath)
+        return url
+    }
+
+    /// Refuse a text write over bytes a text read could not have produced. A brand-new
+    /// file has nothing to lose, so it passes; anything the editor could not have opened
+    /// (over-budget, binary, undecodable) is refused with the reason named.
+    private func assertTextWritable(url: URL, relativePath: String) throws {
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let size = Int((try? FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?
+            .int64Value ?? 0)
+        if size == 0 { return }
+        // Larger than the editor could ever have loaded, so this String cannot be a
+        // decode of it — refusing beats truncating a file to whatever is in a buffer.
+        if size > Self.defaultTextBudget { throw FileServiceError.fileTooLarge }
+        guard let existing = try? Data(contentsOf: url, options: [.mappedIfSafe]) else {
+            throw FileServiceError.unreadable(relativePath)
+        }
+        if Self.text(of: existing) == nil { throw FileServiceError.notUTF8(relativePath) }
     }
 
     public func stat(root: URL, relativePath: String = "") throws -> FileStatInfo {
@@ -265,7 +332,11 @@ public struct FileService: Sendable {
             }
             if data.count > fileBudget || Self.containsNUL(data) { return }
             scanned += data.count
-            let text = String(decoding: data, as: UTF8.self)
+            // Display-only decode. Search never writes, so a lossy fallback here costs a
+            // mojibake excerpt rather than a rewritten file — and dropping Latin-1 files
+            // entirely would hide ASCII matches that are really there. Nothing in this
+            // function may be routed to a write; use `readData` for that.
+            let text = Self.text(of: data) ?? String(decoding: data, as: UTF8.self)
 
             var lineNo = 0
             var fileHits = 0
@@ -450,9 +521,26 @@ public struct FileService: Sendable {
         min(max(value, lo), hi)
     }
 
-    private static func containsNUL(_ data: Data) -> Bool {
+    static func containsNUL(_ data: Data) -> Bool {
         let window = data.prefix(binarySniffBytes)
         return window.contains(0)
+    }
+
+    /// Decode bytes as text, or nil when they are not text that can survive the trip back
+    /// to disk. A NUL in the head is git's own binary heuristic; the rest is decided by
+    /// actually performing the round trip.
+    ///
+    /// Neither obvious decoder is enough on its own. `String(decoding:as:)` substitutes
+    /// U+FFFD for every undecodable byte and calls it success. `String(data:encoding:.utf8)`
+    /// is strict about that, but *eats a leading byte-order mark* — so a BOM'd UTF-8 file
+    /// would come back three bytes shorter than it went in, which is the same silent
+    /// rewrite wearing a friendlier face. So: decode, then re-encode and demand the bytes
+    /// match. That tests the exact property callers need rather than a proxy for it.
+    static func text(of data: Data) -> String? {
+        if containsNUL(data) { return nil }
+        let decoded = String(decoding: data, as: UTF8.self)
+        guard decoded.utf8.count == data.count, decoded.utf8.elementsEqual(data) else { return nil }
+        return decoded
     }
 
     /// Window the matching line around the first hit so a minified 2 MB line
