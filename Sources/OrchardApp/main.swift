@@ -31,6 +31,8 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
     private var orchestrationWindow: NSWindow?
     private var automationsWindow: NSWindow?
     private var vaultWindow: NSWindow?
+    /// T51: disabled app-menu row; title is refreshed from `runtimePresence`.
+    private var appRuntimeMenuItem: NSMenuItem?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         MainActor.assumeIsolated {
@@ -45,8 +47,7 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
             store.restore()
             KeeperRestart.completeBoot(store: store)
             store.focusMainWindow = { [weak self] in
-                self?.window?.makeKeyAndOrderFront(nil)
-                NSApp.activate(ignoringOtherApps: true)
+                MainActor.assumeIsolated { self?.orderFrontMainWindow() }
             }
             store.showDashboard = { [weak self] in
                 MainActor.assumeIsolated { self?.showDashboard(nil) }
@@ -65,32 +66,71 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
             }
             buildMenu()
 
-            let hosting = NSHostingController(
-                rootView: RootView()
-                    .environmentObject(store)
-                    .preferredColorScheme(.dark))
-            let win = NSWindow(contentViewController: hosting)
-            win.title = "Orchard"
-            win.setContentSize(NSSize(width: 1180, height: 760))
-            win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-            // No window tabs: macOS otherwise adds its own "+" (new window tab)
-            // beside the toolbar's New Worktree "+", reading as a duplicate.
-            win.tabbingMode = .disallowed
-            win.appearance = NSAppearance(named: .darkAqua)
-            win.titlebarAppearsTransparent = false
-            win.center()
-            win.makeKeyAndOrderFront(nil)
-            self.window = win
-            NSApp.activate(ignoringOtherApps: true)
+            createMainWindow()
+            orderFrontMainWindow()
+            refreshRuntimeIndication()
         }
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    /// T51: closing the workbench (or any auxiliary window) must not quit the
+    /// process. The in-process runtime and its supervised workers stay up; Dock
+    /// reopen / activation restore the workbench. Cmd-Q still terminates.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        WindowLifecycle.shouldTerminateAfterLastWindowClosed(hostsInProcessRuntime: true)
+    }
+
+    /// Dock icon / Finder reopen: always re-front the workbench, even when an
+    /// auxiliary window is already visible. Workbench state lives on AppStore,
+    /// so the same layouts/selection come back with the window.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows _: Bool) -> Bool {
+        MainActor.assumeIsolated {
+            guard store != nil else { return }
+            if WindowLifecycle.shouldOrderFrontMainWindow(
+                mainWindowOnScreen: isMainWindowOnScreen(), trigger: .dockOrFinder) {
+                orderFrontMainWindow()
+            }
+        }
+        return true
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        MainActor.assumeIsolated {
+            // `activate` runs before `applicationDidFinishLaunching`; skip until
+            // the store exists so we don't recreate a workbench with no runtime.
+            guard store != nil else { return }
+            if WindowLifecycle.shouldOrderFrontMainWindow(
+                mainWindowOnScreen: isMainWindowOnScreen(),
+                hasAnyVisibleWindow: hasAnyVisibleWindow(),
+                trigger: .activation) {
+                orderFrontMainWindow()
+            }
+            refreshRuntimeIndication()
+        }
+    }
+
+    func applicationDockMenu(_ sender: NSApplication) -> NSMenu? {
+        var title: String?
+        MainActor.assumeIsolated {
+            guard store != nil else { return }
+            title = store.runtimePresence.menuTitle
+        }
+        guard let title else { return nil }
+        let menu = NSMenu()
+        let status = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        status.isEnabled = false
+        menu.addItem(status)
+        menu.addItem(.separator())
+        let show = NSMenuItem(title: "Show Orchard", action: #selector(showMainWindow(_:)), keyEquivalent: "")
+        show.target = self
+        menu.addItem(show)
+        return menu
+    }
 
     func applicationWillTerminate(_ notification: Notification) {
         MainActor.assumeIsolated {
             // T23: hand live PTYs to the keeper BEFORE shutdown terminates anything.
             // Released sessions' terminate() no-ops, so shutdownAll stays unchanged.
+            // T51 must not run this path on window close — only Cmd-Q / Quit.
             if let store { KeeperRestart.handOffAtQuit(store: store) }
             store?.shutdownAll()
         }
@@ -111,6 +151,7 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
         if let record = store.selectedRecord { Task { await record.refresh() } }
     }
     @MainActor @objc func saveFocusedEditor(_ sender: Any?) { store.saveFocusedEditor() }
+    @MainActor @objc func showMainWindow(_ sender: Any?) { orderFrontMainWindow() }
 
     @MainActor @objc func showSettings(_ sender: Any?) {
         if let settingsWindow {
@@ -225,6 +266,52 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
     @MainActor @objc func zoomAllOut(_ sender: Any?) { surfaces().forEach { $0.zoomOut(nil) } }
     @MainActor @objc func resetAllZoom(_ sender: Any?) { surfaces().forEach { $0.resetZoom(nil) } }
 
+    @MainActor
+    private func createMainWindow() {
+        guard window == nil else { return }
+        let hosting = NSHostingController(
+            rootView: RootView()
+                .environmentObject(store)
+                .preferredColorScheme(.dark))
+        let win = NSWindow(contentViewController: hosting)
+        win.title = "Orchard"
+        win.setContentSize(NSSize(width: 1180, height: 760))
+        win.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+        // No window tabs: macOS otherwise adds its own "+" (new window tab)
+        // beside the toolbar's New Worktree "+", reading as a duplicate.
+        win.tabbingMode = .disallowed
+        win.appearance = NSAppearance(named: .darkAqua)
+        win.titlebarAppearsTransparent = false
+        win.isReleasedWhenClosed = false
+        win.center()
+        self.window = win
+    }
+
+    @MainActor
+    private func orderFrontMainWindow() {
+        if window == nil { createMainWindow() }
+        guard let window else { return }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @MainActor
+    private func isMainWindowOnScreen() -> Bool {
+        guard let window else { return false }
+        return window.isVisible && !window.isMiniaturized
+    }
+
+    @MainActor
+    private func hasAnyVisibleWindow() -> Bool {
+        NSApp.windows.contains { $0.isVisible && !$0.isMiniaturized }
+    }
+
+    @MainActor
+    private func refreshRuntimeIndication() {
+        appRuntimeMenuItem?.title = store.runtimePresence.menuTitle
+    }
+
     private func surfaces() -> [DamsonSurfaceView] {
         let window = NSApp.keyWindow ?? NSApp.mainWindow ?? NSApp.windows.first
         guard let root = window?.contentView else { return [] }
@@ -237,6 +324,7 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
         return found
     }
 
+    @MainActor
     private func buildMenu() {
         let mainMenu = NSMenu()
 
@@ -249,6 +337,11 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
         let prefs = NSMenuItem(title: "Settings…", action: #selector(showSettings(_:)), keyEquivalent: ",")
         prefs.target = self
         appMenu.addItem(prefs)
+        appMenu.addItem(.separator())
+        let runtimeItem = NSMenuItem(title: store.runtimePresence.menuTitle, action: nil, keyEquivalent: "")
+        runtimeItem.isEnabled = false
+        appMenu.addItem(runtimeItem)
+        appRuntimeMenuItem = runtimeItem
         appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "Quit Orchard", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
@@ -357,6 +450,9 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(windowItem)
         let windowMenu = NSMenu(title: "Window")
         windowItem.submenu = windowMenu
+        let showMain = NSMenuItem(title: "Show Orchard", action: #selector(showMainWindow(_:)), keyEquivalent: "")
+        showMain.target = self
+        windowMenu.addItem(showMain)
         windowMenu.addItem(withTitle: "Minimize", action: #selector(NSWindow.miniaturize(_:)), keyEquivalent: "m")
         NSApp.windowsMenu = windowMenu
 

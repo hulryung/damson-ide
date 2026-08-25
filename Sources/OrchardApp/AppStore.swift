@@ -92,6 +92,16 @@ final class AppStore: ObservableObject {
     var showVault: (() -> Void)?
     var showSettings: (() -> Void)?
 
+    /// Truthful control-plane presence for the Dock / app menu (T51).
+    /// "Alive" only when this process has a listening runtime socket — not merely
+    /// because the app process is still running after the workbench closed.
+    var runtimePresence: WindowLifecycle.RuntimeIndication {
+        WindowLifecycle.runtimeIndication(
+            hostConstructed: runtime != nil,
+            socketListening: runtime?.socketServer != nil,
+            runtimeId: runtime?.runtimeId)
+    }
+
     private var shells: [UUID: DamsonSession] = [:]
     /// T29: what a remote pane's PTY ending proved, in verdict language. Keyed by tab
     /// id. Published so the pane can say "the connection ended" instead of implying the
