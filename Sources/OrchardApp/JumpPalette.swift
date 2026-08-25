@@ -95,7 +95,10 @@ struct JumpPalette: View {
                 LazyVStack(spacing: 1) {
                     ForEach(Array(results.enumerated()), id: \.element.id) { index, item in
                         PaletteRow(item: item, isSelected: index == selection)
-                            .id(index)
+                            // Scroll target keyed by candidate, not position: an
+                            // `.id(index)` fights the ForEach's data identity, and the
+                            // row keeps its previous content when the query refilters.
+                            .id(item.id)
                             .contentShape(Rectangle())
                             .onTapGesture {
                                 selection = index
@@ -112,7 +115,10 @@ struct JumpPalette: View {
                 }
                 .padding(6)
             }
-            .onChange(of: selection) { proxy.scrollTo($0, anchor: .center) }
+            .onChange(of: selection) { index in
+                guard results.indices.contains(index) else { return }
+                proxy.scrollTo(results[index].id, anchor: .center)
+            }
         }
         .background(
             KeyCaptureView(
