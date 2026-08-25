@@ -1047,6 +1047,49 @@ does not reach KeyCaptureView; use System Events key codes). Also diff
 or allowedValues drifted. Report docs/reports/visual-pass-w19.md. Owns only that
 report.
 
+### Wave 21 (T75–T77, parallel) — closing the remaining backlog
+
+**T75 — File-content fidelity outside the conflict path.** T72's audit found the same
+decode-then-write defect it fixed for conflicts still living in the editor path:
+`FileService.preview` decodes with a lossy UTF-8 String and `FileService.write` writes
+that String back, so opening and saving a Latin-1 or binary file rewrites it as
+U+FFFD. Also flagged: `WorktreeManager.ensureExcluded` has a truncation risk. Fix
+both: reads/writes that round-trip content must be byte-exact, an editor must refuse
+to save what it could not represent (typed error, surfaced in the pane rather than
+silently corrupting), and ensureExcluded must never truncate a file it only meant to
+append to. Tests must include binary, Latin-1, CRLF, and empty-file fixtures — the
+lesson from T72 is that an all-`.utf8` fixture set proves nothing about fidelity.
+Owns: OrchardRuntime/Files/** (or wherever FileService lives),
+OrchardCore/Worktrees/WorktreeManager.swift, the editor pane's save path in
+Sources/OrchardApp/Editor/**, matching tests. Does not touch GitConflicts.swift,
+GitRunner.swift, GitSourceControl.swift, or Automations.
+
+**T76 — Hunt the intermittent full-suite failure.** Since wave 11 a single test has
+occasionally failed in full-suite runs and passed on re-run; T72 hit it too and could
+not capture the name, and one wave-20 run failed while printing no assertion line.
+Reproduce it: run the suite repeatedly (e.g. 10+ runs) capturing per-test output to
+files, and when it fires, identify the test and the mechanism (shared temp dirs,
+port/socket reuse, timing, global state between suites, parallel execution). Fix the
+root cause if it is a test-isolation bug; if it is a product race, say so plainly and
+write the smallest failing reproduction. Deliver docs/reports/flaky-hunt.md with what
+ran, what fired, and the fix. Owns: whatever test files the fix requires plus that
+report; production changes only if the root cause is genuinely in product code, and
+name them explicitly in the report. Does not touch Files/**, WorktreeManager.swift,
+or the CLI surface.
+
+**T77 — CLI surface audit against inventory §7.** Audit `orchard`'s command groups
+against docs/research/orca-inventory.md §7 and close the real gaps. Known: `worktree`
+lacks `show|current|create|set|rm|ps` as documented subverbs (some exist elsewhere),
+there is no `project` group, and `worker-read` still has no `hasOlder` field
+(dogfood-5/6 finding) so an agent cannot tell whether older output exists. Skills,
+artifacts, and computer groups are OUT of scope — say so in the report rather than
+inventing them. For every gap you close: CommandSpec entry, handler, guide text,
+tests. For every gap you deliberately leave: one line in the report saying why.
+Deliver docs/reports/cli-surface-audit.md. Owns: Sources/orchard/**,
+OrchardProtocol/CommandSpec.swift + guides, the worktree/project handlers in
+OrchardRuntime/Workspaces/**, WorkerVerbs' read path for `hasOlder`, matching tests.
+Does not touch Files/**, WorktreeManager.swift, Conflicts/**, or Automations.
+
 ### Wave 16 source findings (from dogfood-4, docs/reports/dogfood-4.md)
 
 Automations hardening: (1) fire-due races the in-process scheduler → double fire in
