@@ -933,6 +933,46 @@ Sources/OrchardApp conflict-review view files + WorkbenchView tab-kind wiring +
 minimal AppStore additions, matching tests. Does not touch
 AgentDashboardView.swift, Automations, or worktree removal paths.
 
+### Wave 19 (T69–T71, parallel)
+
+**T69 — Dogfood cycle 6 (report-only).** CLI only; never launch/quit the app; never
+touch terminals/worktrees you did not create. (1) Full supervised cycle to
+settlement. (2) **Conflict-review live**: create a scratch repo OUTSIDE the user's
+registered repos (e.g. under your worktree's tmp), produce a real merge conflict in
+a worktree you create, and verify the T68 surface through what is reachable from the
+CLI/RPC (conflict listing, per-hunk resolution, the staging refusal while markers
+remain, the linked-worktree MERGE_HEAD path); report honestly which parts are only
+reachable in the GUI and therefore unverified. (3) Regression-sweep the fixes from
+waves 16–18: once/fire-in-flight, repo remove refusal, typed exits, empty container
+cleanup, typed automation errors. Report docs/reports/dogfood-6.md with a findings
+table. Owns only the report; no source or test changes.
+
+**T70 — Source-control panel (right sidebar).** Inventory §6 lists source-control
+among the right-sidebar sections; today we have explorer/search/vault/workspaces/
+ports. Add a source-control section for the selected workspace: changed-file list
+(staged vs unstaged, with the same status vocabulary the diff pane uses), stage /
+unstage per file and all, commit with a message (refuse empty message and empty
+staged set with typed errors), branch name display + switch/create, and
+push/pull surfaced only when a remote exists — every failure path typed and shown
+inline, never silent. Keep the git logic UI-free in OrchardCore/Git (new file, do
+not edit GitConflicts.swift) with tests over fixture repos the tests create; the
+panel renders it. Owns: a new OrchardCore/Git source-control file + its tests, a new
+Sources/OrchardApp/SourceControl/ directory, minimal RootView/AppStore wiring for
+the section. Does not touch GitConflicts.swift, Conflicts/**, JumpPalette.swift,
+AgentDashboardView.swift, or Automations.
+
+**T71 — Floating terminal + status-bar items.** Inventory §6 "Other": (1) a floating
+terminal — a small always-on-top window bound to an existing pane's live session
+(never a second PTY for the same pane), openable from the pane's menu, closable
+without killing the session, remembering its frame like T62's windows; (2)
+status-bar items beyond the current ports chip: current workspace + branch, live
+agent count by bucket (reuse T67's projection, do not edit it), and the runtime
+indicator (reuse T51's runtimePresence). Owns: Sources/OrchardApp/StatusBarView.swift,
+a new floating-terminal view file + its window creation in main.swift, minimal
+AppStore wiring, matching tests where extractable. Does not touch
+AgentDashboardView.swift, DashboardProjection.swift, SourceControl/**, or
+OrchardTerminals internals.
+
 ### Wave 16 source findings (from dogfood-4, docs/reports/dogfood-4.md)
 
 Automations hardening: (1) fire-due races the in-process scheduler → double fire in
