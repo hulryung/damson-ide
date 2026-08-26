@@ -170,7 +170,12 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// whatever status is already published; this replaces it when the answer lands.
     func refreshCheckout() async {
         guard !isRemote else { return }
+        let traceStart = DispatchTime.now().uptimeNanoseconds
         checkoutStatus = await worktrees.primaryCheckoutStatus()
+        if AppStore.traceSwitch {
+            let ms = Double(DispatchTime.now().uptimeNanoseconds - traceStart) / 1_000_000
+            NSLog("ORCHARD_TRACE refreshCheckout %.1f ms", ms)
+        }
     }
 
     func applyTerminalConfig(_ config: DamsonConfig) {

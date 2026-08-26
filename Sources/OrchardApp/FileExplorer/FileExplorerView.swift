@@ -354,6 +354,13 @@ private final class FileExplorerModel: ObservableObject {
     }
 
     func reload() {
+        let traceStart = DispatchTime.now().uptimeNanoseconds
+        defer {
+            if AppStore.traceSwitch {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - traceStart) / 1_000_000
+                NSLog("ORCHARD_TRACE explorer.reload %.1f ms", ms)
+            }
+        }
         children = [:]
         expanded = []
         error = nil

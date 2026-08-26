@@ -140,6 +140,27 @@ final class AppStore: ObservableObject {
     @Published private(set) var panesSettled: Set<UUID> = []
     /// Single-flight guard for `prepareDamsonSession`.
     private var panesOpening: Set<UUID> = []
+
+    /// Temporary switch-latency tracing (coordinator, wave 24 follow-up). Active only
+    /// when ORCHARD_TRACE_SWITCH=1 so a normal run prints nothing.
+    static let traceSwitch = ProcessInfo.processInfo.environment["ORCHARD_TRACE_SWITCH"] == "1"
+    static func trace<T>(_ label: String, _ body: () -> T) -> T {
+        guard traceSwitch else { return body() }
+        let start = DispatchTime.now().uptimeNanoseconds
+        let value = body()
+        let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+        NSLog("ORCHARD_TRACE %@ %.1f ms", label, ms)
+        return value
+    }
+    static func traceAsync<T>(_ label: String, _ body: () async -> T) async -> T {
+        guard traceSwitch else { return await body() }
+        let start = DispatchTime.now().uptimeNanoseconds
+        let value = await body()
+        let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+        NSLog("ORCHARD_TRACE %@ %.1f ms", label, ms)
+        return value
+    }
+
     private var cancellables = Set<AnyCancellable>()
     private let defaults = UserDefaults.standard
     /// Pre-T8 sidebar list. Imported once into the registry, then deleted.
@@ -276,6 +297,13 @@ final class AppStore: ObservableObject {
     // MARK: - Selection
 
     func select(_ record: WorktreeRecord, in project: ProjectSession) {
+        let traceStart = DispatchTime.now().uptimeNanoseconds
+        defer {
+            if Self.traceSwitch {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - traceStart) / 1_000_000
+                NSLog("ORCHARD_TRACE select(sync) %.1f ms", ms)
+            }
+        }
         selectedProjectID = project.id
         selection = .worktree(record.id)
         applyUnread(.focusedWorkspace(record.id))
@@ -291,6 +319,13 @@ final class AppStore: ObservableObject {
     }
 
     func selectProjectRoot(_ project: ProjectSession) {
+        let traceStart = DispatchTime.now().uptimeNanoseconds
+        defer {
+            if Self.traceSwitch {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - traceStart) / 1_000_000
+                NSLog("ORCHARD_TRACE selectProjectRoot(sync) %.1f ms", ms)
+            }
+        }
         selectedProjectID = project.id
         selection = .projectRoot(project.id)
         ensureLayout(for: .projectRoot(project.id))
@@ -1389,6 +1424,13 @@ final class AppStore: ObservableObject {
     /// Git runs off the main actor — a conflicted repo is exactly when the user is
     /// clicking around, and a stuttering tab strip is the last thing that helps.
     func refreshConflicts(for key: WorkbenchKey) async {
+        let traceStart = DispatchTime.now().uptimeNanoseconds
+        defer {
+            if Self.traceSwitch {
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - traceStart) / 1_000_000
+                NSLog("ORCHARD_TRACE refreshConflicts %.1f ms", ms)
+            }
+        }
         guard !isRemote(key), let root = workspaceRoot(for: key) else {
             conflictSummaries[key] = .none
             return
@@ -1822,7 +1864,9 @@ final class AppStore: ObservableObject {
         }
         // Give the placeholder a turn on screen before the spawn takes the main actor back.
         await Task.yield()
-        _ = materializeDamsonSession(for: tab, key: key, cwd: cwd)
+        _ = Self.trace("materializeDamsonSession") {
+            materializeDamsonSession(for: tab, key: key, cwd: cwd)
+        }
     }
 
     /// Damson session for a terminal tab. Agent tabs use the supervisor's session;
