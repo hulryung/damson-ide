@@ -1292,7 +1292,35 @@ OrchardRuntime/Files/**, a remote file transport where it belongs, matching test
 docs/reports/t85-remote-files.md. Does not touch OrchardApp/**, WorkerVerbs, or
 OrchardTerminals.
 
-### Wave 24 (T86) — workspace switching is slow
+### Wave 24 (T86) — MERGED 2026-08-27: switching is ~30x faster
+
+Two causes, and only the live app could show the second.
+
+1. **Enumeration.** An `id:<repoId>::<path>` selector was resolved by enumerating every
+   repo; per repo, `2+N` rev-parse calls where one `git worktree list --porcelain`
+   suffices, and `GitService.status` spent 8 spawns where 3 do. Selectors now resolve
+   from the repo they name, repos are read in parallel, and the app's
+   `primaryCheckoutStatus` is async+detached with pane materialization moved out of
+   `TerminalPane.body` into the pane's `.task` behind an "Opening…" placeholder.
+2. **`Process.waitUntilExit()` polls the current run loop** — on the app's main thread
+   that is AppKit's. Every git-touching RPC paid ~85 ms *per call, regardless of spawn
+   count* (worktree show with one spawn cost the same as a three-repo list). GitRunner
+   now reaps through the termination handler. Same cause as the older "live PTYs
+   inflate every RPC" finding, which is gone with it, and `swift test` fell from ~229 s
+   to ~113 s on the same machine with no other change.
+
+Measured on the live app (coordinator's harness, baseline 24–26 ms):
+
+| Call | before | after enumeration fix | after reaping fix |
+|---|---|---|---|
+| `worktree list` (3 repos) | 820 ms | 108 ms | **50 ms** |
+| `terminal create --worktree` | 516–1000 ms | ~110 ms | **49 ms** |
+| `worktree show` | — | 111 ms | **48 ms** |
+
+Left open: the "Opening…" placeholder has never been *seen* — the computer-use
+accessibility grant is refused machine-wide right now (Orchard and Finder alike), so
+the visual pass is blocked on a human toggling that permission; and
+`refreshAllStatuses` still fans out unbounded (3 spawns per worktree, N at once).
 
 The user reports that selecting a workspace takes noticeably long to change the pane.
 Measured on the live runtime (2026-08-27, three repos with one worktree each):
