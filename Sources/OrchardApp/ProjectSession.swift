@@ -66,7 +66,9 @@ final class ProjectSession: ObservableObject, Identifiable {
         apply(settings)
         if !isRemote {
             syncRecords()
-            checkoutStatus = worktrees.primaryCheckoutStatus()
+            // Off the critical path: opening a project must not wait on a git read to
+            // put its window up. The status arrives a moment later and the row updates.
+            Task { [weak self] in await self?.refreshCheckout() }
         }
         listen()
     }
@@ -160,8 +162,15 @@ final class ProjectSession: ObservableObject, Identifiable {
         records.first { $0.id == id } ?? worktrees.worktrees.first { $0.id == id }
     }
 
+    /// Re-read the primary checkout's git status off the main actor.
+    ///
+    /// `primaryCheckoutStatus()` shells out to git. Awaiting it on the main actor — which
+    /// is what this used to do, `async` notwithstanding — froze the workbench for the
+    /// length of the read every time a project root was selected. The pane is drawn from
+    /// whatever status is already published; this replaces it when the answer lands.
     func refreshCheckout() async {
-        checkoutStatus = worktrees.primaryCheckoutStatus()
+        guard !isRemote else { return }
+        checkoutStatus = await worktrees.primaryCheckoutStatus()
     }
 
     func applyTerminalConfig(_ config: DamsonConfig) {

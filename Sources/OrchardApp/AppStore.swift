@@ -133,6 +133,13 @@ final class AppStore: ObservableObject {
     /// the new PTY to be shown — and it *should* change: a reconnect is a different
     /// channel to the same pane, not the old one resumed.
     @Published private(set) var paneGeneration: [UUID: Int] = [:]
+    /// Tabs whose session materialization has run to a conclusion — either a session now
+    /// exists, or the pane genuinely has none. Until a tab is in here its terminal pane
+    /// renders as "Opening…" rather than as the "No session" refusal: the difference
+    /// between "not yet" and "not going to" is exactly what a user reads off a pane.
+    @Published private(set) var panesSettled: Set<UUID> = []
+    /// Single-flight guard for `prepareDamsonSession`.
+    private var panesOpening: Set<UUID> = []
     private var cancellables = Set<AnyCancellable>()
     private let defaults = UserDefaults.standard
     /// Pre-T8 sidebar list. Imported once into the registry, then deleted.
@@ -1020,6 +1027,8 @@ final class AppStore: ObservableObject {
         for project in projects { project.shutdown() }
         for session in shells.values { session.terminate() }
         shells.removeAll()
+        panesSettled.removeAll()
+        panesOpening.removeAll()
         runtime?.shutdown()
     }
 
@@ -1471,6 +1480,8 @@ final class AppStore: ObservableObject {
         connectionNotes[tabID] = nil
         remotePaneKeys[tabID] = nil
         paneGeneration[tabID] = nil
+        panesSettled.remove(tabID)
+        panesOpening.remove(tabID)
         updateLayout(key) { node in
             _ = node.mutateGroup(groupID) { group in
                 guard group.tabs.count > 1 else { return }
@@ -1788,11 +1799,38 @@ final class AppStore: ObservableObject {
         _ = editorController(root: root, path: relativePath)
     }
 
+    /// Materialize the session behind a terminal tab, off the view-update pass.
+    ///
+    /// This used to run inside `TerminalPane.body`: drawing the pane spawned the PTY,
+    /// registered it with the runtime and mutated `shells`, all before SwiftUI could put
+    /// a pixel on screen — so switching workspace read as a freeze rather than a switch.
+    /// The pane now draws immediately and this fills it in.
+    ///
+    /// Idempotent and single-flight: a tab that already has a session, or that is already
+    /// being opened, is left alone, so repeated view updates cannot mint a second PTY for
+    /// one pane.
+    func prepareDamsonSession(for tab: WorkbenchTab, key: WorkbenchKey, cwd: URL) async {
+        guard !panesOpening.contains(tab.id) else { return }
+        if existingDamsonSession(for: tab) != nil {
+            panesSettled.insert(tab.id)
+            return
+        }
+        panesOpening.insert(tab.id)
+        defer {
+            panesOpening.remove(tab.id)
+            panesSettled.insert(tab.id)
+        }
+        // Give the placeholder a turn on screen before the spawn takes the main actor back.
+        await Task.yield()
+        _ = materializeDamsonSession(for: tab, key: key, cwd: cwd)
+    }
+
     /// Damson session for a terminal tab. Agent tabs use the supervisor's session;
     /// local shells are created through the terminal service so a clean quit can
     /// hand them to the keeper and the next boot re-attaches the adopted PTY
     /// (T31). Views never spawn a PTY of their own.
-    func damsonSession(for tab: WorkbenchTab, key: WorkbenchKey, cwd: URL) -> DamsonSession? {
+    private func materializeDamsonSession(for tab: WorkbenchTab, key: WorkbenchKey,
+                                          cwd: URL) -> DamsonSession? {
         if let agentID = tab.agentID {
             for project in projects {
                 if let agent = project.agents.agents.first(where: { $0.id == agentID }),
