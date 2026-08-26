@@ -94,10 +94,49 @@ final class ProjectSession: ObservableObject, Identifiable {
     }
 
     /// Sidebar / header subtitle. Remote repos never ask local git for a branch.
+    ///
+    /// Read from the published checkout status, never asked of git. This used to call
+    /// `worktrees.currentBranchName`, which spawns `git rev-parse` — from a *getter*, read
+    /// inside three view bodies (the sidebar's project row, the workbench header, the
+    /// status-bar chip). A sidebar with three projects therefore ran three main-thread git
+    /// processes on every re-render, and selecting a workspace re-renders the sidebar
+    /// because the highlight moves. The branch is already in the status reading; there was
+    /// never anything to ask for.
     var rootSubtitle: String {
         if isRemote { return hostLabel ?? "remote" }
         guard worktrees.isGitRepository else { return "folder" }
-        return worktrees.currentBranchName ?? "detached"
+        switch checkoutStatus.branch {
+        // Nothing has been read yet. "…" says the answer is coming; naming a branch we
+        // have not looked up would be an invention, and blank reads as "no branch".
+        case "": return "…"
+        case "HEAD": return "detached"
+        case let branch: return branch
+        }
+    }
+
+    /// Local branches a composer can offer, read off the main actor.
+    ///
+    /// `WorktreeService.availableBaseRefs()` shells out to git and this type lives on the
+    /// main actor, so a view that calls it from `body` — which the composer did, on every
+    /// keystroke — is a main-thread git spawn per render.
+    func baseRefChoices() async -> [String] {
+        guard !isRemote, worktrees.isGitRepository else { return [] }
+        let manager = worktrees.manager
+        let repo = self.repo
+        return await Task.detached(priority: .userInitiated) {
+            manager.localBranches(in: repo)
+        }.value
+    }
+
+    /// What deleting this worktree would destroy, read off the main actor. The synchronous
+    /// spelling is a full status reading — three git processes — and the delete sheet was
+    /// evaluating it in `body`.
+    func deletionPreflight(_ record: WorktreeRecord) async -> WorktreeDeletionPreflight {
+        let manager = worktrees.manager
+        let worktree = record.worktree
+        return await Task.detached(priority: .userInitiated) {
+            manager.deletionPreflight(worktree)
+        }.value
     }
 
     func apply(_ settings: OrchardSettings) {
@@ -170,12 +209,12 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// is what this used to do, `async` notwithstanding — froze the workbench for the
     /// length of the read every time a project root was selected. The pane is drawn from
     /// whatever status is already published; this replaces it when the answer lands.
-    func refreshCheckout() async {
+    func refreshCheckout(urgency: GitFactsCache.Urgency = .background) async {
         guard !isRemote else { return }
         let mark = AppStore.traceBegin()
         defer { AppStore.traceEnd("refreshCheckout", mark) }
         if applyCachedCheckout() { return }
-        apply(await worktrees.primaryCheckoutFacts())
+        apply(await worktrees.primaryCheckoutFacts(urgency: urgency))
     }
 
     /// Publish the primary checkout's cached reading without running git or suspending.

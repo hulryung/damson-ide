@@ -174,9 +174,11 @@ public final class WorktreeService {
 
     /// The primary checkout's status *and* conflict summary, from one reading, served from
     /// `GitFactsCache` when nothing has changed since the last one.
-    public func primaryCheckoutFacts() async -> GitWorktreeFacts {
+    public func primaryCheckoutFacts(
+        urgency: GitFactsCache.Urgency = .background) async -> GitWorktreeFacts {
         guard isGitRepository else { return .unknown }
-        return await GitFactsCache.shared.facts(worktree: baseRepo, baseRef: "HEAD")
+        return await GitFactsCache.shared.facts(worktree: baseRepo, baseRef: "HEAD",
+                                                urgency: urgency)
     }
 
     /// The cached reading for the primary checkout, or nil when there is none. Spawn-free

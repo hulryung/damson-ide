@@ -145,29 +145,40 @@ final class AppStore: ObservableObject {
     /// when ORCHARD_TRACE_SWITCH=1 so a normal run prints nothing.
     static let traceSwitch = ProcessInfo.processInfo.environment["ORCHARD_TRACE_SWITCH"] == "1"
 
-    /// A phase's start: wall-clock and the process-wide `git` spawn count.
+    /// A phase's start: wall-clock, the readings this phase caused, and the process-wide
+    /// `git` spawn count.
     ///
     /// T87's acceptance is a spawn count, not only a duration — "no phase over 50 ms" is
     /// satisfiable by a slow machine doing the wrong work, and "zero git on the critical
-    /// path" is the claim that actually has to hold. Carrying both through the same trace
-    /// is what makes the table readable off one env var. The count is process-wide, so a
-    /// background refresh of *another* worktree can land inside a phase's window; the
-    /// numbers to read are the ones from a quiet app.
+    /// path" is the claim that actually has to hold.
+    ///
+    /// Two counters, because they answer different questions and only one of them is
+    /// attributable. `git=` is process-wide: anything else running in the app — the
+    /// startup fan-out over every worktree, another workspace's background refresh —
+    /// lands inside whatever phase window happens to be open, which is why a launch-path
+    /// `refreshConflicts` can read 33 spawns while doing none of its own. `reads=` is the
+    /// number of *fresh readings this phase caused*, counted by the cache that owns them:
+    /// a phase that served everything from cache reads 0, and each reading is exactly
+    /// three git processes. `reads=0` is the acceptance claim; `git=` is context.
     struct TraceMark {
         let nanos: UInt64
         let spawns: Int
+        let reads: Int
     }
 
     static func traceBegin() -> TraceMark {
         TraceMark(nanos: DispatchTime.now().uptimeNanoseconds,
-                  spawns: traceSwitch ? GitRunner.Trace.snapshot().spawns : 0)
+                  spawns: traceSwitch ? GitRunner.Trace.snapshot().spawns : 0,
+                  reads: traceSwitch ? GitFactsCache.shared.snapshotStats().computes : 0)
     }
 
     static func traceEnd(_ label: String, _ mark: TraceMark) {
         guard traceSwitch else { return }
         let ms = Double(DispatchTime.now().uptimeNanoseconds - mark.nanos) / 1_000_000
         let spawns = GitRunner.Trace.snapshot().spawns - mark.spawns
-        NSLog("ORCHARD_TRACE %@ %.1f ms, %d git", label, ms, spawns)
+        let reads = GitFactsCache.shared.snapshotStats().computes - mark.reads
+        NSLog("ORCHARD_TRACE %@ %.1f ms, reads=%d, git=%d (process-wide)",
+              label, ms, reads, spawns)
     }
 
     static func trace<T>(_ label: String, _ body: () -> T) -> T {
@@ -340,7 +351,7 @@ final class AppStore: ObservableObject {
         // hop off the main actor, nothing to wait for. A first visit falls through to the
         // detached read and the card fills in when it lands.
         if record.applyCachedFacts() { return }
-        Task { await record.refresh() }
+        Task { await record.refresh(urgency: .foreground) }
     }
 
     func selectProjectRoot(_ project: ProjectSession) {
@@ -354,7 +365,7 @@ final class AppStore: ObservableObject {
             return
         }
         if project.applyCachedCheckout() { return }
-        Task { await project.refreshCheckout() }
+        Task { await project.refreshCheckout(urgency: .foreground) }
     }
 
     private func refreshRemoteListing(_ project: ProjectSession) {
@@ -1462,7 +1473,8 @@ final class AppStore: ObservableObject {
             apply(cached, for: key)
             return
         }
-        apply(await GitFactsCache.shared.facts(worktree: root, baseRef: baseRef), for: key)
+        apply(await GitFactsCache.shared.facts(worktree: root, baseRef: baseRef,
+                                               urgency: .foreground), for: key)
     }
 
     /// The base ref a workspace's facts are read against: a worktree's fork point, or the
@@ -1525,7 +1537,8 @@ final class AppStore: ObservableObject {
     func refreshWorkspaceFacts(_ key: WorkbenchKey) async {
         guard !isRemote(key), let root = workspaceRoot(for: key) else { return }
         let facts = await GitFactsCache.shared.facts(worktree: root,
-                                                     baseRef: factsBaseRef(for: key))
+                                                     baseRef: factsBaseRef(for: key),
+                                                     urgency: .foreground)
         apply(facts, for: key)
         switch key {
         case .projectRoot(let id):

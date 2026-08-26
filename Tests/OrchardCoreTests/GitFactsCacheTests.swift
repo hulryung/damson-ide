@@ -356,7 +356,7 @@ final class GitFactsCacheTests: XCTestCase {
     // MARK: - Untracked files
 
     func testUntrackedLineCountsAreExactIncludingAMissingFinalNewline() throws {
-        var budget = GitService.untrackedReadBudget
+        var budget = GitService.ReadBudget()
         let three = tmp.appendingPathComponent("three.txt")
         try "a\nb\nc\n".write(to: three, atomically: true, encoding: .utf8)
         XCTAssertEqual(GitService.countLines(at: three, budget: &budget).lines, 3)
@@ -382,7 +382,7 @@ final class GitFactsCacheTests: XCTestCase {
         let big = tmp.appendingPathComponent("big.txt")
         try Data(repeating: 0x41, count: 4096).write(to: big)
 
-        var exhausted = 0
+        var exhausted = GitService.ReadBudget(bytes: 0, files: 10)
         let reading = GitService.countLines(at: big, budget: &exhausted)
         XCTAssertFalse(reading.counted)
         XCTAssertFalse(reading.binary, "not reading a file is not evidence that it is binary")
@@ -404,7 +404,7 @@ final class GitFactsCacheTests: XCTestCase {
         try "x\ny\n".write(to: a, atomically: true, encoding: .utf8)   // 4 bytes
         try "p\nq\n".write(to: b, atomically: true, encoding: .utf8)
 
-        var budget = 4
+        var budget = GitService.ReadBudget(bytes: 4, files: 10)
         let first = GitService.countLines(at: a, budget: &budget)
         let second = GitService.countLines(at: b, budget: &budget)
         XCTAssertTrue(first.counted)
@@ -573,14 +573,20 @@ final class GitFactsBenchTests: XCTestCase {
         }
         let warmSpawns = GitRunner.Trace.snapshot().spawns - warmBefore
 
-        // What the same switch used to run: a status reading and a conflict summary as two
-        // unrelated fan-outs, five processes between them.
-        let service = GitService()
-        let conflicts = GitConflictService()
-        var beforeShape = 0.0
+        // The five processes the pre-T87 switch actually ran, spelled out rather than
+        // called through today's code — every layer above has changed, so replaying the
+        // command set is the only comparison that still means the same thing.
+        let old = [
+            ["status", "--porcelain=v2", "--branch", "--untracked-files=all", "-z"],
+            ["diff", "--no-renames", "--raw", "--numstat", "-z", base, "--"],
+            ["log", "-z", "--format=%s", "\(base)..HEAD"],
+            ["rev-parse", "--absolute-git-dir"],          // the conflict summary's own…
+            ["status", "--porcelain", "-z"],              // …two processes
+        ]
         let oldSpawnsBefore = GitRunner.Trace.snapshot().spawns
-        beforeShape += millis { _ = service.status(worktree: repo, baseRef: base) }
-        beforeShape += millis { _ = conflicts.summary(worktree: repo) }
+        let beforeShape = millis {
+            for args in old { _ = GitRunner.shared.query(in: repo, args) }
+        }
         let oldSpawns = GitRunner.Trace.snapshot().spawns - oldSpawnsBefore
 
         print("""
@@ -591,5 +597,152 @@ final class GitFactsBenchTests: XCTestCase {
         \(facts.status.stat.fileCount) changed files, branch \(facts.status.branch)
         """)
         XCTAssertEqual(warmSpawns, 0)
+    }
+
+    /// The untracked-file half. `GitService` has to read a file git is not tracking to put
+    /// a `+N` on it, and it was doing that with a per-byte `Data.reduce`. Both counters
+    /// must agree — the point of the change is that it is the same number, faster.
+    func testUntrackedLineCountingCostAndAgreement() throws {
+        let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("orchard-untracked-bench-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let line = String(repeating: "x", count: 79) + "\n"
+        let body = String(repeating: line, count: 400)          // ~32 KB, 400 lines
+        var files: [URL] = []
+        for index in 0..<300 {
+            let url = dir.appendingPathComponent("file-\(index).txt")
+            try body.write(to: url, atomically: true, encoding: .utf8)
+            files.append(url)
+        }
+
+        var budget = GitService.ReadBudget()
+        var fast = 0
+        let fastMS = millis {
+            for url in files { fast += GitService.countLines(at: url, budget: &budget).lines }
+        }
+
+        // The reader this replaced, spelled out: whole-file `Data(contentsOf:)` after an
+        // `attributesOfItem` for the size, then a per-byte reduce.
+        var slow = 0
+        let slowMS = millis {
+            for url in files {
+                guard let size = (try? FileManager.default
+                    .attributesOfItem(atPath: url.path))?[.size] as? Int,
+                    size <= 2 * 1024 * 1024,
+                    let data = try? Data(contentsOf: url) else { continue }
+                slow += data.reduce(into: 0) { count, byte in if byte == 0x0A { count += 1 } }
+            }
+        }
+
+        // Tiny files, where per-file overhead rather than bytes is the whole cost.
+        let manyDir = dir.appendingPathComponent("many")
+        try FileManager.default.createDirectory(at: manyDir, withIntermediateDirectories: true)
+        var tiny: [URL] = []
+        for index in 0..<3000 {
+            let url = manyDir.appendingPathComponent("t-\(index).txt")
+            try "a\nb\n".write(to: url, atomically: true, encoding: .utf8)
+            tiny.append(url)
+        }
+        var tinyBudget = GitService.ReadBudget(bytes: .max, files: .max)
+        var tinyLines = 0
+        let tinyMS = millis {
+            for url in tiny {
+                tinyLines += GitService.countLines(at: url, budget: &tinyBudget).lines
+            }
+        }
+        var tinySlow = 0
+        let tinySlowMS = millis {
+            for url in tiny {
+                guard let size = (try? FileManager.default
+                    .attributesOfItem(atPath: url.path))?[.size] as? Int,
+                    size <= 2 * 1024 * 1024,
+                    let data = try? Data(contentsOf: url) else { continue }
+                tinySlow += data.reduce(into: 0) { count, byte in if byte == 0x0A { count += 1 } }
+            }
+        }
+        XCTAssertEqual(tinyLines, tinySlow)
+        print("""
+        ORCHARD_BENCH untracked counting over 3000 tiny files: \
+        stat+read \(String(format: "%.1f", tinyMS)) ms, \
+        attributesOfItem+Data \(String(format: "%.1f", tinySlowMS)) ms
+        """)
+
+        XCTAssertEqual(fast, slow, "the fast counter must produce the identical number")
+        XCTAssertEqual(fast, 300 * 400)
+        print("""
+        ORCHARD_BENCH untracked counting over 300 files / ~9.5 MB: \
+        memchr \(String(format: "%.1f", fastMS)) ms, per-byte reduce \
+        \(String(format: "%.1f", slowMS)) ms
+        """)
+    }
+}
+
+/// Ordering: at launch every worktree in every repo asks for a reading at once, and the
+/// queue is bounded. The workspace the user just selected must not wait behind the fan-out.
+final class GitFactsUrgencyTests: XCTestCase {
+    private var tmp: URL!
+
+    override func setUpWithError() throws {
+        try XCTSkipIf(!FileManager.default.isExecutableFile(atPath: "/usr/bin/git"), "git unavailable")
+        tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("orchard-urgency-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)
+    }
+
+    override func tearDownWithError() throws {
+        try? FileManager.default.removeItem(at: tmp)
+    }
+
+    func testAForegroundReadingOvertakesABacklogOfBackgroundOnes() async throws {
+        // A stand-in for git that costs a fixed 60 ms, so the ordering is what is measured
+        // rather than how big each repo happens to be.
+        let slowGit = tmp.appendingPathComponent("slow-git")
+        try "#!/bin/sh\nsleep 0.06\nexit 0\n".write(to: slowGit, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                              ofItemAtPath: slowGit.path)
+        let cache = GitFactsCache(service: GitService(git: GitRunner(gitPath: slowGit.path)),
+                                  concurrency: 2)
+        defer { cache.reset() }
+
+        var roots: [URL] = []
+        for index in 0..<24 {
+            let dir = tmp.appendingPathComponent("bg-\(index)")
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            roots.append(dir)
+        }
+        let selected = tmp.appendingPathComponent("selected")
+        try FileManager.default.createDirectory(at: selected, withIntermediateDirectories: true)
+
+        // The floor: one reading with nothing else running.
+        let soloStart = DispatchTime.now().uptimeNanoseconds
+        _ = await cache.facts(worktree: tmp.appendingPathComponent("solo"), baseRef: "HEAD",
+                              urgency: .foreground)
+        let solo = Double(DispatchTime.now().uptimeNanoseconds - soloStart) / 1_000_000
+
+        let backlog = Task {
+            await withTaskGroup(of: Void.self) { group in
+                for root in roots {
+                    group.addTask { _ = await cache.facts(worktree: root, baseRef: "HEAD") }
+                }
+            }
+        }
+        // Let the backlog fill the queue before the selection arrives.
+        try? await Task.sleep(nanoseconds: 30_000_000)
+
+        let start = DispatchTime.now().uptimeNanoseconds
+        _ = await cache.facts(worktree: selected, baseRef: "HEAD", urgency: .foreground)
+        let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+        await backlog.value
+
+        // The claim is not "instant" — a first visit really does have to run git. It is
+        // that the wait is bounded by the readings already in flight (two here) rather than
+        // by the twenty-four queued behind them, which would be an order of magnitude more.
+        print("ORCHARD_BENCH urgency: solo \(String(format: "%.0f", solo)) ms, "
+              + "with a 24-deep backlog \(String(format: "%.0f", ms)) ms")
+        XCTAssertLessThan(ms, solo * 4,
+                          "the selected workspace waited behind the fan-out "
+                          + "(\(ms) ms against a \(solo) ms floor)")
     }
 }

@@ -99,11 +99,12 @@ public final class WorktreeRecord: ObservableObject, @MainActor Identifiable {
     /// Re-read git facts. The reading itself never touches the main actor, and several
     /// callers asking at once share one — the sidebar row, the workbench's conflict check
     /// and the source-control panel used to run their own.
-    public func refresh() async {
+    public func refresh(urgency: GitFactsCache.Urgency = .background) async {
         if applyCachedFacts() { return }
         isRefreshing = true
         let fresh = await GitFactsCache.shared.facts(worktree: worktree.path,
-                                                     baseRef: effectiveBaseRef)
+                                                     baseRef: effectiveBaseRef,
+                                                     urgency: urgency)
         apply(fresh)
         isRefreshing = false
     }

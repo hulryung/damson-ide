@@ -232,7 +232,7 @@ public struct GitService: Sendable {
             else { return [] }
             relatives = out.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
         }
-        var budget = Self.untrackedReadBudget
+        var budget = ReadBudget()
         return relatives.map { path in
             let reading = Self.countLines(at: worktree.appendingPathComponent(path),
                                           budget: &budget)
@@ -242,51 +242,89 @@ public struct GitService: Sendable {
         }
     }
 
-    /// How many bytes of untracked file content one status reading will read.
+    /// What one status reading is allowed to spend reading untracked file content.
     ///
     /// There is no `git` command that counts the lines in a file git is not tracking, so
     /// the only way to put a `+N` on a brand-new file is to read it — and a checkout with
     /// a few thousand untracked files was reading *all of them, whole*, on every sidebar
-    /// refresh. The budget bounds that: everything is counted until it runs out, and what
-    /// is past it is reported as a change of unknown size rather than as zero lines.
-    static let untrackedReadBudget = 64 * 1024 * 1024
+    /// refresh. Both halves are bounded because both can be the cost: 3000 tiny files cost
+    /// as much as 100 MB of large ones, and a budget in bytes alone would not notice.
+    /// Everything is counted until the budget runs out; what is past it is reported as a
+    /// change of unknown size, never as zero lines.
+    public struct ReadBudget {
+        public var bytes: Int
+        public var files: Int
+        public init(bytes: Int = GitService.untrackedByteBudget,
+                    files: Int = GitService.untrackedFileBudget) {
+            self.bytes = bytes
+            self.files = files
+        }
+    }
+
+    /// Sized so a refresh cannot spend more here than on the git it is already running.
+    /// Measured on a warm cache this reader does about 2 MB/ms and about 12 µs a file, so
+    /// the two bounds together cap this at roughly 30 ms — under one git spawn's worth of
+    /// the time a switch used to spend, and reached only by a checkout with thousands of
+    /// untracked files, which is exactly the case that used to have no bound at all.
+    public static let untrackedByteBudget = 16 * 1024 * 1024
+    public static let untrackedFileBudget = 2000
     /// Per-file ceiling. A file this large is not something a sidebar `+N` is worth
     /// reading; it reads as uncounted, not as binary.
-    static let untrackedFileCeiling = 2 * 1024 * 1024
+    public static let untrackedFileCeiling = 2 * 1024 * 1024
 
     /// Line count of an untracked file, whether it looks binary (a NUL byte in the head,
     /// the same heuristic git uses), and whether it was counted at all.
     ///
-    /// The scan is `memchr` over the mapped bytes rather than a `Data.reduce` over every
-    /// element: the reduce was the expensive half of a refresh on a repo with real
-    /// untracked content, and it produced the identical number.
-    static func countLines(at url: URL, budget: inout Int)
+    /// `stat` and a plain `read` rather than `attributesOfItem` and `Data(contentsOf:)`:
+    /// the old pair spent most of its time building an `NSDictionary` of every attribute
+    /// of a file to read one field off it, which is what made a few thousand untracked
+    /// files expensive regardless of how big they were. The newline scan is `memchr`.
+    static func countLines(at url: URL, budget: inout ReadBudget)
         -> (lines: Int, binary: Bool, counted: Bool) {
-        guard let size = (try? FileManager.default
-            .attributesOfItem(atPath: url.path))?[.size] as? Int else {
+        let path = url.path
+        var info = stat()
+        guard path.withCString({ stat($0, &info) }) == 0, (info.st_mode & S_IFMT) == S_IFREG else {
             return (0, false, false)
         }
-        guard size <= untrackedFileCeiling, size <= budget else { return (0, false, false) }
-        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
+        let size = Int(info.st_size)
+        guard budget.files > 0, size <= untrackedFileCeiling, size <= budget.bytes else {
             return (0, false, false)
         }
-        budget -= size
-        if data.prefix(8000).contains(0) { return (0, true, true) }
-        if data.isEmpty { return (0, false, true) }
-        var newlines = 0
-        var last: UInt8 = 0
-        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
-            guard let base = raw.baseAddress else { return }
+        budget.files -= 1
+        budget.bytes -= size
+        if size == 0 { return (0, false, true) }
+
+        let fd = path.withCString { open($0, O_RDONLY) }
+        guard fd >= 0 else { return (0, false, false) }
+        defer { close(fd) }
+        var buffer = [UInt8](repeating: 0, count: size)
+        var filled = 0
+        while filled < size {
+            let got = buffer.withUnsafeMutableBytes { raw -> Int in
+                read(fd, raw.baseAddress!.advanced(by: filled), size - filled)
+            }
+            if got > 0 { filled += got; continue }
+            if got == 0 { break }
+            if errno == EINTR { continue }
+            return (0, false, false)
+        }
+        guard filled > 0 else { return (0, false, true) }
+
+        return buffer.withUnsafeBytes { raw -> (Int, Bool, Bool) in
+            let base = raw.baseAddress!
+            // git's own binary heuristic: a NUL anywhere in the first 8000 bytes.
+            if memchr(base, 0, min(8000, filled)) != nil { return (0, true, true) }
+            var newlines = 0
             var offset = 0
-            while offset < raw.count {
-                guard let hit = memchr(base + offset, 0x0A, raw.count - offset) else { break }
+            while offset < filled {
+                guard let hit = memchr(base + offset, 0x0A, filled - offset) else { break }
                 newlines += 1
                 offset = UnsafeRawPointer(hit) - base + 1
             }
-            last = raw.load(fromByteOffset: raw.count - 1, as: UInt8.self)
+            // A trailing line without a final newline still counts.
+            let last = raw.load(fromByteOffset: filled - 1, as: UInt8.self)
+            return (last == 0x0A ? newlines : newlines + 1, false, true)
         }
-        // A trailing line without a final newline still counts.
-        return (last == 0x0A ? newlines : newlines + 1, false, true)
     }
 
     // MARK: - Diff text

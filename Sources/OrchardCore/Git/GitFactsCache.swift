@@ -61,20 +61,23 @@ public final class GitFactsCache: @unchecked Sendable {
     private var stats = Stats()
     private let service: GitService
 
-    /// Bounded, and deliberately *not* the cooperative thread pool. Every reading blocks
-    /// its thread inside `poll` while git runs, and `Task.detached` blocking cooperative
-    /// threads is what turned a two-spawn conflict check into 445 ms while a sidebar
-    /// refresh was in flight: the pool is as wide as the machine has cores, and a fan-out
-    /// over every worktree fills it with blocked threads.
-    private let queue: OperationQueue
+    /// Whether a reading is the one the user is waiting for.
+    ///
+    /// The queue is bounded, and at launch every worktree in every repo asks for a reading
+    /// at once. Without an ordering, the workspace the user just selected waits behind all
+    /// of them — which is exactly the shape of a 172 ms `refreshCheckout` in a trace whose
+    /// reading takes 25 ms.
+    public enum Urgency: Sendable {
+        case foreground
+        case background
+    }
+
+    /// Bounded, ordered, and deliberately *not* the cooperative thread pool.
+    private let scheduler: ReadScheduler
 
     public init(service: GitService = GitService(), concurrency: Int = 4) {
         self.service = service
-        let queue = OperationQueue()
-        queue.name = "orchard.git-facts"
-        queue.maxConcurrentOperationCount = max(1, concurrency)
-        queue.qualityOfService = .userInitiated
-        self.queue = queue
+        self.scheduler = ReadScheduler(limit: max(1, concurrency))
     }
 
     // MARK: - Reading
@@ -102,15 +105,17 @@ public final class GitFactsCache: @unchecked Sendable {
     /// worktree was invalidated while it ran is returned to its caller — it is the newest
     /// thing anyone has — but not stored, so the next caller reads again instead of
     /// inheriting a value that was already out of date when it landed.
-    public func facts(worktree: URL, baseRef: String) async -> GitWorktreeFacts {
+    public func facts(worktree: URL, baseRef: String,
+                      urgency: Urgency = .background) async -> GitWorktreeFacts {
         if let hit = cached(worktree: worktree, baseRef: baseRef) { return hit }
-        return await reading(worktree: worktree, baseRef: baseRef).value
+        return await reading(worktree: worktree, baseRef: baseRef, urgency: urgency).value
     }
 
     /// The in-flight reading for this worktree, starting one if there is none. Synchronous
     /// so the lock is never held across a suspension — and so two callers arriving in the
     /// same turn of the run loop cannot both start a git.
-    private func reading(worktree: URL, baseRef: String) -> Task<GitWorktreeFacts, Never> {
+    private func reading(worktree: URL, baseRef: String,
+                         urgency: Urgency) -> Task<GitWorktreeFacts, Never> {
         let key = Self.key(worktree)
         lock.lock()
         defer { lock.unlock() }
@@ -122,7 +127,7 @@ public final class GitFactsCache: @unchecked Sendable {
         stats.computes += 1
         let task = Task<GitWorktreeFacts, Never> { [weak self] in
             guard let self else { return .unknown }
-            let fresh = await self.read(worktree: worktree, baseRef: baseRef)
+            let fresh = await self.read(worktree: worktree, baseRef: baseRef, urgency: urgency)
             self.store(fresh, key: key, worktree: worktree, baseRef: baseRef,
                        startedAt: generation)
             return fresh
@@ -131,10 +136,11 @@ public final class GitFactsCache: @unchecked Sendable {
         return task
     }
 
-    private func read(worktree: URL, baseRef: String) async -> GitWorktreeFacts {
+    private func read(worktree: URL, baseRef: String,
+                      urgency: Urgency) async -> GitWorktreeFacts {
         let service = self.service
         return await withCheckedContinuation { continuation in
-            queue.addOperation {
+            scheduler.submit(urgency) {
                 continuation.resume(returning: service.facts(worktree: worktree, baseRef: baseRef))
             }
         }
@@ -276,6 +282,74 @@ public final class GitFactsCache: @unchecked Sendable {
     /// naming the same directory differently must land on the same entry.
     public static func key(_ worktree: URL) -> String {
         worktree.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+}
+
+/// Runs readings a few at a time, newest selection first.
+///
+/// Every reading blocks its thread inside `poll` while git runs, so this cannot be the
+/// cooperative thread pool: that pool is as wide as the machine has cores, and a fan-out
+/// over every worktree in every repo fills it with blocked threads — which is what turned
+/// a two-spawn conflict check into 445 ms while a sidebar refresh was in flight.
+///
+/// Two queues rather than a priority number, because the ordering has to be exact: at
+/// launch, twenty background readings are already waiting when the user selects a
+/// workspace, and that selection has to be the *next* thing that runs, not the twenty-first.
+/// Work already in flight is never preempted — a git process is not interruptible — so the
+/// wait is bounded by one reading, not by the backlog.
+final class ReadScheduler: @unchecked Sendable {
+    private let lock = NSLock()
+    private var foreground: [@Sendable () -> Void] = []
+    private var background: [@Sendable () -> Void] = []
+    private var running = 0
+    private let limit: Int
+    private let queue = DispatchQueue(label: "orchard.git-facts", attributes: .concurrent)
+
+    init(limit: Int) {
+        self.limit = limit
+    }
+
+    func submit(_ urgency: GitFactsCache.Urgency, _ work: @escaping @Sendable () -> Void) {
+        lock.lock()
+        if urgency == .foreground {
+            foreground.append(work)
+        } else {
+            background.append(work)
+        }
+        lock.unlock()
+        pump()
+    }
+
+    private func pump() {
+        while true {
+            lock.lock()
+            guard running < limit else {
+                lock.unlock()
+                return
+            }
+            let next: (@Sendable () -> Void)?
+            if !foreground.isEmpty {
+                next = foreground.removeFirst()
+            } else if !background.isEmpty {
+                next = background.removeFirst()
+            } else {
+                next = nil
+            }
+            if next != nil { running += 1 }
+            lock.unlock()
+            guard let next else { return }
+            queue.async { [weak self] in
+                next()
+                self?.finish()
+            }
+        }
+    }
+
+    private func finish() {
+        lock.lock()
+        running -= 1
+        lock.unlock()
+        pump()
     }
 }
 

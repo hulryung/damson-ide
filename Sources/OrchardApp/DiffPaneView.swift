@@ -373,7 +373,8 @@ struct ProjectCheckoutDiffPane: View {
         DiffPaneView(
             worktreeURL: project.repo,
             baseRef: "HEAD",
-            branch: project.worktrees.currentBranchName ?? "",
+            // The published reading, not a fresh `git rev-parse`: this is a view body.
+            branch: project.checkoutStatus.branch == "HEAD" ? "" : project.checkoutStatus.branch,
             stat: project.checkoutStatus.stat,
             hasUncommittedChanges: project.checkoutStatus.hasUncommittedChanges,
             unpushedCommits: project.checkoutStatus.unpushedCommits,
