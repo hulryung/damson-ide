@@ -216,6 +216,14 @@ public struct GitRunner: Sendable {
         let outPipe = Pipe(), errPipe = Pipe()
         proc.standardOutput = outPipe
         proc.standardError = errPipe
+        // Reaped through the termination handler rather than `waitUntilExit()`, which is
+        // documented to poll the *current run loop*. On the app's main thread that is
+        // AppKit's run loop, and the wake is nowhere near prompt: a git call that costs
+        // ~10 ms from the headless runtime costs ~85 ms from inside the app, and the gap
+        // does not scale with how many gits are running. A semaphore signalled off the
+        // run loop costs the same everywhere.
+        let exited = DispatchSemaphore(value: 0)
+        proc.terminationHandler = { _ in exited.signal() }
         do {
             try proc.run()
         } catch {
@@ -245,7 +253,11 @@ public struct GitRunner: Sendable {
             }
             throw GitError("git \(args.joined(separator: " ")) timed out after \(Int(timeout))s")
         }
-        proc.waitUntilExit()
+        // Both pipes are at EOF, so the child has closed its descriptors and is about to
+        // be reaped; the bound is only there so a wedged handler cannot hold the caller.
+        if exited.wait(timeout: .now() + 5) == .timedOut {
+            proc.waitUntilExit()
+        }
 
         return DataOutput(status: proc.terminationStatus,
                           stdout: outData,

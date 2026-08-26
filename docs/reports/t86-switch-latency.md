@@ -29,6 +29,22 @@ between 5 and 10, read 33–41 ms and 30–35 ms against baselines of 19–22 ms
 and the whole table shifts together with load, which is why every row is reported next to
 the `status` round-trip that carries none of this work.
 
+### Against the live app
+
+The coordinator rebuilt from main and relaunched, then measured the same calls against the
+running app (three registered repos, four live panes). I re-measured the read-only half
+myself through the app's own runtime socket; the two agree.
+
+| Call | Before (live app) | After (live app) |
+|---|---|---|
+| `orchard status` (baseline) | 30 ms | 25 ms |
+| `worktree list` (three repos) | 820 ms | 108 ms (mine: 116 ms) |
+| `terminal create --worktree` | 516–1000 ms | 110 ms |
+
+Both harnesses are reported because they answer different questions. The headless bench
+isolates the work this task changed; the live app adds what the app process costs on top of
+it, and that turns out to be the whole of the remaining gap — see below.
+
 Reproduce with:
 
 ```
@@ -176,6 +192,32 @@ status.
 `swift build && swift test` (1294 tests, 2 skipped, 0 failures) and
 `scripts/e2e-headless.sh` both pass.
 
+## What is left, measured
+
+Against the live app the residual is a **fixed per-`git`-spawn cost inside the app process**,
+not the enumeration this task removed. The evidence, all median-of-nine through the app's
+runtime socket:
+
+| Call | Git spawns | Live app |
+|---|---|---|
+| `repo list`, `host list`, `terminal list`, `status` | 0 | 28–32 ms |
+| `worktree show --worktree id:<repo>::<path>` | 1 | 111 ms |
+| `worktree list --repo <one repo>` | 1 | 113 ms |
+| `worktree list` (three repos) | 3, in parallel | 116 ms |
+
+Git-free RPCs cost the round-trip baseline. Anything that touches git costs about 85 ms more,
+and that surcharge does not grow with the number of repos or spawns — one spawn and three
+parallel spawns cost the same. The same spawn costs ~10 ms from the headless runtime on the
+same machine.
+
+`Process.waitUntilExit()` is the reason: it is documented to poll *the current run loop*, and
+on the app's main thread that is AppKit's. `GitRunner` now reaps through the process's
+termination handler and a semaphore instead, which is signalled off the run loop and costs
+the same everywhere. The corroboration is blunt: the full test suite went from 227 s to 107 s
+on the same machine with no other change, XCTest being another main-thread-with-a-run-loop
+host. What that does to the live-app numbers needs a rebuild and relaunch to confirm, which
+is the coordinator's to run.
+
 ## Found but not fixed
 
 - **Live PTYs inflate every RPC.** With eight shells open, a `worktree list` that costs
@@ -191,7 +233,15 @@ status.
 
 ## Not verified here
 
-The app itself was not launched during this task (workers do not start or quit Orchard). The
-app-side changes are verified by the type system, the unit tests above, and the fact that the
-main-thread git a switch used to run is gone from the code; whether the switch *feels*
-immediate to a person is a human pass that has not happened yet.
+**The visual pass did not happen.** The app was rebuilt and relaunched by the coordinator and
+its runtime answered every measurement above, but the accessibility surface was unavailable
+for the whole of this session: `orca computer get-app-state` returned `permission_denied`
+("has visible windows but no accessibility window") for Orchard *and* for Finder, so it is
+machine-wide rather than anything about this build, and `screencapture` had no screen-recording
+grant from this shell either. Both would need a human to toggle the permission.
+
+So the specific claims that are still unwitnessed: that the "Opening…" placeholder appears
+and is replaced by the terminal rather than lingering, and that a switch *feels* immediate.
+Those are the user's original complaint and they want a person's eyes. Everything measurable
+without a window — the RPC latencies, the spawn budgets, the absence of main-thread git — is
+measured above and pinned by tests.
