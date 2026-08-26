@@ -30,7 +30,7 @@ public struct FileService: Sendable {
     public static let maxExcerptLength = 200
     public static let maxQueryBytes = 8 * 1024
 
-    private static let imageMIME: [String: String] = [
+    static let imageMIME: [String: String] = [
         "png": "image/png",
         "jpg": "image/jpeg",
         "jpeg": "image/jpeg",
@@ -99,6 +99,17 @@ public struct FileService: Sendable {
         if size > budget { throw FileServiceError.fileTooLarge }
 
         let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+        return try preview(data: data, relativePath: relativePath, maxBytes: budget)
+    }
+
+    /// Classify already-read bytes the way `preview` does. The remote file transport
+    /// (T85) must go through this so a Latin-1 file cannot become a String of U+FFFD
+    /// just because it crossed ssh as text.
+    public func preview(data: Data, relativePath: String, maxBytes: Int? = nil) throws -> FilePreview {
+        let ext = (relativePath as NSString).pathExtension.lowercased()
+        let mime = Self.imageMIME[ext]
+        let isImage = mime != nil
+        let budget = maxBytes ?? (isImage ? Self.defaultBinaryBudget : Self.defaultTextBudget)
         if data.count > budget { throw FileServiceError.fileTooLarge }
 
         if let mime {

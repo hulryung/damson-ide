@@ -284,16 +284,19 @@ shape later stages inherit:
   defaulting, the local PTY's own cwd is left alone (a remote path handed to a local
   `chdir` either fails or finds a same-named local directory), and the tab carries the
   host chip.
-- **Out of scope this wave, refused typed rather than approximated:** the file service
-  answers `remote_unsupported` for a remote workspace (its paths resolve locally, and a
-  same-named local directory answering for a remote one is worse than an error), and so
-  did any agent engine asked to run in remote files — which stage 3 below replaced with
-  a real remote launch.
+- **Out of scope this wave, refused typed rather than approximated:** the file
+  service *was* `remote_unsupported` for a remote workspace (its paths resolve
+  locally, and a same-named local directory answering for a remote one is worse
+  than an error) — T85 (wave 23) replaced that with a real remote backend for
+  listing, search, and preview/read. Open/reveal-style GUI verbs and `file diff`
+  stay refused. Agent engines asked to run in remote files were the other refusal
+  here; stage 3 below replaced that with a real remote launch.
 
 Still open for a later stage: a durable connection with a generation counter, so a
 reconnect cannot be mistaken for continuity; connection multiplexing (today each command
 is its own `ssh`, and a user who wants `ControlMaster` already has it in their config);
-and a real remote file backend.
+remote file write/watch; and a remote git-diff that matches `GitService.diff`'s
+untracked `--no-index` contract.
 
 **Stage 3 — remote agents (T39, wave 10, done).** `terminal create --worktree <remote id>
 --engine <agent>` runs the agent CLI on the far side and watches it from here. What

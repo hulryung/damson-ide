@@ -8,6 +8,12 @@ import OrchardProtocol
 /// `file-diff` returns the fork-point unified diff from `GitService` (printed by
 /// the CLI). `file-open` / `file-open-changed` post an in-process notification so
 /// the app can focus itself — they do not wait on a UI.
+///
+/// Remote workspaces (T85) are served by `RemoteFileService` for listing, search,
+/// and preview/read. Open/reveal-style verbs stay `remote_unsupported` because
+/// they mean a local GUI action; `file-diff` stays refused because matching
+/// `GitService.diff`'s untracked `--no-index` contract over ssh is not this slice
+/// and a partial diff that hides new files would be a lie.
 public final class FileCommandHandler: CommandHandler, @unchecked Sendable {
     public let verbs = [
         "file-read-dir", "file-preview", "file-stat", "file-list", "file-search",
@@ -18,15 +24,21 @@ public final class FileCommandHandler: CommandHandler, @unchecked Sendable {
     private let workspaces: WorkspaceService
     private let opens: FileOpenCenter
     private let git: GitService
+    private let hostRunner: HostCommandRunner
+    private let remoteTimeout: TimeInterval
 
     public init(files: FileService = FileService(),
                 workspaces: WorkspaceService,
                 opens: FileOpenCenter = FileOpenCenter(),
-                git: GitService = GitService()) {
+                git: GitService = GitService(),
+                hostRunner: HostCommandRunner = ProcessHostCommandRunner(),
+                remoteTimeout: TimeInterval = SSHRunner.defaultTimeout) {
         self.files = files
         self.workspaces = workspaces
         self.opens = opens
         self.git = git
+        self.hostRunner = hostRunner
+        self.remoteTimeout = remoteTimeout
     }
 
     public var openCenter: FileOpenCenter { opens }
@@ -36,6 +48,10 @@ public final class FileCommandHandler: CommandHandler, @unchecked Sendable {
             let result = try await dispatch(request)
             return .success(id: request.id, result: result)
         } catch let err as FileServiceError {
+            return .failure(id: request.id, error: RPCError(code: err.code, message: err.message))
+        } catch let err as RemoteHostError {
+            return .failure(id: request.id, error: RPCError(code: err.code, message: err.message))
+        } catch let err as HostRegistryError {
             return .failure(id: request.id, error: RPCError(code: err.code, message: err.message))
         } catch let err as WorkspaceError {
             return .failure(id: request.id, error: RPCError(code: err.code, message: err.message))
@@ -48,11 +64,20 @@ public final class FileCommandHandler: CommandHandler, @unchecked Sendable {
     }
 
     @MainActor
-    private func dispatch(_ request: RPCRequest) throws -> JSONValue {
+    private func dispatch(_ request: RPCRequest) async throws -> JSONValue {
         let params = request.params?.objectValue ?? [:]
-        switch request.method {
+        let target = try resolveTarget(params)
+        if WorkspaceService.isRemote(target.workspace) {
+            return try await dispatchRemote(request.method, params: params, target: target)
+        }
+        return try dispatchLocal(request.method, params: params, target: target)
+    }
+
+    @MainActor
+    private func dispatchLocal(_ method: String, params: [String: JSONValue],
+                               target: Target) throws -> JSONValue {
+        switch method {
         case "file-read-dir":
-            let target = try resolveTarget(params)
             let rel = try relativePath(params, root: target.root)
             let entries = try files.readDir(
                 root: target.root, relativePath: rel,
@@ -60,19 +85,16 @@ public final class FileCommandHandler: CommandHandler, @unchecked Sendable {
             return try JSONBridge.value(DirResult(entries: entries, path: rel, worktree: target.id))
 
         case "file-preview":
-            let target = try resolveTarget(params)
             let rel = try requiredRelativePath(params, root: target.root)
             let preview = try files.preview(root: target.root, relativePath: rel,
                                             maxBytes: params.int("maxBytes") ?? params.int("max-bytes"))
             return try JSONBridge.value(preview)
 
         case "file-stat":
-            let target = try resolveTarget(params)
             let rel = try relativePath(params, root: target.root)
             return try JSONBridge.value(files.stat(root: target.root, relativePath: rel))
 
         case "file-list":
-            let target = try resolveTarget(params)
             let result = try files.list(
                 root: target.root,
                 query: params.str("query") ?? params.str("filter"),
@@ -81,26 +103,17 @@ public final class FileCommandHandler: CommandHandler, @unchecked Sendable {
             return try JSONBridge.value(result)
 
         case "file-search":
-            let target = try resolveTarget(params)
             guard let query = params.str("query"), !query.isEmpty else {
                 throw FileServiceError.invalidArgument("file-search requires query")
             }
-            let options = FileContentSearchOptions(
-                include: globs(params, "include"),
-                exclude: globs(params, "exclude"),
-                caseSensitive: params.flag("caseSensitive") || params.flag("case-sensitive"),
-                showDotfiles: params.flag("showDotfiles") || params.flag("show-dotfiles"),
-                limit: params.int("limit") ?? FileService.defaultContentSearchLimit,
-                perFileLimit: params.int("perFileLimit") ?? params.int("per-file-limit")
-                    ?? FileService.defaultPerFileMatchLimit)
-            let result = try files.contentSearch(root: target.root, query: query, options: options)
+            let result = try files.contentSearch(root: target.root, query: query,
+                                                 options: searchOptions(params))
             return try JSONBridge.value(result)
 
         case "file-open":
-            return try JSONBridge.value(openFile(params, mode: .edit))
+            return try JSONBridge.value(openFile(params, target: target, mode: .edit))
 
         case "file-diff":
-            let target = try resolveTarget(params)
             let rel = try requiredRelativePath(params, root: target.root)
             _ = try files.resolve(root: target.root, relativePath: rel)
             let baseRef = target.workspace.baseRef.isEmpty ? "HEAD" : target.workspace.baseRef
@@ -109,16 +122,104 @@ public final class FileCommandHandler: CommandHandler, @unchecked Sendable {
                 worktree: target.id, path: rel, diff: diff, baseRef: baseRef))
 
         case "file-open-changed":
-            return try JSONBridge.value(openChanged(params))
+            return try JSONBridge.value(openChanged(params, target: target))
 
         default:
-            throw FileServiceError.invalidArgument("unrouted verb '\(request.method)'")
+            throw FileServiceError.invalidArgument("unrouted verb '\(method)'")
         }
     }
 
     @MainActor
-    private func openFile(_ params: [String: JSONValue], mode: FileOpenRequest.Mode) throws -> FileOpenResult {
-        let target = try resolveTarget(params)
+    private func dispatchRemote(_ method: String, params: [String: JSONValue],
+                                target: Target) async throws -> JSONValue {
+        switch method {
+        case "file-open":
+            throw Self.remoteGUIRefusal(target, action: "file open")
+        case "file-open-changed":
+            throw Self.remoteGUIRefusal(target, action: "file open-changed")
+        case "file-diff":
+            throw FileServiceError(
+                "remote_unsupported",
+                "\(target.id) lives on \(target.workspace.hostId); file diff still runs a "
+                    + "local git against the path, which would read the wrong machine. A "
+                    + "remote git-diff that matched GitService.diff (including untracked "
+                    + "--no-index) is not this slice — refusing beats a partial diff that "
+                    + "hides new files.")
+        default:
+            break
+        }
+
+        let remote = try remoteService(target)
+        let rel = try remoteRelativePath(params, root: target.workspace.path)
+        switch method {
+        case "file-read-dir":
+            let entries = try await remote.readDir(
+                relativePath: rel,
+                showDotfiles: params.flag("showDotfiles") || params.flag("show-dotfiles"))
+            return try JSONBridge.value(DirResult(entries: entries, path: rel, worktree: target.id))
+
+        case "file-preview":
+            if rel.isEmpty { throw FileServiceError.invalidArgument("missing file path") }
+            let preview = try await remote.preview(
+                relativePath: rel,
+                maxBytes: params.int("maxBytes") ?? params.int("max-bytes"))
+            return try JSONBridge.value(preview)
+
+        case "file-stat":
+            return try JSONBridge.value(try await remote.stat(relativePath: rel))
+
+        case "file-list":
+            let result = try await remote.list(
+                query: params.str("query") ?? params.str("filter"),
+                showDotfiles: params.flag("showDotfiles") || params.flag("show-dotfiles"),
+                limit: params.int("limit") ?? FileService.defaultListLimit)
+            return try JSONBridge.value(result)
+
+        case "file-search":
+            guard let query = params.str("query"), !query.isEmpty else {
+                throw FileServiceError.invalidArgument("file-search requires query")
+            }
+            let result = try await remote.contentSearch(query: query, options: searchOptions(params))
+            return try JSONBridge.value(result)
+
+        default:
+            throw FileServiceError.invalidArgument("unrouted verb '\(method)'")
+        }
+    }
+
+    @MainActor
+    private func remoteService(_ target: Target) throws -> RemoteFileService {
+        guard let hostId = ExecutionHostId(rawValue: target.workspace.hostId), !hostId.isLocal else {
+            throw FileServiceError(
+                "remote_unsupported",
+                "\(target.id) has an unusable execution host '\(target.workspace.hostId)'")
+        }
+        let host = try workspaces.hosts.require(host: hostId)
+        let runner = SSHRunner(host: host, runner: hostRunner, timeout: remoteTimeout)
+        return try RemoteFileService(runner: runner, root: target.workspace.path, files: files)
+    }
+
+    static func remoteGUIRefusal(_ target: Target, action: String) -> FileServiceError {
+        FileServiceError(
+            "remote_unsupported",
+            "\(target.id) lives on \(target.workspace.hostId); \(action) is a local GUI "
+                + "action and cannot target a remote workspace")
+    }
+
+    private func searchOptions(_ params: [String: JSONValue]) -> FileContentSearchOptions {
+        FileContentSearchOptions(
+            include: globs(params, "include"),
+            exclude: globs(params, "exclude"),
+            caseSensitive: params.flag("caseSensitive") || params.flag("case-sensitive"),
+            showDotfiles: params.flag("showDotfiles") || params.flag("show-dotfiles"),
+            limit: params.int("limit") ?? FileService.defaultContentSearchLimit,
+            perFileLimit: params.int("perFileLimit") ?? params.int("per-file-limit")
+                ?? FileService.defaultPerFileMatchLimit)
+    }
+
+    @MainActor
+    private func openFile(_ params: [String: JSONValue], target: Target,
+                          mode: FileOpenRequest.Mode) throws -> FileOpenResult {
         let rel = try requiredRelativePath(params, root: target.root)
         let url = try files.resolve(root: target.root, relativePath: rel)
         let values = try url.resourceValues(forKeys: [.isDirectoryKey])
@@ -133,8 +234,8 @@ public final class FileCommandHandler: CommandHandler, @unchecked Sendable {
     }
 
     @MainActor
-    private func openChanged(_ params: [String: JSONValue]) throws -> FileOpenChangedResult {
-        let target = try resolveTarget(params)
+    private func openChanged(_ params: [String: JSONValue],
+                             target: Target) throws -> FileOpenChangedResult {
         let modeRaw = (params.str("mode") ?? "diff").lowercased()
         guard modeRaw == "edit" || modeRaw == "diff" || modeRaw == "both" else {
             throw FileServiceError.invalidArgument("invalid --mode. Use edit, diff, or both.")
@@ -169,7 +270,7 @@ public final class FileCommandHandler: CommandHandler, @unchecked Sendable {
                                      totalChanged: status.stat.fileCount)
     }
 
-    private struct Target {
+    struct Target {
         var workspace: Workspace
         var id: String { workspace.id }
         var root: URL { URL(fileURLWithPath: workspace.path) }
@@ -179,25 +280,17 @@ public final class FileCommandHandler: CommandHandler, @unchecked Sendable {
     private func resolveTarget(_ params: [String: JSONValue]) throws -> Target {
         if let selector = params.str("worktree") ?? params.str("selector") ?? params.str("id"),
            !selector.isEmpty {
-            return try local(Target(
-                workspace: try workspaces.show(selector: selector, cwd: params.str("cwd"))))
+            return Target(workspace: try workspaces.show(selector: selector, cwd: params.str("cwd")))
         }
         if let cwd = params.str("cwd"), !cwd.isEmpty {
-            return try local(Target(workspace: try workspaces.current(cwd: cwd)))
+            return Target(workspace: try workspaces.current(cwd: cwd))
         }
         throw FileServiceError.invalidArgument("missing worktree selector")
     }
 
-    /// Every read in this service resolves a path against the local filesystem. A
-    /// remote workspace's path names files on another machine, so serving it here would
-    /// either fail confusingly or — the real hazard — find a same-named local directory
-    /// and quietly answer with the wrong repo's files. A remote backend is stage 2+ work
-    /// (docs/design/remote-hosts.md §6); until then the refusal is typed.
-    private func local(_ target: Target) throws -> Target {
-        guard WorkspaceService.isRemote(target.workspace) else { return target }
-        throw FileServiceError("remote_unsupported",
-                               "\(target.id) lives on \(target.workspace.hostId); "
-                                   + "the file service cannot read remote workspaces yet")
+    private func remoteRelativePath(_ params: [String: JSONValue], root: String) throws -> String {
+        let raw = params.str("path") ?? params.str("relativePath") ?? params.str("relative-path") ?? ""
+        return try RemoteFilePath.relativePath(from: raw, root: root)
     }
 
     private func relativePath(_ params: [String: JSONValue], root: URL) throws -> String {

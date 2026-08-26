@@ -112,7 +112,8 @@ final class RemoteWorktreeTests: XCTestCase {
         registry.register(WorkspaceCommandHandler(service: service))
         registry.register(TerminalCommandHandler(service: terminals, workspaces: service,
                                                  hosts: hosts, hostRunner: runner))
-        registry.register(FileCommandHandler(workspaces: service))
+        registry.register(FileCommandHandler(workspaces: service, hostRunner: runner,
+                                             remoteTimeout: 1))
         registry.register(ConflictsCommandHandler(workspaces: service))
         server = InMemoryRuntimeServer(registry: registry, runtimeId: "rt_remote")
     }
@@ -437,14 +438,42 @@ final class RemoteWorktreeTests: XCTestCase {
 
     // MARK: - Files
 
-    func testFileServiceRefusesARemoteWorkspace() async throws {
+    func testFileReadDirOnARemoteWorkspaceUsesTheTransport() async throws {
         let repo = try await addRemoteRepo()
         _ = await call("worktree-list", ["repo": .string(repo.id)])
+        runner.on("ORCHARD_FILE_OP=read-dir", stdout("""
+            ORCHARD-FILE/1
+            ok
+            none
+            ENTRY\td\t\(Data("src".utf8).base64EncodedString())
+            ENTRY\tf\t\(Data("README.md".utf8).base64EncodedString())
+            """))
         let read = await call("file-read-dir", [
             "worktree": .string("\(repo.id)::/home/ci/Orchard/worktrees/orchard/apricot")])
-        XCTAssertEqual(read.error?.code, "remote_unsupported")
-        XCTAssertTrue(read.error?.message.contains("ssh:build") ?? false,
-                      read.error?.message ?? "")
+        XCTAssertTrue(read.ok, String(describing: read.error))
+        let names = read.result?.objectValue?["entries"]?.arrayValue?
+            .compactMap { $0.objectValue?["name"]?.stringValue } ?? []
+        XCTAssertEqual(names, ["src", "README.md"])
+        XCTAssertTrue(runner.ran("ORCHARD_FILE_OP=read-dir"))
+    }
+
+    func testFileOpenAndDiffOnARemoteWorkspaceStayRefused() async throws {
+        let repo = try await addRemoteRepo()
+        _ = await call("worktree-list", ["repo": .string(repo.id)])
+        let worktree = "\(repo.id)::/home/ci/Orchard/worktrees/orchard/apricot"
+        let opened = await call("file-open", [
+            "worktree": .string(worktree), "path": .string("README.md")])
+        XCTAssertEqual(opened.error?.code, "remote_unsupported")
+        XCTAssertTrue(opened.error?.message.contains("local GUI") ?? false,
+                      opened.error?.message ?? "")
+        XCTAssertFalse(runner.ran("ORCHARD_FILE_OP="),
+                       "open must not ssh")
+
+        let diff = await call("file-diff", [
+            "worktree": .string(worktree), "path": .string("README.md")])
+        XCTAssertEqual(diff.error?.code, "remote_unsupported")
+        XCTAssertTrue(diff.error?.message.contains("local git") ?? false,
+                      diff.error?.message ?? "")
     }
 
     func testConflictsRefuseARemoteWorkspace() async throws {

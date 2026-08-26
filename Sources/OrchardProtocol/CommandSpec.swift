@@ -335,7 +335,12 @@ public enum OrchardCommands {
                 flag("include", "Content-search include glob (e.g. *.swift)", "glob"),
                 flag("exclude", "Content-search exclude glob", "glob"),
                 flag("limit", "Maximum content-search matches", "n"),
-            ], positionals: ["open|diff|open-changed|search", "path|query"]),
+            ], positionals: ["open|diff|open-changed|search|preview", "path|query"],
+               notes: [
+                "On a remote workspace, preview/search/list/stat/read-dir run over ssh with the same byte-fidelity rules as local preview (non-UTF-8 is typed not_utf8 / nul_bytes, never U+FFFD).",
+                "file open, open-changed, and reveal-style GUI actions stay remote_unsupported: they mean a local GUI action.",
+                "file diff stays remote_unsupported: a local git diff would read the wrong machine.",
+               ]),
             CommandSpec(
                 name: "conflicts",
                 summary: "List, inspect, and resolve git merge conflicts in a worktree",
