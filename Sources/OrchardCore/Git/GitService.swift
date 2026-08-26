@@ -114,85 +114,63 @@ public struct GitService: Sendable {
     // MARK: - Status
 
     /// Full status of `worktree` relative to `baseRef` (the commit it forked from).
+    ///
+    /// Three `git` spawns, down from eight. `status --porcelain=v2 --branch` carries the
+    /// branch, the upstream, the ahead/behind counts and the untracked list that five
+    /// separate spawns used to fetch; `diff --raw --numstat` carries change kind and line
+    /// counts in one walk; `log --format=%s` carries both how many commits are ahead of
+    /// the fork point and the newest subject. Nothing here is cached — the cost is now low
+    /// enough that a cache would only buy the chance to show a stale branch.
     public func status(worktree: URL, baseRef: String) -> GitWorktreeStatus {
-        let branch = git.line(in: worktree, ["rev-parse", "--abbrev-ref", "HEAD"]) ?? ""
-        let stat = diffStat(worktree: worktree, baseRef: baseRef)
+        let porcelain = GitStatusPorcelainV2.parse(
+            git.query(in: worktree, GitStatusPorcelainV2.arguments) ?? "")
+        let stat = diffStat(worktree: worktree, baseRef: baseRef, untracked: porcelain.untracked)
+        let subjects = commitSubjects(worktree: worktree, baseRef: baseRef)
 
-        let ahead = git.line(in: worktree, ["rev-list", "--count", "\(baseRef)..HEAD"])
-            .flatMap(Int.init) ?? 0
-        let dirty = !(git.query(in: worktree, ["status", "--porcelain"]) ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let subject = ahead > 0
-            ? git.line(in: worktree, ["log", "-1", "--pretty=%s"])
-            : nil
         // No upstream is the normal case for a fresh agent branch — `nil` means
         // "nothing to push to", which the delete preflight treats differently from "0 unpushed".
-        let unpushed = git.line(in: worktree, ["rev-parse", "--abbrev-ref", "@{upstream}"]) != nil
-            ? git.line(in: worktree, ["rev-list", "--count", "@{upstream}..HEAD"]).flatMap(Int.init)
-            : nil
+        let unpushed = porcelain.upstream == nil ? nil : porcelain.ahead
 
         return GitWorktreeStatus(
-            branch: branch, stat: stat, commitsAhead: ahead,
-            hasUncommittedChanges: dirty, lastCommitSubject: subject, unpushedCommits: unpushed)
+            branch: porcelain.branch, stat: stat, commitsAhead: subjects.count,
+            hasUncommittedChanges: porcelain.hasChanges,
+            lastCommitSubject: subjects.first, unpushedCommits: unpushed)
+    }
+
+    /// Commit subjects on HEAD but not on `baseRef`, newest first. The count is
+    /// `commitsAhead` and the first element is `lastCommitSubject`, so one walk answers
+    /// both — `rev-list --count` plus `log -1` were two spawns over the same commits.
+    private func commitSubjects(worktree: URL, baseRef: String) -> [String] {
+        guard let out = git.query(in: worktree, ["log", "-z", "--format=%s", "\(baseRef)..HEAD"])
+        else { return [] }
+        return out.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
     }
 
     /// Changed files + line counts vs `baseRef`, including files the agent created but
     /// never added to the index (which `git diff` alone would miss entirely).
     ///
-    /// Rename detection is deliberately off: with `-M`, `--numstat -z` emits a three-field
-    /// record that complicates parsing for a cosmetic gain. A rename reads as delete+add in
-    /// the file list; the rendered diff still shows it as git sees it.
-    public func diffStat(worktree: URL, baseRef: String) -> GitDiffStat {
+    /// Rename detection is deliberately off (see `GitRawNumstat.arguments`): a rename
+    /// reads as delete+add in the file list, and the rendered diff still shows it as git
+    /// sees it.
+    ///
+    /// `untracked` lets a caller that already ran `status --porcelain=v2 -uall` hand the
+    /// untracked list straight in instead of paying a second spawn for it.
+    public func diffStat(worktree: URL, baseRef: String, untracked: [String]? = nil) -> GitDiffStat {
         var files: [GitFileChange] = []
-
-        let kinds = nameStatus(worktree: worktree, baseRef: baseRef)
-        for (path, added, deleted, binary) in numstat(worktree: worktree, baseRef: baseRef) {
-            files.append(GitFileChange(path: path, kind: kinds[path] ?? .modified,
-                                       added: added, deleted: deleted, isBinary: binary))
+        for entry in GitRawNumstat.parse(
+            git.query(in: worktree, GitRawNumstat.arguments(baseRef: baseRef)) ?? "")
+        {
+            files.append(GitFileChange(
+                path: entry.path,
+                // git can suffix a similarity score (`R100`); only the letter is meaningful.
+                kind: entry.statusLetter.flatMap(\.first).map { Self.kind(forStatusLetter: String($0)) }
+                    ?? .modified,
+                added: entry.added, deleted: entry.deleted, isBinary: entry.isBinary))
         }
-        files.append(contentsOf: untrackedChanges(worktree: worktree))
+        files.append(contentsOf: untrackedChanges(worktree: worktree, paths: untracked))
 
         files.sort { $0.path < $1.path }
         return GitDiffStat(files: files)
-    }
-
-    /// `added deleted path` triples from `git diff --numstat`. A binary file reports `-`
-    /// for both counts.
-    private func numstat(worktree: URL, baseRef: String) -> [(String, Int, Int, Bool)] {
-        guard let out = git.query(in: worktree, ["diff", "--numstat", "-z", baseRef, "--"]) else {
-            return []
-        }
-        var result: [(String, Int, Int, Bool)] = []
-        // `-z` makes each record `added\tdeleted\tpath` terminated by NUL (no rename records,
-        // since -M is off), which keeps paths with spaces/newlines intact.
-        for record in out.split(separator: "\0", omittingEmptySubsequences: true) {
-            let parts = record.split(separator: "\t", maxSplits: 2, omittingEmptySubsequences: false)
-            guard parts.count == 3 else { continue }
-            let isBinary = parts[0] == "-" || parts[1] == "-"
-            result.append((String(parts[2]),
-                           Int(parts[0]) ?? 0,
-                           Int(parts[1]) ?? 0,
-                           isBinary))
-        }
-        return result
-    }
-
-    /// path → change kind, from `git diff --name-status`.
-    private func nameStatus(worktree: URL, baseRef: String) -> [String: GitFileChange.Kind] {
-        guard let out = git.query(in: worktree, ["diff", "--name-status", "-z", baseRef, "--"]) else {
-            return [:]
-        }
-        // `-z` alternates status and path fields: "M\0path\0A\0path\0…".
-        let fields = out.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
-        var kinds: [String: GitFileChange.Kind] = [:]
-        var i = 0
-        while i + 1 < fields.count {
-            let code = fields[i].first.map(String.init) ?? "M"
-            let path = fields[i + 1]
-            kinds[path] = Self.kind(forStatusLetter: code)
-            i += 2
-        }
-        return kinds
     }
 
     private static func kind(forStatusLetter code: String) -> GitFileChange.Kind {
@@ -208,11 +186,20 @@ public struct GitService: Sendable {
     /// Files the agent created that git isn't tracking yet. `git diff` never reports these,
     /// but to a reviewer they are the most interesting changes of all, so they're counted as
     /// wholly-added files.
-    private func untrackedChanges(worktree: URL) -> [GitFileChange] {
-        guard let out = git.query(in: worktree, ["ls-files", "--others", "--exclude-standard", "-z"])
-        else { return [] }
-        return out.split(separator: "\0", omittingEmptySubsequences: true).map { rel in
-            let path = String(rel)
+    ///
+    /// `paths` short-circuits the `ls-files` spawn when the caller already has the list
+    /// from `status --porcelain=v2 -uall`, which reports exactly the same set.
+    private func untrackedChanges(worktree: URL, paths: [String]? = nil) -> [GitFileChange] {
+        let relatives: [String]
+        if let paths {
+            relatives = paths
+        } else {
+            guard let out = git.query(in: worktree,
+                                      ["ls-files", "--others", "--exclude-standard", "-z"])
+            else { return [] }
+            relatives = out.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
+        }
+        return relatives.map { path in
             let (lines, binary) = Self.countLines(at: worktree.appendingPathComponent(path))
             return GitFileChange(path: path, kind: .untracked, added: lines, deleted: 0, isBinary: binary)
         }

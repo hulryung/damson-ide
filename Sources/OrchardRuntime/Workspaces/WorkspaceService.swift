@@ -186,6 +186,10 @@ public final class WorkspaceService {
         } else {
             repos = data.repos
         }
+        // Every local git repo's `git worktree list --porcelain` up front, in parallel.
+        // Serial-per-repo was half the cost of a listing; the other half was asking git
+        // for branch and HEAD one worktree at a time, which this read already answers.
+        let facts = gitFactsByRepo(repos)
         var out: [Workspace] = []
         for repo in repos {
             // A remote repo's worktrees are the last-known set, never a live local git
@@ -197,12 +201,30 @@ public final class WorkspaceService {
             }
             switch repo.kind {
             case .git:
-                out.append(contentsOf: try gitWorkspaces(for: repo, data: data))
+                out.append(contentsOf: try gitWorkspaces(for: repo, data: data,
+                                                         facts: facts[repo.id] ?? [:]))
             case .folder:
                 out.append(contentsOf: folderWorkspaces(for: repo, data: data))
             }
         }
         return out.sorted { $0.lastActivityAt > $1.lastActivityAt }
+    }
+
+    /// One porcelain read per local git repo, all repos concurrently, keyed by repo id.
+    ///
+    /// The `WorktreeService` for each repo is resolved first and on the main actor —
+    /// that is where a cold repo pays its one-time `start()` — so the parallel part is
+    /// purely the `git` spawns, which touch nothing shared.
+    private func gitFactsByRepo(_ repos: [RepoRecord]) -> [String: [String: WorktreeGitFacts]] {
+        var ids: [String] = []
+        var roots: [URL] = []
+        for repo in repos where !Self.isRemote(repo) && repo.kind == .git {
+            guard let service = try? gitService(for: repo), service.isGitRepository else { continue }
+            ids.append(repo.id)
+            roots.append(service.baseRepo)
+        }
+        let read = WorktreeFactsReader.facts(forRepos: roots)
+        return Dictionary(uniqueKeysWithValues: zip(ids, read))
     }
 
     public func show(selector: String, cwd: String? = nil) throws -> Workspace {
@@ -479,6 +501,17 @@ public final class WorkspaceService {
         }
 
         let body = Self.stripPrefix(trimmed, "id:")
+
+        // An `id:<repoId>::<path>` selector already names its repo and its path. Resolving
+        // it by enumerating every repo was the single most expensive thing a workspace
+        // switch did — the pane needed one workspace and paid for all of them. This
+        // answers it from the named repo alone, and falls through to the full listing only
+        // when the direct read cannot find it.
+        if let identity = WorktreeIdentity.parse(body),
+           let direct = try? workspace(identity: identity) {
+            return direct
+        }
+
         let all = try listWorkspaces()
 
         if WorktreeIdentity.parse(body) != nil,
@@ -525,6 +558,49 @@ public final class WorkspaceService {
         }
 
         throw WorkspaceError("unknown_worktree", "no worktree matching '\(selector)'")
+    }
+
+    /// One workspace, read from the repo its id names — no enumeration of any other repo,
+    /// and for a git repo exactly one `git worktree list --porcelain`.
+    ///
+    /// Throws `unknown_worktree` when the id does not name something this repo holds, so
+    /// the caller can fall back to the full listing rather than treating a miss as fatal.
+    private func workspace(identity: WorktreeIdentity) throws -> Workspace {
+        guard let repo = repo(id: identity.repoId) else {
+            throw WorkspaceError("unknown_worktree", "no repo '\(identity.repoId)'")
+        }
+        let data = store.load()
+        let raw = WorktreeIdentity.make(repoId: repo.id, path: identity.path)
+
+        if Self.isRemote(repo) {
+            guard let match = storedRemoteWorkspaces(for: repo, data: data).first(where: { $0.id == raw })
+            else { throw WorkspaceError("unknown_worktree", "no worktree matching '\(raw)'") }
+            return match
+        }
+        if repo.kind == .folder {
+            guard let match = folderWorkspaces(for: repo, data: data).first(where: { $0.id == raw })
+            else { throw WorkspaceError("unknown_worktree", "no worktree matching '\(raw)'") }
+            return match
+        }
+
+        // A folder workspace can also live inside a git repo (the peer projection).
+        if let folder = folderWorkspaces(for: repo, data: data).first(where: { $0.id == raw }) {
+            return folder
+        }
+
+        let service = try gitService(for: repo)
+        let facts = WorktreeFactsReader.facts(forRepo: service.baseRepo)
+        let wanted = WorktreeFactsReader.key(identity.path)
+        if wanted == WorktreeFactsReader.key(repo.path) {
+            return try primaryGitWorkspace(for: repo, service: service, data: data, facts: facts)
+        }
+        guard let record = service.worktrees.first(where: {
+            WorktreeFactsReader.key($0.worktree.path) == wanted
+        }) else {
+            throw WorkspaceError("unknown_worktree", "no worktree matching '\(raw)'")
+        }
+        return gitWorkspace(record: record, repo: repo, data: data,
+                            head: facts[wanted]?.head ?? "")
     }
 
     // MARK: - Git create
@@ -692,49 +768,57 @@ public final class WorkspaceService {
 
     // MARK: - Projection
 
-    private func gitWorkspaces(for repo: RepoRecord, data: OrchardData) throws -> [Workspace] {
+    private func gitWorkspaces(for repo: RepoRecord, data: OrchardData,
+                               facts: [String: WorktreeGitFacts]) throws -> [Workspace] {
         let service = try gitService(for: repo)
-        let primary = try primaryGitWorkspace(for: repo, service: service, data: data)
+        let primary = try primaryGitWorkspace(for: repo, service: service, data: data, facts: facts)
         let primaryPath = URL(fileURLWithPath: primary.path).standardizedFileURL.path
         let extra = service.worktrees.compactMap { record -> Workspace? in
             let path = record.worktree.path.standardizedFileURL.path
             if path == primaryPath { return nil }
-            let id = record.worktree.workspaceId(repoId: repo.id)
-            var meta = data.worktreeMeta[id] ?? .defaults(for: record.worktree)
-            // Path reuse: git-config UUID is the instance. Stale meta (different
-            // instanceId) is ignored so lineage/display from the previous occupant
-            // cannot attach to the new one.
-            if meta.instanceId.caseInsensitiveCompare(record.worktree.id.uuidString) != .orderedSame {
-                meta = .defaults(for: record.worktree)
-            }
-            record.meta = meta
-            var lineage = data.worktreeLineageById[id]
-            if let existing = lineage, existing.isStale(currentInstanceId: record.worktree.id.uuidString) {
-                lineage = nil
-            }
-            let head = service.manager.headCommit(record.worktree)
-            return Workspace.from(worktree: record.worktree, repo: repo,
-                                  meta: meta, head: head, lineage: lineage)
+            return gitWorkspace(record: record, repo: repo, data: data,
+                                head: facts[WorktreeFactsReader.key(record.worktree.path)]?.head ?? "")
         }
         return [primary] + extra
     }
 
+    /// Project one restored worktree. `head` comes from the repo's single porcelain read;
+    /// it used to be a `rev-parse HEAD` spawn of its own, per worktree, per listing.
+    private func gitWorkspace(record: WorktreeRecord, repo: RepoRecord,
+                              data: OrchardData, head: String) -> Workspace {
+        let id = record.worktree.workspaceId(repoId: repo.id)
+        var meta = data.worktreeMeta[id] ?? .defaults(for: record.worktree)
+        // Path reuse: git-config UUID is the instance. Stale meta (different
+        // instanceId) is ignored so lineage/display from the previous occupant
+        // cannot attach to the new one.
+        if meta.instanceId.caseInsensitiveCompare(record.worktree.id.uuidString) != .orderedSame {
+            meta = .defaults(for: record.worktree)
+        }
+        record.meta = meta
+        var lineage = data.worktreeLineageById[id]
+        if let existing = lineage, existing.isStale(currentInstanceId: record.worktree.id.uuidString) {
+            lineage = nil
+        }
+        return Workspace.from(worktree: record.worktree, repo: repo,
+                              meta: meta, head: head, lineage: lineage)
+    }
+
     private func primaryGitWorkspace(for repo: RepoRecord, service: WorktreeService,
-                                     data: OrchardData) throws -> Workspace {
+                                     data: OrchardData,
+                                     facts: [String: WorktreeGitFacts]) throws -> Workspace {
         let meta = try ensurePrimaryGitMeta(for: repo, existing: data.worktreeMeta)
-        let path = URL(fileURLWithPath: repo.path)
-        let branch = service.currentBranchName ?? ""
-        let probe = Worktree(id: UUID(uuidString: meta.instanceId) ?? UUID(),
-                             baseRepo: path, path: path, branch: branch,
-                             baseRef: repo.baseRef, title: meta.displayName)
-        let head = service.manager.headCommit(probe)
+        let path = URL(fileURLWithPath: repo.path).standardizedFileURL.path
+        // Branch and head both come from the porcelain read. A detached primary checkout
+        // reports an empty branch, which is what `currentBranch` returned for it too.
+        let fact = facts[WorktreeFactsReader.key(path)]
         let id = primaryWorkspaceId(for: repo)
         var lineage = data.worktreeLineageById[id]
         if let existing = lineage, existing.isStale(currentInstanceId: meta.instanceId) {
             lineage = nil
         }
         return Workspace.fromPrimaryCheckout(repo: repo, meta: meta,
-                                             branch: branch, head: head, lineage: lineage)
+                                             branch: fact?.branch ?? "", head: fact?.head ?? "",
+                                             lineage: lineage)
     }
 
     private func folderWorkspaces(for repo: RepoRecord, data: OrchardData) -> [Workspace] {

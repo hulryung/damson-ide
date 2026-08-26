@@ -399,7 +399,7 @@ struct TerminalPane: View {
                 tabID: tab.id, floatingTabID: store.floatingTerminal?.tabID)
             {
                 floatedPlaceholder
-            } else if let session = store.damsonSession(for: tab, key: key, cwd: cwd) {
+            } else if let session = store.existingDamsonSession(for: tab) {
                 ZStack(alignment: .top) {
                     // The PTY stays in the tree so chat is an overlay, never a
                     // second session. Keyboard focus leaves it while chat is up.
@@ -431,14 +431,25 @@ struct TerminalPane: View {
                     ConnectionEndedBanner(tab: tab, note: note)
                     Spacer(minLength: 0)
                 }
-            } else {
+            } else if store.panesSettled.contains(tab.id) {
                 PlaceholderPane(
                     symbol: "terminal", title: "No session",
                     detail: store.paneUnavailableDetail(for: tab, key: key))
+            } else {
+                // The pane is on screen before its PTY exists — that is the point. Saying
+                // "No session" here would report a refusal that has not happened yet.
+                PlaceholderPane(
+                    symbol: "terminal", title: "Opening…",
+                    detail: "Starting this pane's session.")
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear { store.prepareChat(for: tab) }
+        // Materialization runs here rather than in `body`: spawning a PTY while SwiftUI
+        // is computing the view is what made a workspace switch stall the window.
+        .task(id: tab.id) {
+            await store.prepareDamsonSession(for: tab, key: key, cwd: cwd)
+        }
     }
 
     private var floatedPlaceholder: some View {

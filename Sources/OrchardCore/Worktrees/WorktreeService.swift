@@ -158,9 +158,17 @@ public final class WorktreeService {
 
     /// Working-tree status of the primary checkout, measured against its own HEAD — what the
     /// user has changed by hand, as opposed to what an agent changed in a worktree.
-    public func primaryCheckoutStatus() -> GitWorktreeStatus {
+    ///
+    /// `async` and detached, like `WorktreeRecord.refresh()`: this shells out to git, and
+    /// this type lives on the main actor, so a synchronous spelling could only ever be a
+    /// main-thread git read — which is precisely what made selecting a project root stall
+    /// the workbench.
+    public func primaryCheckoutStatus() async -> GitWorktreeStatus {
         guard isGitRepository else { return .unknown }
-        return GitService().status(worktree: baseRepo, baseRef: "HEAD")
+        let repo = baseRepo
+        return await Task.detached(priority: .utility) {
+            GitService().status(worktree: repo, baseRef: "HEAD")
+        }.value
     }
 
     // MARK: - Create

@@ -679,9 +679,18 @@ public final class WorktreeManager {
 
     /// List worktree paths currently registered for `base`.
     public func list(base: URL) throws -> [String] {
-        let out = try git.run(["-C", base.path, "worktree", "list", "--porcelain"])
-        return out.split(separator: "\n").compactMap { line in
-            line.hasPrefix("worktree ") ? String(line.dropFirst("worktree ".count)) : nil
-        }
+        try porcelain(base: base).map(\.path)
+    }
+
+    /// Everything `git worktree list --porcelain` knows about `base` in one spawn: the
+    /// primary checkout and every linked worktree, each with the commit it has checked
+    /// out and the branch it is on.
+    ///
+    /// This is the collapse that made a workspace switch cheap. Projecting a repo used to
+    /// cost `rev-parse --abbrev-ref HEAD` and `rev-parse HEAD` on the primary checkout plus
+    /// one `rev-parse HEAD` per worktree — 2 + N spawns for facts git already prints
+    /// together here.
+    public func porcelain(base: URL) throws -> [WorktreePorcelainEntry] {
+        WorktreePorcelain.parse(try git.run(["-C", base.path, "worktree", "list", "--porcelain"]))
     }
 }
