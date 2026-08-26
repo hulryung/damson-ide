@@ -1359,6 +1359,43 @@ Sources/OrchardApp/AppStore.swift pane materialization, matching tests,
 docs/reports/t86-switch-latency.md. Does not touch Files/**, Conflicts/**,
 Automations/**, or the remote transports.
 
+### Wave 25 (T87) — switching is still not instant
+
+The user, after T86: "still a bit slow — cc-rate-widget to CAN-debugger-hw". The
+coordinator instrumented the live app (`ORCHARD_TRACE_SWITCH=1`, committed) and
+measured. What T86 fixed stayed fixed — pane materialization 0.0 ms, explorer reload
+0.3 ms — and what is left is git work per switch:
+
+| Phase (live app, CAN-debugger-hw = 3353 files / 498 MB) | Cost |
+|---|---|
+| `refreshConflicts` (runs on every workspace key change) | **445 ms** |
+| `refreshCheckout` → `GitService.status` (3 spawns) | **209 ms** |
+| the same three git commands run raw from a shell | 39 + 36 + 28 = ~103 ms |
+| one `git` spawn, any command, this machine | **~30 ms** |
+
+So the floor is the spawn: a switch runs several git commands and each costs ~30 ms
+before git does any work, and the app pays roughly double what the raw commands cost.
+CAN-debugger-hw has **zero** untracked files, so `untrackedChanges` (which reads every
+untracked file) is not the cause here — but it would be on a repo that has them.
+
+**T87 — Make a switch cost no git at all.** Two rules. (1) *Nothing on the critical
+path.* Rendering a workspace must not wait on git: the pane, the tree and the card
+appear immediately, and status/conflict facts arrive after, visibly late rather than
+blocking. (2) *Do not recompute what has not changed.* Cache per-worktree git facts
+(status, conflict summary, branch) keyed by worktree, invalidated by the FS watcher
+already running and by the operations that mutate the tree — so switching back to a
+workspace visited a moment ago spends nothing. Honest invalidation only: a cache that
+can serve a stale branch or a resolved conflict must be invalidated by whatever
+changed it, or not exist. Also collapse `refreshConflicts` (measure its spawns first —
+it costs twice `status`) and coalesce concurrent refreshes of the same worktree into
+one in-flight request. ACCEPTANCE, measured with `ORCHARD_TRACE_SWITCH=1` on the live
+app and reported as a table: switching between two already-visited workspaces triggers
+**zero** git spawns on the critical path, a first visit's git work is off it, and the
+trace shows no phase over 50 ms in the switch itself. Owns: OrchardCore/Git,
+OrchardCore/Worktrees, Sources/OrchardApp (AppStore, ProjectSession, FileExplorer),
+matching tests, docs/reports/t87-switch-cache.md. Does not touch remote transports,
+Automations, or Conflicts/** beyond what the summary path needs.
+
 ### Standing backlog (reconciled 2026-08-26)
 
 Everything the old wave-13+ list carried has since been closed and is recorded in its
