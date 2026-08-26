@@ -122,9 +122,17 @@ public final class OrchardRuntimeHost {
             await MainActor.run { (try? workspaceService.show(selector: selector))?.path }
         }, store: dataStore)
 
+        // T80: the worker verbs get the host registry, this runtime's data directory and
+        // its id, so `worker-start` can ask a remote host — with the exact command and
+        // environment the pane will carry — whether a worker there can report back, and
+        // so a remote dispatch's pane opens on that host instead of locally.
         let workerRuntime = WorkerRuntimeContext.live(cliCommand: cliCommand,
                                                       workspaces: workspaceService,
-                                                      terminals: terminalService)
+                                                      terminals: terminalService,
+                                                      hosts: hostRegistry,
+                                                      hookChannel: hookChannel,
+                                                      dataPath: paths.data.path,
+                                                      runtimeId: runtimeId)
         self.workerRuntime = workerRuntime
         let automationService = AutomationService(store: dataStore) { automation in
             switch automation.target {

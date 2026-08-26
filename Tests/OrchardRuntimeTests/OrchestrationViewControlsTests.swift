@@ -372,7 +372,7 @@ final class OrchestrationViewControlsTests: XCTestCase {
         return WorkerRuntimeContext(
             createWorktree: { _ in throw Unused() },
             resolveWorktree: { _, _ in throw Unused() },
-            createAgentTerminal: { _, _, _, _ in throw Unused() },
+            createAgentTerminal: { _, _ in throw Unused() },
             lookupTerminal: { _ in .missing },
             waitForAgentIdle: { _, _ in throw Unused() },
             injectPrompt: { _, _ in throw Unused() },

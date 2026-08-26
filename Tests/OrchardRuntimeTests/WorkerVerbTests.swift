@@ -26,6 +26,15 @@ final class WorkerVerbTests: XCTestCase {
         /// What the stub workspace layer's unforced delete reports. `nil` = a clean
         /// worktree that removes; a value = the preflight refusal it reports instead.
         var rollbackRefusal: String?
+        /// T80: what a remote host answers when `worker-start` asks whether a worker
+        /// there could report back. The default is the shape every host answered before
+        /// this task — no orchard CLI over there at all.
+        var remoteDispatchReadiness: RemoteDispatchReadiness = .refused(
+            code: RemoteDispatchProbe.cliMissing,
+            detail: "/opt/orchard/orchard: command not found")
+        /// Host ids the precondition was asked about, in order — so a test can pin that
+        /// the second gate does not pay for a round trip the preflight already made.
+        var remoteProbes: [String] = []
 
         init() {
             var detector = ReadinessDetector.Config()
@@ -89,9 +98,16 @@ final class WorkerVerbTests: XCTestCase {
                 }
                 return receipt
             },
-            createAgentTerminal: { engine, worktreeID, cwd, title in
-                try await harness.service.create(worktreeId: worktreeID, cwd: cwd,
-                                                 engineID: engine, prompt: "", title: title)
+            createAgentTerminal: { engine, placement in
+                // The stub mirrors the live wiring's one branch that matters here: a
+                // remote placement opens a pane stamped with that host, never a local
+                // PTY sitting in a path that only exists on the far side.
+                try await harness.service.create(
+                    worktreeId: placement.worktreeID,
+                    cwd: placement.remoteHost == nil ? placement.path : nil,
+                    engineID: engine, prompt: "", title: placement.title,
+                    executionHostId: placement.hostId ?? ExecutionHostId.local.rawValue,
+                    remoteCwd: placement.remoteHost == nil ? nil : placement.path)
             },
             lookupTerminal: { handle in
                 await WorkerRuntimeContext.resolveSummary(harness.service, handle: handle)
@@ -119,6 +135,12 @@ final class WorkerVerbTests: XCTestCase {
                     }
                     harness.workspaces.removeValue(forKey: worktreeID)
                     return .removed
+                }
+            },
+            probeRemoteDispatch: { hostId in
+                await MainActor.run {
+                    harness.remoteProbes.append(hostId)
+                    return harness.remoteDispatchReadiness
                 }
             })
         runtimeContext = context
@@ -347,19 +369,25 @@ final class WorkerVerbTests: XCTestCase {
         XCTAssertEqual(response.result?.field("launch")?.field("agent")?.stringValue, "claude")
     }
 
-    // MARK: - T39: supervised dispatch stops at the host boundary
+    // MARK: - T80: supervised dispatch across the host boundary
 
-    /// A remote workspace has no `orchard` binary, so a worker there could not send
-    /// `worker_done`, heartbeat, or answer a blocking question — the duties a dispatch
-    /// *is*. The refusal is typed and lands before a dispatch row exists, so a
-    /// coordinator gets a clean "no", not a half-open dispatch it must abandon.
-    func testWorkerStartRefusesARemoteWorkspaceTypedAndCreatesNothing() async throws {
-        let taskID = try await makeTask()
+    /// Registers a remote workspace the placement tests aim at.
+    private func makeRemoteWorkspace(id: String = "repo::/srv/wt/apricot",
+                                     host: String = "ssh:build") async {
         await MainActor.run { [terminalHarness] in
-            terminalHarness!.workspaces["repo::/srv/wt/apricot"] = WorkerWorktreeReceipt(
-                id: "repo::/srv/wt/apricot", instanceId: UUID().uuidString,
-                path: "/srv/wt/apricot", displayName: "apricot", hostId: "ssh:build")
+            terminalHarness!.workspaces[id] = WorkerWorktreeReceipt(
+                id: id, instanceId: UUID().uuidString,
+                path: "/srv/wt/apricot", displayName: "apricot", hostId: host)
         }
+    }
+
+    /// Before T80 this was refused on a *claim* about the far side. Now the claim is a
+    /// question, and a host that cannot run the CLI answers it — the refusal quotes
+    /// what the host actually said and carries the machine-readable reason, and it
+    /// still lands before a dispatch row or a pane exists.
+    func testWorkerStartRefusesARemoteWorkspaceThatCannotRunTheCLI() async throws {
+        let taskID = try await makeTask()
+        await makeRemoteWorkspace()
         let response = await call("worker-start", [
             "task": .string(taskID),
             "agent": .string("claude-code"),
@@ -368,11 +396,13 @@ final class WorkerVerbTests: XCTestCase {
         XCTAssertFalse(response.ok)
         XCTAssertEqual(response.error?.code, "remote_unsupported")
         let message = try XCTUnwrap(response.error?.message)
-        // It names what is missing and what does work instead: a handoff-style remote
-        // agent pane, which is a real thing a coordinator can still use.
         XCTAssertTrue(message.contains("build"), message)
-        XCTAssertTrue(message.contains("orchard CLI"), message)
+        XCTAssertTrue(message.contains("command not found"), message)
+        // It names what does work instead: a handoff-style remote agent pane.
         XCTAssertTrue(message.contains("terminal create --worktree repo::/srv/wt/apricot"), message)
+        XCTAssertEqual(response.error?.data?.field("reason")?.stringValue,
+                       RemoteDispatchProbe.cliMissing)
+        XCTAssertEqual(response.error?.data?.field("hostId")?.stringValue, "ssh:build")
         // Nothing was created — no worker dispatch row, no pane.
         let workers = try await live.workerList([:])
         XCTAssertEqual(workers.field("workers")?.arrayValue?.count ?? 0, 0)
@@ -380,9 +410,93 @@ final class WorkerVerbTests: XCTestCase {
         XCTAssertTrue(panes.isEmpty)
     }
 
+    /// A host that reaches *an* Orchard, just not this one, is the worst shape to admit:
+    /// the worker's `worker_done` would settle somebody else's dispatch row and this
+    /// coordinator would wait forever for a settlement that already happened.
+    func testWorkerStartRefusesAHostThatReachesADifferentRuntime() async throws {
+        let taskID = try await makeTask()
+        await makeRemoteWorkspace()
+        await MainActor.run { [terminalHarness] in
+            terminalHarness!.remoteDispatchReadiness = .refused(
+                code: RemoteDispatchProbe.runtimeMismatch,
+                detail: "orchard on build reached runtime rt_other, not this one (rt_ours)")
+        }
+        let response = await call("worker-start", [
+            "task": .string(taskID),
+            "agent": .string("claude-code"),
+            "worktree": .string("repo::/srv/wt/apricot"),
+        ])
+        XCTAssertEqual(response.error?.code, "remote_unsupported")
+        XCTAssertEqual(response.error?.data?.field("reason")?.stringValue,
+                       RemoteDispatchProbe.runtimeMismatch)
+        XCTAssertTrue(response.error?.message.contains("settle somebody else's dispatch") ?? false,
+                      response.error?.message ?? "")
+    }
+
+    /// Rule 2: a host we could not reach is not a host that answered "no". The refusal
+    /// is a different code, and the wording never turns "we could not look" into a
+    /// statement about the far side.
+    func testWorkerStartRefusesAnUnverifiableHostWithoutClaimingAnythingAboutIt() async throws {
+        let taskID = try await makeTask()
+        await makeRemoteWorkspace()
+        await MainActor.run { [terminalHarness] in
+            terminalHarness!.remoteDispatchReadiness = .unverifiable(
+                reason: "the connection timed out")
+        }
+        let response = await call("worker-start", [
+            "task": .string(taskID),
+            "agent": .string("claude-code"),
+            "worktree": .string("repo::/srv/wt/apricot"),
+        ])
+        XCTAssertEqual(response.error?.code, "host_unverifiable")
+        let message = try XCTUnwrap(response.error?.message)
+        XCTAssertTrue(message.contains("unverifiable"), message)
+        XCTAssertTrue(message.contains("Loss of contact is not evidence"), message)
+        XCTAssertFalse(message.contains("has no orchard"), message)
+        let workers = try await live.workerList([:])
+        XCTAssertEqual(workers.field("workers")?.arrayValue?.count ?? 0, 0)
+    }
+
+    /// The whole point of T80: a host that proves it can report back gets a real
+    /// supervised dispatch — a pane stamped with *its* execution host, a capability, and
+    /// the preamble injected into it.
+    func testWorkerStartRunsASupervisedWorkerOnAReadyRemoteHost() async throws {
+        let taskID = try await makeTask()
+        await makeRemoteWorkspace()
+        await MainActor.run { [terminalHarness] in
+            terminalHarness!.remoteDispatchReadiness = .ready(
+                runtimeId: "rt_ours", cliCommand: "/opt/orchard/orchard")
+        }
+        let response = try await startReadyWorker(
+            taskID: taskID, extra: ["worktree": .string("repo::/srv/wt/apricot")])
+        XCTAssertTrue(response.ok, String(describing: response.error))
+        XCTAssertEqual(response.result?.field("state")?.stringValue, "ready")
+        let handle = try agentHandle(response)
+        let summary = try await MainActor.run { [terminalHarness] in
+            try terminalHarness!.service.summary(handle: handle)
+        }
+        // Rule 1: the pane is stamped with the host it actually runs on, never local.
+        XCTAssertEqual(summary.executionHostId, "ssh:build")
+        let workingDirectory = await MainActor.run { [terminalHarness] in
+            try? terminalHarness!.service.workingDirectory(handle: handle)
+        }
+        // The *local* PTY has no cwd of its own: a remote path handed to a local chdir
+        // either fails or finds a same-named local directory.
+        XCTAssertNil(workingDirectory ?? nil)
+        // The preamble really landed in that pane, capability and all.
+        let injected = try await session(handle).writtenText
+        XCTAssertTrue(injected.contains("=== TASK ==="), injected)
+        XCTAssertTrue(injected.contains("--dispatch-capability dcap_"), injected)
+        // Asked once. The preflight cleared `ssh:build`, so the second gate does not
+        // spend another round trip re-asking the same host the same question.
+        let probes = await MainActor.run { [terminalHarness] in terminalHarness!.remoteProbes }
+        XCTAssertEqual(probes, ["ssh:build"])
+    }
+
     /// The same rule by the other door: adopting a remote agent pane as a supervised
-    /// worker would bind lifecycle authority to a process that cannot discharge it.
-    func testWorkerStartRefusesAnExistingRemoteAgentPane() async throws {
+    /// worker binds lifecycle authority to a process on another machine, so that machine
+    /// answers for itself first.
+    func testWorkerStartRefusesAnExistingRemoteAgentPaneThatCannotReportBack() async throws {
         let taskID = try await makeTask()
         let handle = try await MainActor.run { [terminalHarness] in
             try terminalHarness!.service.create(
@@ -400,8 +514,36 @@ final class WorkerVerbTests: XCTestCase {
                       response.error?.message ?? "")
     }
 
+    /// …and adopts it when the host answers ready.
+    func testWorkerStartAdoptsARemoteAgentPaneOnAReadyHost() async throws {
+        let taskID = try await makeTask()
+        await makeRemoteWorkspace()
+        await MainActor.run { [terminalHarness] in
+            terminalHarness!.remoteDispatchReadiness = .ready(
+                runtimeId: "rt_ours", cliCommand: "/opt/orchard/orchard")
+        }
+        let handle = try await MainActor.run { [terminalHarness] in
+            try terminalHarness!.service.create(
+                worktreeId: "repo::/srv/wt/apricot", cwd: nil, engineID: "claude-code",
+                prompt: "", title: "apricot", executionHostId: "ssh:build",
+                statusDetection: .hooks(tunnelPort: 47110)).handle
+        }
+        let known = await MainActor.run { [terminalHarness] in
+            Set(terminalHarness!.sessions.keys).subtracting([handle])
+        }
+        let handler = handler!
+        let request = RPCRequest(method: "worker-start", params: .object([
+            "task": .string(taskID), "terminal": .string(handle),
+        ]))
+        let pending = Task { await handler.handle(request) }
+        try await driveAgentThroughStart(previouslyKnown: known)
+        let response = await pending.value
+        XCTAssertTrue(response.ok, String(describing: response.error))
+        XCTAssertEqual(response.result?.field("state")?.stringValue, "ready")
+    }
+
     /// The guard must not catch local work: a local workspace with the same shape
-    /// starts normally.
+    /// starts normally, and no host is asked anything.
     func testWorkerStartStillAcceptsALocalWorkspace() async throws {
         let taskID = try await makeTask()
         await MainActor.run { [terminalHarness] in
@@ -412,6 +554,8 @@ final class WorkerVerbTests: XCTestCase {
         let response = try await startReadyWorker(
             taskID: taskID, extra: ["worktree": .string("repo::/wt/local")])
         XCTAssertTrue(response.ok, String(describing: response.error))
+        let probes = await MainActor.run { [terminalHarness] in terminalHarness!.remoteProbes }
+        XCTAssertTrue(probes.isEmpty, "a local placement must not dial anything: \(probes)")
     }
 
     func testUnknownEngineStillFailsTypedAtTerminalCreate() async throws {
@@ -1274,5 +1418,181 @@ final class WorkerVerbTests: XCTestCase {
         XCTAssertEqual(sessions, 0, "refused before any terminal or worktree exists")
         let creates = await MainActor.run { [terminalHarness] in terminalHarness!.worktreeCreates.count }
         XCTAssertEqual(creates, 0)
+    }
+    // MARK: - T80: what the remote lifecycle verbs are allowed to claim
+
+    /// Start a supervised worker on a host that answered ready, and hand back its
+    /// dispatch id and pane.
+    private func startRemoteWorker() async throws -> (taskID: String, dispatchID: String,
+                                                      handle: String, paneKey: String) {
+        let taskID = try await makeTask()
+        await makeRemoteWorkspace()
+        await MainActor.run { [terminalHarness] in
+            terminalHarness!.remoteDispatchReadiness = .ready(
+                runtimeId: "rt_ours", cliCommand: "/opt/orchard/orchard")
+        }
+        let response = try await startReadyWorker(
+            taskID: taskID, extra: ["worktree": .string("repo::/srv/wt/apricot")])
+        XCTAssertTrue(response.ok, String(describing: response.error))
+        let handle = try agentHandle(response)
+        let paneKey = try await MainActor.run { [terminalHarness] in
+            try terminalHarness!.service.summary(handle: handle).paneKey
+        }
+        return (taskID, try XCTUnwrap(response.result?.field("dispatchId")?.stringValue),
+                handle, paneKey)
+    }
+
+    /// Release archives what really crossed the tunnel — the pane's own output came home
+    /// through the connection before it closed, so pinning it is not a remote claim. What
+    /// the close proves *is* host-dependent, and the receipt says so instead of reusing
+    /// the local wording.
+    func testRemoteWorkerReleaseArchivesTheOutputAndDoesNotClaimTheProcessStopped() async throws {
+        let worker = try await startRemoteWorker()
+        await MainActor.run { [terminalHarness] in
+            terminalHarness!.sessions[worker.handle]?.emitOutput("remote worker said this\r\n")
+        }
+        // The far side reports through the same lifecycle verb a local worker uses; the
+        // capability it quotes is the one that was injected into the remote pane.
+        try await reportDone(taskID: worker.taskID, dispatchID: worker.dispatchID,
+                             handle: worker.handle)
+        let release = await call("worker-release", ["dispatch": .string(worker.dispatchID)])
+        XCTAssertTrue(release.ok, String(describing: release.error))
+        XCTAssertEqual(release.result?.field("state")?.stringValue, "released")
+        XCTAssertEqual(release.result?.field("processAction")?.stringValue,
+                       "closed_remote_connection")
+        let warning = try XCTUnwrap(release.result?.field("warning")?.stringValue)
+        XCTAssertTrue(warning.contains("unverifiable"), warning)
+        XCTAssertTrue(warning.contains("loss of contact"), warning.lowercased())
+        // The archive is real output, readable after the pane is gone.
+        let read = await call("worker-read", [
+            "dispatch": .string(worker.dispatchID), "source": .string("terminal"),
+            "limit": .number(500),
+        ])
+        XCTAssertTrue(read.ok, String(describing: read.error))
+        XCTAssertEqual(read.result?.field("archived")?.boolValue, true)
+        let lines = try XCTUnwrap(read.result?.field("lines")?.arrayValue)
+            .compactMap(\.stringValue).joined(separator: "\n")
+        XCTAssertTrue(lines.contains("remote worker said this"), lines)
+    }
+
+    /// A remote pane's provider transcript lives on the far side, and everything the
+    /// resolver reads is on this machine. Refusing it typed is the only honest answer:
+    /// resolving it would pin some unrelated local session and label it this worker's
+    /// evidence.
+    func testRemoteWorkerTranscriptIsRefusedTypedRatherThanResolvedLocally() async throws {
+        // The stub resolver would happily hand back a transcript; the *live* resolver
+        // refuses first on the pane's host, which is what this pins.
+        let handle = try await MainActor.run { [terminalHarness] in
+            try terminalHarness!.service.create(
+                worktreeId: "repo::/srv/wt/apricot", cwd: nil, engineID: "claude-code",
+                prompt: "", title: "apricot", executionHostId: "ssh:build").handle
+        }
+        let resolution = await MainActor.run { [terminalHarness] in
+            WorkerRuntimeContext.resolveClaudeTranscript(
+                terminalHarness!.service, handle: handle, maximumBytes: 1000)
+        }
+        XCTAssertEqual(resolution,
+                       .unavailable(reason: "remote_provider_transcript_unsupported"))
+    }
+
+    /// Closing a remote pane closes the *connection*: the local PTY held `ssh`, not the
+    /// worker. Rule 2 is explicit that a dropped connection is never a successful stop,
+    /// so the connection is reported closed and the process reported unconfirmed.
+    func testRemoteWorkerStopClosesTheConnectionWithoutClaimingAStop() async throws {
+        let worker = try await startRemoteWorker()
+        let stop = await call("worker-stop", ["dispatch": .string(worker.dispatchID)])
+        XCTAssertTrue(stop.ok, String(describing: stop.error))
+        XCTAssertEqual(stop.result?.field("state")?.stringValue, "stop_unknown")
+        XCTAssertEqual(stop.result?.field("processAction")?.stringValue,
+                       "closed_remote_connection")
+        let warning = try XCTUnwrap(stop.result?.field("warning")?.stringValue)
+        XCTAssertTrue(warning.contains("Loss of contact is not evidence"), warning)
+        // An unconfirmed stop leaves the dispatch open on purpose, so the receipt names
+        // the two verbs that close it rather than leaving a verdict with no next step.
+        let next = try XCTUnwrap(stop.result?.field("nextCommands")?.arrayValue)
+            .compactMap(\.stringValue).joined(separator: " ")
+        XCTAssertTrue(next.contains("worker-abandon --dispatch \(worker.dispatchID)"), next)
+        // The pane really is gone on this side.
+        let exists = await terminalExists(worker.handle)
+        XCTAssertFalse(exists)
+
+        // The PTY end that follows *is* that close. Reconciling it again would overwrite
+        // the stop's own verdict with a second, weaker telling of the same event.
+        await live.handleWorkerTerminalExit(TerminalExitEvent(
+            handle: worker.handle, paneKey: worker.paneKey, exitCode: nil,
+            deliberate: true, executionHostId: "ssh:build"))
+        let shown = await call("worker-show", ["dispatch": .string(worker.dispatchID)])
+        XCTAssertEqual(shown.result?.field("worker")?.field("state")?.stringValue,
+                       "stop_unknown")
+        XCTAssertEqual(shown.result?.field("worker")?.field("stage")?.stringValue,
+                       "stop_outcome_unknown")
+    }
+
+    /// A local worker's stop is unchanged: the PTY *is* the process, so closing it is a
+    /// stop and says so.
+    func testLocalWorkerStopStillSettlesAsStopped() async throws {
+        let taskID = try await makeTask()
+        let response = try await startReadyWorker(taskID: taskID)
+        let dispatchID = try XCTUnwrap(response.result?.field("dispatchId")?.stringValue)
+        let stop = await call("worker-stop", ["dispatch": .string(dispatchID)])
+        XCTAssertEqual(stop.result?.field("state")?.stringValue, "stopped")
+        XCTAssertEqual(stop.result?.field("processAction")?.stringValue,
+                       "closed_agent_terminal")
+    }
+
+    /// OpenSSH status 255 is the transport failing, which says nothing about the far
+    /// side. The dispatch still fails — supervision really is over — but the sentence,
+    /// the worker stage and the escalation all say `unverifiable` instead of issuing a
+    /// death certificate nobody signed.
+    func testRemoteTransportFailureSettlesAsUnverifiableNotAsAnExit() async throws {
+        let worker = try await startRemoteWorker()
+        await live.handleWorkerTerminalExit(TerminalExitEvent(
+            handle: worker.handle, paneKey: worker.paneKey, exitCode: 255,
+            deliberate: false, executionHostId: "ssh:build"))
+
+        let shown = await call("worker-show", ["dispatch": .string(worker.dispatchID)])
+        XCTAssertEqual(shown.result?.field("dispatch")?.field("termination_reason")?.stringValue,
+                       "connection_lost_unverifiable")
+        XCTAssertEqual(shown.result?.field("worker")?.field("stage")?.stringValue,
+                       "connection_lost")
+        let lastError = try XCTUnwrap(
+            shown.result?.field("worker")?.field("last_error")?.stringValue)
+        XCTAssertTrue(lastError.contains("unverifiable"), lastError)
+        XCTAssertFalse(lastError.contains("process exited"), lastError)
+
+        let inbox = try await live.check([
+            "run": .string(try await runID()), "types": .string("escalation"),
+            "peek": .bool(true),
+        ])
+        let message = try XCTUnwrap(inbox.field("messages")?.arrayValue?.first)
+        let subject = try XCTUnwrap(message.field("subject")?.stringValue)
+        XCTAssertTrue(subject.contains("connection to build lost"), subject)
+        let payloadText = try XCTUnwrap(message.field("payload")?.stringValue)
+        let payload = try XCTUnwrap(
+            try? JSONDecoder().decode(JSONValue.self, from: Data(payloadText.utf8)))
+        XCTAssertEqual(payload.field("livenessVerdict")?.stringValue, "unverifiable")
+        XCTAssertEqual(payload.field("executionHostId")?.stringValue, "ssh:build")
+    }
+
+    /// Any other status came back *through* a working connection, so it is the remote
+    /// command's own answer: real evidence of exit.
+    func testRemoteExitStatusPropagatedThroughTheConnectionIsAnExit() async throws {
+        let worker = try await startRemoteWorker()
+        await live.handleWorkerTerminalExit(TerminalExitEvent(
+            handle: worker.handle, paneKey: worker.paneKey, exitCode: 3,
+            deliberate: false, executionHostId: "ssh:build"))
+        let shown = await call("worker-show", ["dispatch": .string(worker.dispatchID)])
+        XCTAssertEqual(shown.result?.field("dispatch")?.field("termination_reason")?.stringValue,
+                       "worker_process_exited")
+        XCTAssertEqual(shown.result?.field("worker")?.field("stage")?.stringValue,
+                       "process_exited")
+        let lastError = try XCTUnwrap(
+            shown.result?.field("worker")?.field("last_error")?.stringValue)
+        XCTAssertTrue(lastError.contains("remote worker exited"), lastError)
+    }
+
+    private func runID() async throws -> String {
+        let runs = try await live.runList([:])
+        return try XCTUnwrap(runs.field("runs")?.arrayValue?.first?.field("id")?.stringValue)
     }
 }

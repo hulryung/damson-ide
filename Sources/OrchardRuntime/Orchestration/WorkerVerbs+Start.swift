@@ -36,12 +36,14 @@ extension LiveOrchestrationStore {
         let shellCommandInput = try AutomationShellDispatch.wantsShellCommand(p, agentID: agentID)
         // Refused before a dispatch row exists, exactly like `--on`: a supervised
         // dispatch that could never discharge its duties should leave nothing
-        // half-created behind for a coordinator to clean up (T39).
-        if let refusal = await Self.remoteDispatchPreflight(
+        // half-created behind for a coordinator to clean up (T39). Since T80 the
+        // question is put to the host rather than assumed — `preflight` carries which
+        // host it already cleared, so the second gate below does not pay for a second
+        // round trip on the same answer.
+        let preflight = await Self.remoteDispatchPreflight(
             placement: placement, terminal: explicitTerminal, agent: agentID,
-            cwd: p.str("cwd"), runtime: runtime) {
-            throw RPCServiceError(code: "remote_unsupported", message: refusal)
-        }
+            cwd: p.str("cwd"), runtime: runtime)
+        if let refusal = preflight.refusal { throw refusal }
         let setupPolicy = try Self.setupPolicy(p, createsWorktree: placement.createsWorktree)
         let timeout = p.int("timeout-ms").map { TimeInterval($0) / 1000 } ?? workerStartReadinessTimeout
 
@@ -114,19 +116,22 @@ extension LiveOrchestrationStore {
                 }
 
                 // The second gate on the host boundary (T39, docs/design/remote-hosts.md
-                // stage 3). `remoteDispatchPreflight` already refused the ordinary
-                // shapes before a dispatch row existed, but it resolves with `try?` —
-                // a placement that only resolves *here* would otherwise slip past it,
-                // and what slips past is a worker on a machine that cannot report:
-                // no `worker_done`, no heartbeat, no answer to a blocking question.
-                // A coordinator waiting on a settlement that can never arrive is worse
+                // stage 3). `remoteDispatchPreflight` already put the question to every
+                // host it could resolve before a dispatch row existed, but it resolves
+                // with `try?` — a placement that only resolves *here* (a freshly created
+                // remote worktree, most of all) would otherwise slip past it, and what
+                // slips past is a worker on a machine that cannot report: no
+                // `worker_done`, no heartbeat, no answer to a blocking question. A
+                // coordinator waiting on a settlement that can never arrive is worse
                 // than a typed refusal at the door.
-                if let placed = worktree, Self.isRemoteWorkspace(placed) {
-                    throw RPCServiceError(
-                        code: "remote_unsupported",
-                        message: Self.remoteDispatchRefusal(host: placed.hostId,
-                                                            worktreeID: placed.id,
-                                                            agent: agentID))
+                if let placed = worktree, Self.isRemoteWorkspace(placed),
+                   placed.hostId != preflight.clearedHost {
+                    let readiness = await runtime.probeRemoteDispatch(placed.hostId ?? "")
+                    if let refusal = Self.remoteDispatchGate(
+                        hostId: placed.hostId, worktreeID: placed.id, agent: agentID,
+                        readiness: readiness) {
+                        throw refusal
+                    }
                 }
 
                 // Stage: terminal_create.
@@ -147,17 +152,19 @@ extension LiveOrchestrationStore {
                     if worktree == nil, let worktreeID = found.worktreeId {
                         worktree = try? await runtime.resolveWorktree(worktreeID, nil)
                     }
-                    // Same rule by the other door, and the same second gate: a remote
-                    // agent pane is a real, watchable pane, but adopting it as a
-                    // supervised worker would bind lifecycle authority to a process
-                    // that cannot discharge it.
-                    if found.executionHostId != ExecutionHostId.local.rawValue {
-                        throw RPCServiceError(
-                            code: "remote_unsupported",
-                            message: Self.remoteDispatchRefusal(
-                                host: found.executionHostId,
-                                worktreeID: found.worktreeId ?? explicitTerminal,
-                                agent: found.engine))
+                    // Same rule by the other door, and the same second gate: adopting a
+                    // remote agent pane as a supervised worker binds lifecycle authority
+                    // to a process on another machine, so that machine has to have
+                    // answered for itself first.
+                    if found.executionHostId != ExecutionHostId.local.rawValue,
+                       found.executionHostId != preflight.clearedHost {
+                        let readiness = await runtime.probeRemoteDispatch(found.executionHostId)
+                        if let refusal = Self.remoteDispatchGate(
+                            hostId: found.executionHostId,
+                            worktreeID: found.worktreeId ?? explicitTerminal,
+                            agent: found.engine, readiness: readiness) {
+                            throw refusal
+                        }
                     }
                     if let worktree, let terminalWorktree = found.worktreeId,
                        terminalWorktree != worktree.id {
@@ -177,7 +184,10 @@ extension LiveOrchestrationStore {
                     _ = try self.store.updateWorkerDispatch(
                         dispatchID, stage: "terminal_creating", worktreeID: placed.id)
                     summary = try await runtime.createAgentTerminal(
-                        agentID ?? "shell", placed.id, placed.path, placed.displayName)
+                        agentID ?? "shell",
+                        WorkerTerminalPlacement(worktreeID: placed.id, path: placed.path,
+                                                title: placed.displayName,
+                                                hostId: placed.hostId))
                     external = false
                     effects.append(Self.effect(kind: "terminal", action: "created", id: summary.handle))
                 }
@@ -261,33 +271,49 @@ extension LiveOrchestrationStore {
         }
     }
 
-    /// The refusal for a `worker-start` aimed at another machine, or nil when the
+    /// What the door check decided, and which host it already asked.
+    struct RemoteDispatchPreflight {
+        /// The typed refusal to throw, or nil when nothing stands in the way.
+        var refusal: RPCServiceError?
+        /// A host that answered `ready` here, so the second gate can skip re-asking it.
+        /// Never set for a host that refused — that path throws instead.
+        var clearedHost: String?
+    }
+
+    /// The refusal for a `worker-start` aimed at another machine, or nothing when the
     /// placement is local (or cannot be resolved yet — an unresolvable selector keeps
     /// its existing typed failure rather than being pre-empted by this check).
     ///
     /// Both doors are checked. `--terminal <remote pane>` names a real, watchable pane;
-    /// adopting it as a worker would bind lifecycle authority to a process that cannot
-    /// discharge it. `--worktree <remote id>` would spawn that pane first and hit the
-    /// same wall one stage later, with a worktree already reused and a dispatch row
-    /// already open.
+    /// adopting it as a worker binds lifecycle authority to a process on that machine.
+    /// `--worktree <remote id>` would spawn that pane first and hit the same wall one
+    /// stage later, with a worktree already reused and a dispatch row already open.
     static func remoteDispatchPreflight(
         placement: WorkerPlacement, terminal: String?, agent: String?, cwd: String?,
         runtime: WorkerRuntimeContext
-    ) async -> String? {
+    ) async -> RemoteDispatchPreflight {
         if let terminal,
            case .found(let found, _) = await runtime.lookupTerminal(terminal),
            found.executionHostId != ExecutionHostId.local.rawValue {
-            return remoteDispatchRefusal(host: found.executionHostId,
-                                         worktreeID: found.worktreeId ?? terminal,
-                                         agent: found.engine)
+            let readiness = await runtime.probeRemoteDispatch(found.executionHostId)
+            let refusal = remoteDispatchGate(
+                hostId: found.executionHostId, worktreeID: found.worktreeId ?? terminal,
+                agent: found.engine, readiness: readiness)
+            return RemoteDispatchPreflight(
+                refusal: refusal,
+                clearedHost: refusal == nil ? found.executionHostId : nil)
         }
         if case .existing(let selector) = placement.kind,
            let receipt = try? await runtime.resolveWorktree(selector, cwd),
            isRemoteWorkspace(receipt) {
-            return remoteDispatchRefusal(host: receipt.hostId, worktreeID: receipt.id,
-                                         agent: agent)
+            let readiness = await runtime.probeRemoteDispatch(receipt.hostId ?? "")
+            let refusal = remoteDispatchGate(
+                hostId: receipt.hostId, worktreeID: receipt.id, agent: agent,
+                readiness: readiness)
+            return RemoteDispatchPreflight(
+                refusal: refusal, clearedHost: refusal == nil ? receipt.hostId : nil)
         }
-        return nil
+        return RemoteDispatchPreflight()
     }
 
     /// Whether this placement's files live on another machine.
@@ -296,23 +322,6 @@ extension LiveOrchestrationStore {
     /// it as local is the one downgrade that runs work on the wrong machine.
     static func isRemoteWorkspace(_ receipt: WorkerWorktreeReceipt) -> Bool {
         RemoteWorkspacePolicy.isRemote(hostId: receipt.hostId)
-    }
-
-    /// The one wording for "you cannot dispatch a supervised worker there".
-    ///
-    /// It names what is missing (the CLI, hence the lifecycle duties) and what does
-    /// work instead, because the alternative is real: a remote agent pane with live
-    /// status is a handoff, not a dispatch, and a coordinator that knows the difference
-    /// can still use it.
-    static func remoteDispatchRefusal(host: String?, worktreeID: String,
-                                      agent: String?) -> String {
-        let hostLabel = RemoteWorkspacePolicy.hostLabel(host)
-        let agentFlag = agent.map { " --engine \($0)" } ?? " --engine <agent>"
-        return "Supervised dispatch cannot run on \(hostLabel): the remote host has no "
-            + "orchard CLI, so a worker there cannot send worker_done, heartbeat, or "
-            + "answer a blocking question. Open a handoff-style remote agent pane "
-            + "instead — `terminal create --worktree \(worktreeID)\(agentFlag)` — which "
-            + "runs the agent there with live status but no dispatch lifecycle."
     }
 
     /// Persist the failure/unknown outcome and build the error envelope whose `data`

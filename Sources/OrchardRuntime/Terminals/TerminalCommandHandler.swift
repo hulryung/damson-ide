@@ -81,59 +81,28 @@ public struct TerminalCommandHandler: CommandHandler, @unchecked Sendable {
             let requestedEngine = params["engine"]?.stringValue ?? "shell"
             let engineID = AgentEngineRegistry.canonicalID(requestedEngine) ?? requestedEngine
             let prompt = params["prompt"]?.stringValue ?? ""
-            var host = try executionHost(params)
+            let host = try executionHost(params)
             // T32: a pane opened in a remote worktree inherits that workspace's host.
             // The host is taken from the workspace record rather than defaulted, so a
-            // pane can never end up local while claiming to be in remote files.
-            if let workspace = resolved, let stamp = workspace.hostId,
-               stamp != ExecutionHostId.local.rawValue {
-                // An unparseable stamp is refused, never read as local: that downgrade
-                // is exactly how a pane ends up local while claiming remote files
-                // (docs/design/remote-hosts.md §1, rule 1).
-                guard let workspaceHost = ExecutionHostId(rawValue: stamp) else {
+            // pane can never end up local while claiming to be in remote files. T80
+            // moved that resolution and the launch itself into `RemotePaneLauncher`,
+            // shared with `worker-start`'s remote `terminal_create` stage.
+            if let workspace = resolved,
+               RemoteWorkspacePolicy.isRemote(hostId: workspace.hostId) {
+                let workspaceHost = try RemotePaneLauncher.resolveHost(
+                    workspaceID: workspace.id, workspaceStamp: workspace.hostId,
+                    requested: host)
+                guard let workspaceHost else {
                     throw TerminalServiceError.invalidArgument(
-                        "worktree \(workspace.id) has an unusable execution host '\(stamp)'")
+                        "worktree \(workspace.id) has an unusable execution host")
                 }
-                if host.isLocal {
-                    host = workspaceHost
-                } else if host != workspaceHost {
-                    throw TerminalServiceError.invalidArgument(
-                        "worktree \(workspace.id) lives on \(workspaceHost.rawValue), "
-                            + "not \(host.rawValue)")
-                }
-                let record = try requireHosts().require(host: host)
                 guard let path = workspace.path, !path.isEmpty else {
                     throw TerminalServiceError.invalidArgument(
                         "worktree \(workspace.id) has no remote path to open")
                 }
-                let title = params["title"]?.stringValue
-                    ?? (path.split(separator: "/").last.map(String.init) ?? record.name)
-                // T39: an agent engine in a remote worktree launches the agent on the
-                // far side, with its status carried home over an SSH reverse tunnel.
-                if engineID != "shell" {
-                    let summary = try await createRemoteAgent(
-                        engineID: engineID, hostRecord: record, workspaceID: workspace.id,
-                        path: path, title: title, executionHostId: host.rawValue)
-                    return try encodeJSON(summary)
-                }
-                // `cd` happens on the far side. The local PTY's own cwd is only where
-                // `ssh` is launched from and is deliberately left alone: a remote path
-                // handed to a local `chdir` either fails or — worse — finds a
-                // same-named local directory.
-                let remoteCommand = prompt.isEmpty
-                    ? SSHCommand.cdAndLoginShellCommand(directory: path)
-                    : "cd \(SSHCommand.shellQuote(path)) && \(prompt)"
-                let summary = try await service.create(
-                    worktreeId: workspace.id,
-                    cwd: nil,
-                    engineID: "shell",
-                    prompt: SSHCommand.remoteShellCommandLine(for: record, command: remoteCommand),
-                    title: title,
-                    executionHostId: host.rawValue,
-                    // Where the work is, recorded separately from the local `cwd` the
-                    // pane deliberately does not have: a restored or reconnected pane
-                    // has to be able to say which directory on which machine it is.
-                    remoteCwd: path)
+                let summary = try await requireRemotePanes().create(
+                    engineID: engineID, host: workspaceHost, workspaceID: workspace.id,
+                    path: path, title: params["title"]?.stringValue, prompt: prompt)
                 return try encodeJSON(summary)
             }
             if host.isLocal {
@@ -216,48 +185,14 @@ public struct TerminalCommandHandler: CommandHandler, @unchecked Sendable {
         }
     }
 
-    /// Open an agent pane whose agent runs on `hostRecord`, in the remote worktree at
-    /// `path` (docs/design/remote-hosts.md stage 3).
-    ///
-    /// The pane is a *local* PTY whose child is `ssh`, and whose engine is the agent's:
-    /// readiness fingerprints, `wait --for tui-idle`, verified sends and the agent-state
-    /// projection all work on it unchanged. What differs is where status comes from —
-    /// hooks reach us only if the reverse tunnel and the remote config both succeeded —
-    /// and that answer is recorded on the summary rather than assumed.
-    ///
-    /// The hook token is minted here, before the PTY exists, because the remote config
-    /// has to carry it and Claude Code reads that config at startup.
-    private func createRemoteAgent(engineID: String, hostRecord: HostRecord,
-                                   workspaceID: String, path: String, title: String,
-                                   executionHostId: String) async throws -> TerminalSummary {
-        guard let engine = AgentEngineRegistry.engine(id: engineID) else {
-            throw TerminalServiceError.unknownEngine(engineID)
-        }
-        let remote = RemoteAgentService(host: hostRecord, runner: hostRunner)
-        let token = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
-        let plan = try await remote.plan(
-            engine: engine, worktreePath: path, hookToken: token,
-            localHookPort: hookChannel?.localHookPort ?? 0)
-        return try await service.create(
-            worktreeId: workspaceID,
-            // The local PTY's cwd is only where `ssh` is launched from; the remote
-            // command does its own `cd`. Handing a remote path to a local chdir is the
-            // one mistake that silently relocates the work.
-            cwd: nil,
-            engineID: engine.id,
-            // Empty, and it must be: for a `.typeWhenIdle` engine the prompt is what
-            // gets *typed into the agent* on its first idle, and typing an `ssh`
-            // command line into Claude Code is not a launch, it is a message. The
-            // invocation lives in `launchArgv` instead, which a respawn carries — the
-            // §4 rule (a remote pane keeps its launch command) held by the field that
-            // actually launches it rather than by one that would also be typed.
-            prompt: "",
-            title: title,
-            executionHostId: executionHostId,
-            launchArgv: plan.argv,
-            hookToken: plan.hookToken,
-            statusDetection: plan.detection,
-            remoteCwd: path)
+    /// The launcher for panes whose work happens on another machine, or a typed
+    /// refusal when this runtime has no host registry wired.
+    private func requireRemotePanes() throws -> RemotePaneLauncher {
+        let hosts = try requireHosts()
+        let channel = hookChannel
+        return RemotePaneLauncher(service: service, hosts: hosts,
+                                  localHookPort: { channel?.localHookPort ?? 0 },
+                                  hostRunner: hostRunner)
     }
 
     /// `--host` defaults to `local`. An unparseable value is rejected rather than

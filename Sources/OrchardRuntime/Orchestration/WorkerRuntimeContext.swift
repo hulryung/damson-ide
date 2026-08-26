@@ -33,9 +33,17 @@ public struct WorkerRuntimeContext: Sendable {
     /// Resolve an existing workspace placement selector (`current` needs `cwd`).
     public var resolveWorktree: @Sendable (_ selector: String, _ cwd: String?) async throws -> WorkerWorktreeReceipt
     /// `terminal_create`: spawn an agent terminal in a worktree via T3's registry.
+    /// The placement carries the workspace's host, so a remote dispatch opens a pane
+    /// *on that host* instead of a local PTY sitting in a path that only exists there
+    /// (T80).
     public var createAgentTerminal: @Sendable (
-        _ engineID: String, _ worktreeID: String?, _ cwd: String?, _ title: String?
+        _ engineID: String, _ placement: WorkerTerminalPlacement
     ) async throws -> TerminalSummary
+    /// T80's supervised-dispatch precondition: ask the host, before anything is
+    /// created, whether a worker there could actually discharge a dispatch's duties.
+    /// The default answers "this runtime cannot even ask", which is what a context
+    /// with no host registry wired must say — never a hopeful yes.
+    public var probeRemoteDispatch: @Sendable (_ hostId: String) async -> RemoteDispatchReadiness
     /// Observation: current summary + agent status for a handle, following one remint
     /// hop (a stale handle still names its pane; authority keys on the pane).
     public var lookupTerminal: @Sendable (_ handle: String) async -> WorkerTerminalLookup
@@ -65,7 +73,7 @@ public struct WorkerRuntimeContext: Sendable {
         cliCommand: String = "orchard",
         createWorktree: @escaping @Sendable (WorkerWorktreeSpec) async throws -> WorkerWorktreeReceipt,
         resolveWorktree: @escaping @Sendable (String, String?) async throws -> WorkerWorktreeReceipt,
-        createAgentTerminal: @escaping @Sendable (String, String?, String?, String?) async throws -> TerminalSummary,
+        createAgentTerminal: @escaping @Sendable (String, WorkerTerminalPlacement) async throws -> TerminalSummary,
         lookupTerminal: @escaping @Sendable (String) async -> WorkerTerminalLookup,
         waitForAgentIdle: @escaping @Sendable (String, TimeInterval) async throws -> TerminalWaitResult,
         injectPrompt: @escaping @Sendable (String, String) async throws -> TerminalSendResult,
@@ -74,6 +82,10 @@ public struct WorkerRuntimeContext: Sendable {
         closeTerminal: @escaping @Sendable (String) async throws -> Void,
         rollbackWorktree: @escaping @Sendable (String) async -> WorktreeRollback = { _ in
             .retained(reason: "rollback_unsupported")
+        },
+        probeRemoteDispatch: @escaping @Sendable (String) async -> RemoteDispatchReadiness = { _ in
+            .refused(code: RemoteDispatchProbe.notWired,
+                     detail: "this runtime has no remote-host access wired")
         }
     ) {
         self.cliCommand = cliCommand
@@ -87,13 +99,35 @@ public struct WorkerRuntimeContext: Sendable {
         self.resolveProviderTranscript = resolveProviderTranscript
         self.closeTerminal = closeTerminal
         self.rollbackWorktree = rollbackWorktree
+        self.probeRemoteDispatch = probeRemoteDispatch
     }
 
     /// The production wiring against the runtime host's services.
+    ///
+    /// `hosts` / `dataPath` / `runtimeId` are what make T80's supervised remote
+    /// dispatch possible: the first lets the runtime *ask* a host whether a worker
+    /// there could report back, and the other two are the two facts the far side needs
+    /// in order to reach this runtime rather than whichever one its own `HOME` holds.
+    /// Passing `hosts: nil` keeps every remote placement refused, which is the correct
+    /// answer for a runtime that has no way to reach another machine.
     public static func live(cliCommand: String,
                             workspaces: WorkspaceService,
-                            terminals: TerminalService) -> WorkerRuntimeContext {
-        WorkerRuntimeContext(
+                            terminals: TerminalService,
+                            hosts: HostRegistry? = nil,
+                            hookChannel: AgentHookChannel? = nil,
+                            hostRunner: HostCommandRunner = ProcessHostCommandRunner(),
+                            dataPath: String = "",
+                            runtimeId: String = "") -> WorkerRuntimeContext {
+        let remotePanes = hosts.map {
+            RemotePaneLauncher(service: terminals, hosts: $0,
+                               localHookPort: { hookChannel?.localHookPort ?? 0 },
+                               hostRunner: hostRunner)
+        }
+        let probe = hosts.map {
+            RemoteDispatchProbe(hosts: $0, runner: hostRunner, cliCommand: cliCommand,
+                                dataPath: dataPath, runtimeId: runtimeId)
+        }
+        return WorkerRuntimeContext(
             cliCommand: cliCommand,
             createWorktree: { spec in
                 guard let repo = spec.repo else {
@@ -120,9 +154,30 @@ public struct WorkerRuntimeContext: Sendable {
                     path: workspace.path, displayName: workspace.displayName, warning: nil,
                     hostId: workspace.hostId)
             },
-            createAgentTerminal: { engineID, worktreeID, cwd, title in
-                try await terminals.create(worktreeId: worktreeID, cwd: cwd,
-                                           engineID: engineID, prompt: "", title: title)
+            createAgentTerminal: { engineID, placement in
+                // A remote placement opens its pane through the same launcher
+                // `terminal create --worktree <remote id>` uses. Spawning it here with
+                // the default local host would put a local PTY in a path that only
+                // exists on the far side — rule 1's forbidden downgrade.
+                if let host = placement.remoteHost {
+                    guard let remotePanes else {
+                        throw WorkspaceError(
+                            "remote_unsupported",
+                            "this runtime cannot open panes on \(host.rawValue)")
+                    }
+                    guard let path = placement.path, !path.isEmpty else {
+                        throw WorkspaceError(
+                            "invalid_argument",
+                            "worktree \(placement.worktreeID ?? "?") has no remote path to open")
+                    }
+                    return try await remotePanes.create(
+                        engineID: engineID, host: host,
+                        workspaceID: placement.worktreeID ?? "", path: path,
+                        title: placement.title)
+                }
+                return try await terminals.create(
+                    worktreeId: placement.worktreeID, cwd: placement.path,
+                    engineID: engineID, prompt: "", title: placement.title)
             },
             lookupTerminal: { handle in
                 await MainActor.run { Self.resolveSummary(terminals, handle: handle) }
@@ -163,6 +218,15 @@ public struct WorkerRuntimeContext: Sendable {
                 } catch {
                     return .retained(reason: String(describing: error))
                 }
+            },
+            probeRemoteDispatch: { hostId in
+                guard let probe else {
+                    return .refused(
+                        code: RemoteDispatchProbe.notWired,
+                        detail: "this runtime has no host registry, so it cannot ask "
+                            + "\(hostId) anything")
+                }
+                return await probe.probe(hostId: hostId)
             })
     }
 
@@ -172,14 +236,28 @@ public struct WorkerRuntimeContext: Sendable {
         homeDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> ProviderTranscriptResolution {
         let resolvedHandle: String
+        let summary: TerminalSummary
         do {
-            _ = try terminals.summary(handle: handle)
+            summary = try terminals.summary(handle: handle)
             resolvedHandle = handle
         } catch TerminalServiceError.handleStale(_, let replacement) {
-            guard let replacement else { return .unavailable(reason: "terminal_identity_unavailable") }
+            guard let replacement, let followed = try? terminals.summary(handle: replacement) else {
+                return .unavailable(reason: "terminal_identity_unavailable")
+            }
+            summary = followed
             resolvedHandle = replacement
         } catch {
             return .unavailable(reason: "terminal_identity_unavailable")
+        }
+        // T80: a remote pane's provider transcript lives on the far side. Everything
+        // below reads `~/.claude/projects` on *this* machine, and the pane's local
+        // working directory is only where `ssh` was launched from — so resolving it
+        // would either find nothing or, worse, pin some unrelated local session's
+        // transcript and label it this worker's evidence. Refuse it typed instead;
+        // `worker-release` falls back to the terminal tail, which is real output that
+        // really crossed the tunnel.
+        if RemoteWorkspacePolicy.isRemote(hostId: summary.executionHostId) {
+            return .unavailable(reason: "remote_provider_transcript_unsupported")
         }
         guard let sessionID = try? terminals.agentStatus(handle: resolvedHandle).providerSessionID,
               !sessionID.isEmpty else {
@@ -225,6 +303,39 @@ public struct WorkerRuntimeContext: Sendable {
         } catch {
             return .missing
         }
+    }
+}
+
+/// Where `worker-start`'s `terminal_create` stage should open its pane.
+///
+/// Before T80 this stage took a loose (worktreeID, cwd, title) triple and always spawned
+/// a local PTY. The host had to join it: a supervised worker in a remote workspace needs
+/// a pane *on that host*, and `cwd` means something different there — it is the far
+/// side's directory, not a path a local `chdir` may be handed.
+public struct WorkerTerminalPlacement: Sendable {
+    public var worktreeID: String?
+    /// Locally, the pane's working directory. For a remote placement, the directory on
+    /// the far side; the local PTY deliberately keeps its own cwd.
+    public var path: String?
+    public var title: String?
+    /// The workspace's stamped execution host (`local` / `ssh:<name>`), carried verbatim
+    /// so an unparseable stamp can be refused rather than read as local.
+    public var hostId: String?
+
+    public init(worktreeID: String? = nil, path: String? = nil, title: String? = nil,
+                hostId: String? = nil) {
+        self.worktreeID = worktreeID
+        self.path = path
+        self.title = title
+        self.hostId = hostId
+    }
+
+    /// The host this pane belongs to, or nil when it is local. An unparseable stamp is
+    /// *not* local (`RemoteWorkspacePolicy.isRemote`) but has no host to dial either, so
+    /// it comes back nil here and the caller's own remote gate refuses it.
+    public var remoteHost: ExecutionHostId? {
+        guard let hostId, RemoteWorkspacePolicy.isRemote(hostId: hostId) else { return nil }
+        return ExecutionHostId(rawValue: hostId)
     }
 }
 

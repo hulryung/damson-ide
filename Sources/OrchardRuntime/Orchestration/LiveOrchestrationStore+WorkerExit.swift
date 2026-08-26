@@ -37,14 +37,58 @@ extension LiveOrchestrationStore {
             // (`settleWorkerStop` runs right after its closeTerminal returns).
             return
         }
+        if worker.state == .stopUnknown, event.deliberate {
+            // The stop already ran, closed this very pane, and recorded its own verdict
+            // — for a remote worker, "the connection was closed and nothing confirmed
+            // the process stopped" (T80). The PTY end that follows *is* that close, so
+            // reconciling it again would overwrite the stop's answer with a second,
+            // weaker telling of the same event. A non-deliberate exit after a failed
+            // stop is different — that is news, and it still lands below.
+            return
+        }
 
+        // What the PTY's end actually proves. For a local pane the PTY *is* the worker,
+        // so an exit status is proof of exit. For an `ssh:` pane the PTY holds the ssh
+        // client: status 255 is OpenSSH reporting its own transport failure, which says
+        // nothing about the far side (docs/design/remote-hosts.md §1, rule 2). Reading
+        // that as "the worker died" is how a coordinator respawns a task onto a worktree
+        // a still-live agent is editing from the other machine.
+        let host = ExecutionHostId(rawValue: event.executionHostId) ?? .local
+        let verdict = HostLiveness.verdictForPTYEnd(host: host, exitCode: event.exitCode)
+        let unverifiable = verdict.status == "unverifiable" && !host.isLocal
         let exitCode = event.exitCode.map(String.init) ?? "unknown"
-        let reason = event.deliberate ? "deliberate_close" : "worker_process_exited"
-        let error = event.deliberate
-            ? "The worker terminal was closed while Dispatch \(dispatch.id) was live."
-            : "The worker terminal process exited (code \(exitCode)) while Dispatch \(dispatch.id) was live."
-        _ = try store.failDispatch(dispatch.id, error: error,
-                                   workerProcessExited: true, terminationReason: reason)
+        let reason: String
+        let error: String
+        if event.deliberate {
+            reason = "deliberate_close"
+            error = unverifiable
+                ? "The worker's connection to \(host.name) was closed while Dispatch "
+                    + "\(dispatch.id) was live. Whether anything is still running there "
+                    + "is unverifiable — \(verdict.reason ?? HostLiveness.connectionLostReason)."
+                : "The worker terminal was closed while Dispatch \(dispatch.id) was live."
+        } else if unverifiable {
+            // The supervision is over either way — this runtime can no longer reach the
+            // worker, so the dispatch cannot stay open — but the sentence that settles it
+            // must not issue a death certificate nobody signed.
+            reason = "connection_lost_unverifiable"
+            error = "The connection to \(host.name) ended while Dispatch \(dispatch.id) "
+                + "was live. Whether the worker is still running there is unverifiable — "
+                + "\(verdict.reason ?? HostLiveness.connectionLostReason). Nothing on "
+                + "\(host.name) was stopped; do not respawn this task onto the same "
+                + "worktree until the host has been checked."
+        } else {
+            reason = "worker_process_exited"
+            error = host.isLocal
+                ? "The worker terminal process exited (code \(exitCode)) while Dispatch \(dispatch.id) was live."
+                : "The connection to \(host.name) closed and the remote worker exited "
+                    + "(status \(exitCode)) while Dispatch \(dispatch.id) was live."
+        }
+        _ = try store.failDispatch(
+            dispatch.id, error: error, workerProcessExited: true,
+            terminationReason: reason,
+            // The stage is the claim the worker row makes about the process. Only an
+            // exit that was actually reported gets to say `process_exited`.
+            workerStage: unverifiable ? "connection_lost" : "process_exited")
 
         if !event.deliberate {
             // `sendMessage` notifies the Run's waiters after commit, so a parked
@@ -54,10 +98,17 @@ extension LiveOrchestrationStore {
                 senderPaneKey: event.paneKey,
                 to: "run:\(dispatch.runID)",
                 runID: dispatch.runID,
-                subject: "Worker process exited (task \(dispatch.taskID))",
+                subject: unverifiable
+                    ? "Worker connection to \(host.name) lost (task \(dispatch.taskID))"
+                    : "Worker process exited (task \(dispatch.taskID))",
                 body: error + " The dispatch was failed automatically; inspect with "
-                    + "worker-show --dispatch \(dispatch.id), then retry via "
-                    + "worker-start --retry-of \(dispatch.id) or fail the task.",
+                    + "worker-show --dispatch \(dispatch.id), then "
+                    + (unverifiable
+                        ? "check the host (`host check --name \(host.name)`) before "
+                            + "retrying — a retry into the same worktree while a live "
+                            + "agent may still hold it is the failure rule 2 exists to "
+                            + "prevent."
+                        : "retry via worker-start --retry-of \(dispatch.id) or fail the task."),
                 type: .escalation,
                 priority: .high,
                 payload: Self.encodeReceipt(.object([
@@ -65,6 +116,10 @@ extension LiveOrchestrationStore {
                     "dispatchId": .string(dispatch.id),
                     "exitCode": event.exitCode.map { .number(Double($0)) } ?? .null,
                     "terminationReason": .string(reason),
+                    "executionHostId": .string(event.executionHostId),
+                    // The verdict vocabulary, on the wire, so a coordinator does not
+                    // have to re-derive it from an exit code and a host id.
+                    "livenessVerdict": .string(verdict.status),
                 ]))))
         }
         // Wake anything blocked on the dispatch itself (a parked `ask`, worker-mode

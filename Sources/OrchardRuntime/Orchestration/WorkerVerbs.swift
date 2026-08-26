@@ -342,6 +342,37 @@ extension LiveOrchestrationStore {
                                             alreadySettled: false, processAction: "unknown",
                                             lastError: unknown.lastError)
                 }
+                // T80. Closing a remote pane closes the *connection*: the local PTY held
+                // `ssh`, not the worker. sshd almost certainly hangs the far side up —
+                // but "almost certainly" is not what `stopped` means here, and rule 2
+                // (docs/design/remote-hosts.md §1) is explicit that a dropped connection
+                // is never a successful stop. So the connection is reported closed and
+                // the process is reported unconfirmed, which is exactly what happened.
+                if let host = observation.executionHostId,
+                   RemoteWorkspacePolicy.isRemote(hostId: host) {
+                    let label = RemoteWorkspacePolicy.hostLabel(host)
+                    let unknown = try self.store.markWorkerStopUnknown(
+                        dispatchID,
+                        reason: HostLiveness.describeUnconfirmedStop(
+                            reason: "the pane's connection to \(label) was closed, and "
+                                + "nothing on \(label) confirmed the worker stopped"))
+                    self.waitCenter.notifyMessageArrived(
+                        recipient: "dispatch:\(dispatchID)", type: .status)
+                    return Self.stopReceipt(
+                        dispatchID, state: unknown.state.rawValue, alreadySettled: false,
+                        processAction: "closed_remote_connection",
+                        lastError: unknown.lastError,
+                        warning: "Loss of contact is not evidence that anything on \(label) "
+                            + "stopped. Confirm on the host before reusing that worktree.",
+                        // `stop_unknown` deliberately leaves the dispatch open — an
+                        // unconfirmed stop is not a settlement. These are the two ways to
+                        // close it, so a coordinator is never left holding a verdict with
+                        // no verb attached.
+                        nextCommands: [
+                            "\(runtime.cliCommand) worker-show --dispatch \(dispatchID) --json",
+                            "\(runtime.cliCommand) worker-abandon --dispatch \(dispatchID) --json",
+                        ])
+                }
                 let stopped = try self.store.settleWorkerStop(dispatchID)
                 self.waitCenter.notifyMessageArrived(recipient: "dispatch:\(dispatchID)", type: .status)
                 return Self.stopReceipt(dispatchID, state: stopped.state.rawValue,
@@ -352,7 +383,8 @@ extension LiveOrchestrationStore {
 
     private static func stopReceipt(
         _ dispatchID: String, state: String, alreadySettled: Bool,
-        processAction: String, lastError: String? = nil, warning: String? = nil
+        processAction: String, lastError: String? = nil, warning: String? = nil,
+        nextCommands: [String] = []
     ) -> JSONValue {
         var receipt: [String: JSONValue] = [
             "dispatchId": .string(dispatchID),
@@ -362,6 +394,9 @@ extension LiveOrchestrationStore {
         ]
         if let lastError { receipt["lastError"] = .string(lastError) }
         if let warning { receipt["warning"] = .string(warning) }
+        if !nextCommands.isEmpty {
+            receipt["nextCommands"] = .array(nextCommands.map(JSONValue.string))
+        }
         return .object(receipt)
     }
 
@@ -575,6 +610,22 @@ extension LiveOrchestrationStore {
         }
         _ = try store.settleWorkerTerminalRelease(resourceID: resource.id)
         waitCenter.notifyMessageArrived(recipient: "dispatch:\(dispatchID)", type: .status)
+        // The archive above is the remote pane's own output — everything the far side
+        // wrote came home through the connection before it closed, so pinning it is not
+        // a remote claim. What the close itself proves *is* host-dependent, and the
+        // receipt says which happened rather than reusing the local wording (T80).
+        if RemoteWorkspacePolicy.isRemote(hostId: summary.executionHostId) {
+            let label = RemoteWorkspacePolicy.hostLabel(summary.executionHostId)
+            return releaseReceipt(
+                dispatchID, state: "released",
+                processAction: wasConnected ? "closed_remote_connection"
+                                            : "closed_exited_terminal",
+                warning: wasConnected
+                    ? "The pane's connection to \(label) was closed and its output "
+                        + "archived. Whether the remote process stopped is unverifiable; "
+                        + "loss of contact is not evidence that anything on \(label) stopped."
+                    : nil)
+        }
         return releaseReceipt(
             dispatchID, state: "released",
             processAction: wasConnected ? "closed_agent_terminal" : "closed_exited_terminal")
@@ -582,7 +633,8 @@ extension LiveOrchestrationStore {
 
     private func releaseReceipt(
         _ dispatchID: String, state: String, reason: String? = nil,
-        processAction: String, lastError: String? = nil, recovery: String? = nil
+        processAction: String, lastError: String? = nil, recovery: String? = nil,
+        warning: String? = nil
     ) -> JSONValue {
         var receipt: [String: JSONValue] = [
             "dispatchId": .string(dispatchID),
@@ -593,6 +645,7 @@ extension LiveOrchestrationStore {
         if let reason { receipt["reason"] = .string(reason) }
         if let lastError { receipt["lastError"] = .string(lastError) }
         if let recovery { receipt["recovery"] = .string(recovery) }
+        if let warning { receipt["warning"] = .string(warning) }
         return .object(receipt)
     }
 
@@ -674,6 +727,10 @@ extension LiveOrchestrationStore {
         let terminal: JSONValue?
         /// The current (possibly reminted) handle when the terminal was found.
         let liveHandle: String?
+        /// The pane's execution host when one was found. `nil` means the pane was not
+        /// observed at all — never "local", because reading an unknown host as local is
+        /// the downgrade that runs (or stops) work on the wrong machine.
+        var executionHostId: String?
     }
 
     /// Inspect the worker's terminal. Exactness requires the dispatch's recorded pane
@@ -685,17 +742,20 @@ extension LiveOrchestrationStore {
     ) async -> WorkerObservation {
         guard let handle = worker?.agentTerminalHandle ?? dispatch?.assigneeHandle else {
             return WorkerObservation(status: "unattached", exact: false, reason: nil,
-                                     agentWait: nil, terminal: nil, liveHandle: nil)
+                                     agentWait: nil, terminal: nil, liveHandle: nil,
+                                     executionHostId: nil)
         }
         guard case .found(let summary, let status) = await runtime.lookupTerminal(handle) else {
             return WorkerObservation(status: "missing", exact: false, reason: nil,
-                                     agentWait: nil, terminal: nil, liveHandle: nil)
+                                     agentWait: nil, terminal: nil, liveHandle: nil,
+                                     executionHostId: nil)
         }
         let exact = dispatch?.assigneePaneKey == summary.paneKey
             && dispatch?.processIncarnation == String(summary.incarnation)
         if !exact {
             return WorkerObservation(status: "identity_changed", exact: false, reason: nil,
-                                     agentWait: nil, terminal: nil, liveHandle: summary.handle)
+                                     agentWait: nil, terminal: nil, liveHandle: summary.handle,
+                                     executionHostId: summary.executionHostId)
         }
         let agentWait: JSONValue
         if status.projection == .permission {
@@ -715,7 +775,8 @@ extension LiveOrchestrationStore {
             reason: nil,
             agentWait: agentWait,
             terminal: try? JSONBridge.value(summary),
-            liveHandle: summary.handle)
+            liveHandle: summary.handle,
+            executionHostId: summary.executionHostId)
     }
 
     // MARK: - Exposure helpers
