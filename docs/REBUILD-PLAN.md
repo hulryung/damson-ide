@@ -1222,7 +1222,29 @@ main.swift window-frame autosave (why the smaller-window adopted-fit case is the
 common one), and — only if clipping recurs — damson exposing an unconditional
 follow re-pin.
 
-### Wave 23 (T83–T85) — finish the remote story
+### Wave 23 (T83–T85) — MERGED 2026-08-26, 1269+ tests
+
+The remote story is closed. **T83** drove a real `claude-code` worker to settlement over
+ssh (dispatch created 12:55:00, completed 12:55:18): the reverse tunnel bound on the far
+side, hook config was written before launch, Claude ran Orchard's own Stop hook — so
+remote readiness is hook-attested, not inferred. The run paid for itself three times
+over: a remote agent could never have started on ANY real host because `ssh host '<cmd>'`
+is not a login shell and PATH lacked `claude`; that failure reached the coordinator as a
+bare "process has exited" with the pane's one-line explanation stranded (readiness
+failures now carry the pane's last words); and `RemoteHookConfig`'s `mkdir -p` was
+conjuring a missing remote worktree, so an agent came up in an empty directory wearing
+the workspace's name (now `remote_worktree_missing`, typed). **T84** lets the app start
+an agent on a remote workspace through the same runtime verbs the CLI uses, with host
+chips and typed inline failures; the composer sheet and GUI clicks remain unverifiable by
+synthetic input, and `worktree create --agent` is still `remote_unsupported`. **T85**
+replaced the file service's blanket refusal with a real ssh backend for
+read-dir/list/stat/preview/search under T75's byte rules (a far-side Latin-1 file comes
+back typed `not_utf8`, never U+FFFD), keeping `open`/`open-changed`/`diff` refused with
+stated reasons — a remote git-diff that hid untracked files would be a lie.
+
+Still open after this wave: remote provider transcripts (refused typed; T85's transport
+is the path to closing it), a durable connection with a generation counter, connection
+multiplexing, and `HostLiveness.live` having no producer.
 
 The SSH harness is live for this wave: host `orchard-loopback` (127.0.0.1:2222,
 user-space sshd started by the coordinator; `orchard host check --name
