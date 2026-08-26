@@ -32,6 +32,8 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// records still publish their own git/agent fields.
     @Published private(set) var records: [WorktreeRecord] = []
     @Published var checkoutStatus: GitWorktreeStatus = .unknown
+    /// The primary checkout's unmerged state, from the same reading as `checkoutStatus`.
+    @Published var checkoutConflicts: GitConflictSummary = .none
 
     /// Domain events from both services land here so the store can bind tabs,
     /// unread dots, and notifications without views subscribing themselves.
@@ -170,12 +172,25 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// whatever status is already published; this replaces it when the answer lands.
     func refreshCheckout() async {
         guard !isRemote else { return }
-        let traceStart = DispatchTime.now().uptimeNanoseconds
-        checkoutStatus = await worktrees.primaryCheckoutStatus()
-        if AppStore.traceSwitch {
-            let ms = Double(DispatchTime.now().uptimeNanoseconds - traceStart) / 1_000_000
-            NSLog("ORCHARD_TRACE refreshCheckout %.1f ms", ms)
-        }
+        let mark = AppStore.traceBegin()
+        defer { AppStore.traceEnd("refreshCheckout", mark) }
+        if applyCachedCheckout() { return }
+        apply(await worktrees.primaryCheckoutFacts())
+    }
+
+    /// Publish the primary checkout's cached reading without running git or suspending.
+    /// Returns whether there was one. Selecting a project root calls this first, which is
+    /// why coming back to a project costs nothing.
+    @discardableResult
+    func applyCachedCheckout() -> Bool {
+        guard let facts = worktrees.cachedPrimaryCheckoutFacts() else { return false }
+        apply(facts)
+        return true
+    }
+
+    private func apply(_ facts: GitWorktreeFacts) {
+        if checkoutStatus != facts.status { checkoutStatus = facts.status }
+        if checkoutConflicts != facts.conflicts { checkoutConflicts = facts.conflicts }
     }
 
     func applyTerminalConfig(_ config: DamsonConfig) {

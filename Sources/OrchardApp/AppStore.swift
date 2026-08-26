@@ -144,20 +144,44 @@ final class AppStore: ObservableObject {
     /// Temporary switch-latency tracing (coordinator, wave 24 follow-up). Active only
     /// when ORCHARD_TRACE_SWITCH=1 so a normal run prints nothing.
     static let traceSwitch = ProcessInfo.processInfo.environment["ORCHARD_TRACE_SWITCH"] == "1"
+
+    /// A phase's start: wall-clock and the process-wide `git` spawn count.
+    ///
+    /// T87's acceptance is a spawn count, not only a duration — "no phase over 50 ms" is
+    /// satisfiable by a slow machine doing the wrong work, and "zero git on the critical
+    /// path" is the claim that actually has to hold. Carrying both through the same trace
+    /// is what makes the table readable off one env var. The count is process-wide, so a
+    /// background refresh of *another* worktree can land inside a phase's window; the
+    /// numbers to read are the ones from a quiet app.
+    struct TraceMark {
+        let nanos: UInt64
+        let spawns: Int
+    }
+
+    static func traceBegin() -> TraceMark {
+        TraceMark(nanos: DispatchTime.now().uptimeNanoseconds,
+                  spawns: traceSwitch ? GitRunner.Trace.snapshot().spawns : 0)
+    }
+
+    static func traceEnd(_ label: String, _ mark: TraceMark) {
+        guard traceSwitch else { return }
+        let ms = Double(DispatchTime.now().uptimeNanoseconds - mark.nanos) / 1_000_000
+        let spawns = GitRunner.Trace.snapshot().spawns - mark.spawns
+        NSLog("ORCHARD_TRACE %@ %.1f ms, %d git", label, ms, spawns)
+    }
+
     static func trace<T>(_ label: String, _ body: () -> T) -> T {
         guard traceSwitch else { return body() }
-        let start = DispatchTime.now().uptimeNanoseconds
+        let mark = traceBegin()
         let value = body()
-        let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
-        NSLog("ORCHARD_TRACE %@ %.1f ms", label, ms)
+        traceEnd(label, mark)
         return value
     }
     static func traceAsync<T>(_ label: String, _ body: () async -> T) async -> T {
         guard traceSwitch else { return await body() }
-        let start = DispatchTime.now().uptimeNanoseconds
+        let mark = traceBegin()
         let value = await body()
-        let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
-        NSLog("ORCHARD_TRACE %@ %.1f ms", label, ms)
+        traceEnd(label, mark)
         return value
     }
 
@@ -221,6 +245,7 @@ final class AppStore: ObservableObject {
         self.meta.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
+        observeGitFacts()
         requestNotificationPermission()
     }
 
@@ -297,13 +322,8 @@ final class AppStore: ObservableObject {
     // MARK: - Selection
 
     func select(_ record: WorktreeRecord, in project: ProjectSession) {
-        let traceStart = DispatchTime.now().uptimeNanoseconds
-        defer {
-            if Self.traceSwitch {
-                let ms = Double(DispatchTime.now().uptimeNanoseconds - traceStart) / 1_000_000
-                NSLog("ORCHARD_TRACE select(sync) %.1f ms", ms)
-            }
-        }
+        let mark = Self.traceBegin()
+        defer { Self.traceEnd("select(sync)", mark) }
         selectedProjectID = project.id
         selection = .worktree(record.id)
         applyUnread(.focusedWorkspace(record.id))
@@ -315,17 +335,17 @@ final class AppStore: ObservableObject {
             refreshRemoteListing(project)
             return
         }
+        // A workspace visited a moment ago has its facts already, and publishing them here
+        // means the card is right in the same frame the selection changes — no spawn, no
+        // hop off the main actor, nothing to wait for. A first visit falls through to the
+        // detached read and the card fills in when it lands.
+        if record.applyCachedFacts() { return }
         Task { await record.refresh() }
     }
 
     func selectProjectRoot(_ project: ProjectSession) {
-        let traceStart = DispatchTime.now().uptimeNanoseconds
-        defer {
-            if Self.traceSwitch {
-                let ms = Double(DispatchTime.now().uptimeNanoseconds - traceStart) / 1_000_000
-                NSLog("ORCHARD_TRACE selectProjectRoot(sync) %.1f ms", ms)
-            }
-        }
+        let mark = Self.traceBegin()
+        defer { Self.traceEnd("selectProjectRoot(sync)", mark) }
         selectedProjectID = project.id
         selection = .projectRoot(project.id)
         ensureLayout(for: .projectRoot(project.id))
@@ -333,6 +353,7 @@ final class AppStore: ObservableObject {
             refreshRemoteListing(project)
             return
         }
+        if project.applyCachedCheckout() { return }
         Task { await project.refreshCheckout() }
     }
 
@@ -1413,7 +1434,9 @@ final class AppStore: ObservableObject {
     /// Conflict tabs Orchard opened on its own. Tracked so it can take back exactly those
     /// and no others — a tab the user opened is the user's to close.
     private var autoConflictTabs: [WorkbenchKey: UUID] = [:]
-    private let conflictService = GitConflictService()
+    private var gitFactsObserver: UUID?
+    /// One in-flight debounced re-read per workspace, so a write storm collapses.
+    private var pendingFactsRefresh: [WorkbenchKey: Task<Void, Never>] = [:]
 
     func conflictSummary(for key: WorkbenchKey?) -> GitConflictSummary {
         guard let key else { return .none }
@@ -1424,23 +1447,94 @@ final class AppStore: ObservableObject {
     /// Git runs off the main actor — a conflicted repo is exactly when the user is
     /// clicking around, and a stuttering tab strip is the last thing that helps.
     func refreshConflicts(for key: WorkbenchKey) async {
-        let traceStart = DispatchTime.now().uptimeNanoseconds
-        defer {
-            if Self.traceSwitch {
-                let ms = Double(DispatchTime.now().uptimeNanoseconds - traceStart) / 1_000_000
-                NSLog("ORCHARD_TRACE refreshConflicts %.1f ms", ms)
-            }
-        }
+        let mark = Self.traceBegin()
+        defer { Self.traceEnd("refreshConflicts", mark) }
         guard !isRemote(key), let root = workspaceRoot(for: key) else {
-            conflictSummaries[key] = .none
+            conflictSummaries[key] = GitConflictSummary.none
             return
         }
-        let service = conflictService
-        let summary = await Task.detached(priority: .utility) {
-            service.summary(worktree: root)
-        }.value
-        conflictSummaries[key] = summary
-        syncConflictTab(for: key, summary: summary)
+        // The conflict summary is half of the same reading the workspace card wants, so it
+        // is asked for by the same key and answered from the same cache. It used to be two
+        // `git` processes of its own — a `rev-parse` and a second `git status` — run in
+        // parallel with the card's three, at the exact moment the user was waiting.
+        let baseRef = factsBaseRef(for: key)
+        if let cached = GitFactsCache.shared.cached(worktree: root, baseRef: baseRef) {
+            apply(cached, for: key)
+            return
+        }
+        apply(await GitFactsCache.shared.facts(worktree: root, baseRef: baseRef), for: key)
+    }
+
+    /// The base ref a workspace's facts are read against: a worktree's fork point, or the
+    /// primary checkout's own HEAD. Everything asking about one workspace has to use the
+    /// same one, or two callers key two readings and the cache buys nothing.
+    func factsBaseRef(for key: WorkbenchKey) -> String {
+        switch key {
+        case .projectRoot: return "HEAD"
+        case .worktree(let id):
+            for project in projects where !project.isRemote {
+                if let record = project.record(id: id) { return record.effectiveBaseRef }
+            }
+            return "HEAD"
+        }
+    }
+
+    private func apply(_ facts: GitWorktreeFacts, for key: WorkbenchKey) {
+        conflictSummaries[key] = facts.conflicts
+        syncConflictTab(for: key, summary: facts.conflicts)
+    }
+
+    /// Re-read the workspace on screen when something changes it underneath.
+    ///
+    /// The cache drops an invalidated reading rather than serving it, so without this the
+    /// card and the conflict tab would simply stop updating while the user watched an agent
+    /// work. Only the visible workspace is re-read eagerly; every other one is read the
+    /// next time it is looked at, which is the whole point of not doing it on the switch.
+    private func observeGitFacts() {
+        gitFactsObserver = GitFactsCache.shared.observe { [weak self] worktree in
+            Task { @MainActor [weak self] in
+                guard let self, let key = self.selection,
+                      let root = self.workspaceRoot(for: key),
+                      GitFactsCache.key(root) == GitFactsCache.key(worktree) else { return }
+                self.scheduleFactsRefresh(key)
+            }
+        }
+    }
+
+    /// How long a burst of file-system changes is allowed to collapse into one re-read.
+    ///
+    /// An agent writing to the workspace on screen invalidates the reading continuously.
+    /// Re-reading on every notification would answer each write with three git processes
+    /// and never catch up; waiting a beat and reading once gives the user a card that is
+    /// under a second behind and costs almost nothing. The trailing edge matters: the
+    /// refresh is scheduled *after* the quiet period, so the last write is the one the
+    /// reading sees.
+    static let factsRefreshDebounce: Duration = .milliseconds(750)
+
+    private func scheduleFactsRefresh(_ key: WorkbenchKey) {
+        guard pendingFactsRefresh[key] == nil else { return }
+        pendingFactsRefresh[key] = Task { [weak self] in
+            try? await Task.sleep(for: Self.factsRefreshDebounce)
+            guard let self, !Task.isCancelled else { return }
+            self.pendingFactsRefresh[key] = nil
+            await self.refreshWorkspaceFacts(key)
+        }
+    }
+
+    /// Re-read one workspace's facts and publish them to both surfaces that show them.
+    func refreshWorkspaceFacts(_ key: WorkbenchKey) async {
+        guard !isRemote(key), let root = workspaceRoot(for: key) else { return }
+        let facts = await GitFactsCache.shared.facts(worktree: root,
+                                                     baseRef: factsBaseRef(for: key))
+        apply(facts, for: key)
+        switch key {
+        case .projectRoot(let id):
+            projects.first { $0.id == id }?.applyCachedCheckout()
+        case .worktree(let id):
+            for project in projects where !project.isRemote {
+                project.record(id: id)?.applyCachedFacts()
+            }
+        }
     }
 
     /// A worktree that is mid-merge grows a conflict tab without being asked — the tab is

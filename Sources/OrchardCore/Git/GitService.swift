@@ -27,13 +27,23 @@ public struct GitFileChange: Equatable, Sendable, Identifiable, Hashable {
     public let deleted: Int
     /// git reported `-` line counts — a binary blob, so +/- are meaningless.
     public let isBinary: Bool
+    /// Whether `added`/`deleted` were actually measured.
+    ///
+    /// False only for an untracked file this refresh declined to read: too large on its
+    /// own, or past the refresh's whole-file read budget. That is a real change of
+    /// unknown size, which is a different claim from "a change of zero lines" and from
+    /// "binary" — reporting either of those instead is how a sidebar ends up lying about
+    /// a file nobody looked at.
+    public let linesCounted: Bool
 
-    public init(path: String, kind: Kind, added: Int, deleted: Int, isBinary: Bool = false) {
+    public init(path: String, kind: Kind, added: Int, deleted: Int, isBinary: Bool = false,
+                linesCounted: Bool = true) {
         self.path = path
         self.kind = kind
         self.added = added
         self.deleted = deleted
         self.isBinary = isBinary
+        self.linesCounted = linesCounted
     }
 
     /// Just the filename, for the primary label in a file row.
@@ -51,11 +61,15 @@ public struct GitDiffStat: Equatable, Sendable {
     public let files: [GitFileChange]
     public let added: Int
     public let deleted: Int
+    /// Whether every file in `files` had its line counts measured. False makes `added`
+    /// a floor rather than a total, and the UI says so instead of printing it as fact.
+    public let countsComplete: Bool
 
     public init(files: [GitFileChange]) {
         self.files = files
         self.added = files.reduce(0) { $0 + $1.added }
         self.deleted = files.reduce(0) { $0 + $1.deleted }
+        self.countsComplete = files.allSatisfy { $0.linesCounted }
     }
 
     public static let empty = GitDiffStat(files: [])
@@ -119,9 +133,24 @@ public struct GitService: Sendable {
     /// branch, the upstream, the ahead/behind counts and the untracked list that five
     /// separate spawns used to fetch; `diff --raw --numstat` carries change kind and line
     /// counts in one walk; `log --format=%s` carries both how many commits are ahead of
-    /// the fork point and the newest subject. Nothing here is cached — the cost is now low
-    /// enough that a cache would only buy the chance to show a stale branch.
+    /// the fork point and the newest subject.
+    ///
+    /// Caching is `GitFactsCache`'s job, not this type's: it is the thing that owns a
+    /// watcher and can say when a reading stopped being true.
     public func status(worktree: URL, baseRef: String) -> GitWorktreeStatus {
+        facts(worktree: worktree, baseRef: baseRef).status
+    }
+
+    /// The status reading **and** the conflict summary, from the same three spawns.
+    ///
+    /// The conflict summary used to cost two `git` processes of its own — a
+    /// `rev-parse --absolute-git-dir` and a second `git status --porcelain`. Both are
+    /// gone: porcelain v2 already names every unmerged path in the reading that answers
+    /// "is this tree dirty", and which operation is mid-flight is read from the control
+    /// files in the git dir, which is resolved from `<worktree>/.git` without asking git.
+    /// A workspace switch that used to run five processes now runs three, and none of
+    /// them if the cache still holds a reading nothing has invalidated.
+    public func facts(worktree: URL, baseRef: String) -> GitWorktreeFacts {
         let porcelain = GitStatusPorcelainV2.parse(
             git.query(in: worktree, GitStatusPorcelainV2.arguments) ?? "")
         let stat = diffStat(worktree: worktree, baseRef: baseRef, untracked: porcelain.untracked)
@@ -131,10 +160,14 @@ public struct GitService: Sendable {
         // "nothing to push to", which the delete preflight treats differently from "0 unpushed".
         let unpushed = porcelain.upstream == nil ? nil : porcelain.ahead
 
-        return GitWorktreeStatus(
+        let status = GitWorktreeStatus(
             branch: porcelain.branch, stat: stat, commitsAhead: subjects.count,
             hasUncommittedChanges: porcelain.hasChanges,
             lastCommitSubject: subjects.first, unpushedCommits: unpushed)
+        return GitWorktreeFacts(
+            status: status,
+            conflicts: GitConflictService(git: git).summary(worktree: worktree,
+                                                            unmerged: porcelain.unmerged))
     }
 
     /// Commit subjects on HEAD but not on `baseRef`, newest first. The count is
@@ -199,24 +232,61 @@ public struct GitService: Sendable {
             else { return [] }
             relatives = out.split(separator: "\0", omittingEmptySubsequences: true).map(String.init)
         }
+        var budget = Self.untrackedReadBudget
         return relatives.map { path in
-            let (lines, binary) = Self.countLines(at: worktree.appendingPathComponent(path))
-            return GitFileChange(path: path, kind: .untracked, added: lines, deleted: 0, isBinary: binary)
+            let reading = Self.countLines(at: worktree.appendingPathComponent(path),
+                                          budget: &budget)
+            return GitFileChange(path: path, kind: .untracked,
+                                 added: reading.lines, deleted: 0,
+                                 isBinary: reading.binary, linesCounted: reading.counted)
         }
     }
 
-    /// Line count of an untracked file, and whether it looks binary (a NUL byte in the head,
-    /// the same heuristic git uses). Large files are reported as binary rather than read
-    /// whole — the count isn't worth stalling a sidebar refresh over.
-    private static func countLines(at url: URL) -> (Int, Bool) {
-        let maxBytes = 2 * 1024 * 1024
-        guard let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int,
-              size <= maxBytes,
-              let data = try? Data(contentsOf: url) else { return (0, true) }
-        if data.prefix(8000).contains(0) { return (0, true) }
-        let newlines = data.reduce(into: 0) { count, byte in if byte == 0x0A { count += 1 } }
+    /// How many bytes of untracked file content one status reading will read.
+    ///
+    /// There is no `git` command that counts the lines in a file git is not tracking, so
+    /// the only way to put a `+N` on a brand-new file is to read it — and a checkout with
+    /// a few thousand untracked files was reading *all of them, whole*, on every sidebar
+    /// refresh. The budget bounds that: everything is counted until it runs out, and what
+    /// is past it is reported as a change of unknown size rather than as zero lines.
+    static let untrackedReadBudget = 64 * 1024 * 1024
+    /// Per-file ceiling. A file this large is not something a sidebar `+N` is worth
+    /// reading; it reads as uncounted, not as binary.
+    static let untrackedFileCeiling = 2 * 1024 * 1024
+
+    /// Line count of an untracked file, whether it looks binary (a NUL byte in the head,
+    /// the same heuristic git uses), and whether it was counted at all.
+    ///
+    /// The scan is `memchr` over the mapped bytes rather than a `Data.reduce` over every
+    /// element: the reduce was the expensive half of a refresh on a repo with real
+    /// untracked content, and it produced the identical number.
+    static func countLines(at url: URL, budget: inout Int)
+        -> (lines: Int, binary: Bool, counted: Bool) {
+        guard let size = (try? FileManager.default
+            .attributesOfItem(atPath: url.path))?[.size] as? Int else {
+            return (0, false, false)
+        }
+        guard size <= untrackedFileCeiling, size <= budget else { return (0, false, false) }
+        guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
+            return (0, false, false)
+        }
+        budget -= size
+        if data.prefix(8000).contains(0) { return (0, true, true) }
+        if data.isEmpty { return (0, false, true) }
+        var newlines = 0
+        var last: UInt8 = 0
+        data.withUnsafeBytes { (raw: UnsafeRawBufferPointer) in
+            guard let base = raw.baseAddress else { return }
+            var offset = 0
+            while offset < raw.count {
+                guard let hit = memchr(base + offset, 0x0A, raw.count - offset) else { break }
+                newlines += 1
+                offset = UnsafeRawPointer(hit) - base + 1
+            }
+            last = raw.load(fromByteOffset: raw.count - 1, as: UInt8.self)
+        }
         // A trailing line without a final newline still counts.
-        return (data.last == 0x0A || data.isEmpty ? newlines : newlines + 1, false)
+        return (last == 0x0A ? newlines : newlines + 1, false, true)
     }
 
     // MARK: - Diff text

@@ -25,9 +25,55 @@ public struct GitRunner: Sendable {
         return "/usr/bin/git"
     }
 
+    /// Called with the directory a possibly-mutating `git` ran in, so a cache of git facts
+    /// can drop that worktree's reading the instant Orchard changes it rather than waiting
+    /// for the file-system notification to arrive.
+    ///
+    /// This is a latency shortcut, never the correctness guarantee: `GitFactsCache` caches
+    /// only what it is watching, and the watcher is what catches a commit made in a
+    /// terminal, by an agent, or by any other process on the machine. So a verb wrongly
+    /// counted read-only here costs a few milliseconds of lateness, not a wrong answer.
+    nonisolated(unsafe) public static var onMutation: (@Sendable (URL) -> Void)? = {
+        GitFactsCache.shared.invalidate(worktree: $0)
+    }
+
+    /// git verbs that cannot change what a worktree's facts reading would say. Anything
+    /// not named here is treated as a mutation.
+    static let readOnlyVerbs: Set<String> = [
+        "status", "diff", "diff-tree", "log", "show", "rev-parse", "rev-list", "ls-files",
+        "ls-tree", "cat-file", "for-each-ref", "merge-base", "symbolic-ref", "describe",
+        "blame", "shortlog", "check-ignore", "var", "version",
+    ]
+
+    /// The directory a git invocation acted on, from an explicit `-C <dir>` or the cwd.
+    static func target(_ args: [String], cwd: URL?) -> URL? {
+        if args.count >= 2, args[0] == "-C" { return URL(fileURLWithPath: args[1]) }
+        return cwd
+    }
+
+    /// The subcommand, skipping a leading `-C <dir>`.
+    static func verb(_ args: [String]) -> String? {
+        var index = 0
+        if args.count >= 2, args[0] == "-C" { index = 2 }
+        while index < args.count, args[index].hasPrefix("-") { index += 1 }
+        return index < args.count ? args[index] : nil
+    }
+
+    private func noteMutation(_ args: [String], cwd: URL?) {
+        guard let observer = Self.onMutation else { return }
+        // `worktree list` is read-only; `worktree add` / `prune` are not. The verb alone
+        // is too coarse for that one, and it runs on the listing path often enough that
+        // treating it as a mutation would defeat the cache on every sidebar refresh.
+        if Self.verb(args) == "worktree", args.contains("list") { return }
+        if let verb = Self.verb(args), Self.readOnlyVerbs.contains(verb) { return }
+        guard let dir = Self.target(args, cwd: cwd) else { return }
+        observer(dir)
+    }
+
     /// Run git and return stdout, throwing `GitError` on a nonzero exit.
     @discardableResult
     public func run(_ args: [String], cwd: URL? = nil) throws -> String {
+        defer { noteMutation(args, cwd: cwd) }
         let result = try capture(args, cwd: cwd)
         guard result.status == 0 else {
             throw GitError("git \(args.joined(separator: " ")) failed (\(result.status)): "
@@ -68,6 +114,7 @@ public struct GitRunner: Sendable {
     /// Run git and return stdout as raw bytes, throwing `GitError` on a nonzero exit.
     @discardableResult
     public func runData(_ args: [String], cwd: URL? = nil) throws -> Data {
+        defer { noteMutation(args, cwd: cwd) }
         let result = try captureData(args, cwd: cwd)
         guard result.status == 0 else {
             throw GitError("git \(args.joined(separator: " ")) failed (\(result.status)): "

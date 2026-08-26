@@ -37,6 +37,33 @@ final class GitStatusPorcelainParseTests: XCTestCase {
         XCTAssertEqual(parsed.ahead, 0)
     }
 
+    /// T87: the unmerged records the conflict summary now reads instead of paying for a
+    /// second `git status` of its own. The path is *everything after the tenth column*, so
+    /// a path with a space in it survives; taking the last token would truncate it.
+    func testUnmergedRecordsCarryTheirPathAndConflictCode() {
+        let parsed = GitStatusPorcelainV2.parse(nulJoined([
+            "# branch.head main",
+            "u UU N... 100644 100644 100644 100644 1111111 2222222 3333333 src/both modified.txt",
+            "u DU N... 100644 000000 100644 100644 1111111 0000000 3333333 gone.txt",
+        ]))
+        XCTAssertEqual(parsed.unmerged.map(\.path), ["src/both modified.txt", "gone.txt"])
+        XCTAssertEqual(parsed.unmerged.map(\.code), ["UU", "DU"])
+        XCTAssertTrue(parsed.hasChanges)
+        XCTAssertEqual(GitConflictKind.from(code: parsed.unmerged[0].code), .bothModified)
+        XCTAssertEqual(GitConflictKind.from(code: parsed.unmerged[1].code), .deletedByUs)
+    }
+
+    /// A truncated or unfamiliar `u` record is skipped rather than turned into a conflict
+    /// on a path nobody named — inventing a file here would open a review tab on nothing.
+    func testAMalformedUnmergedRecordIsSkippedRatherThanGuessed() {
+        let parsed = GitStatusPorcelainV2.parse(nulJoined([
+            "# branch.head main",
+            "u UU N... 100644 100644",
+        ]))
+        XCTAssertTrue(parsed.unmerged.isEmpty)
+        XCTAssertTrue(parsed.hasChanges, "git still said the tree is dirty")
+    }
+
     func testChangedUnmergedAndUntrackedEntriesAllCountAsDirty() {
         let parsed = GitStatusPorcelainV2.parse(nulJoined([
             "# branch.head main",

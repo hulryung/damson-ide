@@ -22,15 +22,34 @@ public struct GitStatusPorcelainV2: Equatable, Sendable {
     /// Untracked paths, worktree-relative. `-uall` lists files, not directories, so this
     /// matches what `ls-files --others --exclude-standard` produced.
     public var untracked: [String]
+    /// Unmerged paths and their conflict code (`UU`, `AA`, `DU`, …), in the order git
+    /// printed them.
+    ///
+    /// The same reading that answers "is this tree dirty" already names every conflict,
+    /// so the conflict summary does not need a `git status --porcelain` of its own —
+    /// that second spawn was the more expensive half of `refreshConflicts`.
+    public var unmerged: [Unmerged]
+
+    /// One `u` record: the worktree-relative path and git's two-letter conflict code.
+    public struct Unmerged: Equatable, Sendable {
+        public let path: String
+        public let code: String
+        public init(path: String, code: String) {
+            self.path = path
+            self.code = code
+        }
+    }
 
     public init(branch: String = "", upstream: String? = nil, ahead: Int = 0, behind: Int = 0,
-                hasChanges: Bool = false, untracked: [String] = []) {
+                hasChanges: Bool = false, untracked: [String] = [],
+                unmerged: [Unmerged] = []) {
         self.branch = branch
         self.upstream = upstream
         self.ahead = ahead
         self.behind = behind
         self.hasChanges = hasChanges
         self.untracked = untracked
+        self.unmerged = unmerged
     }
 
     /// The argument vector this parser expects. Kept next to the parser so the two can
@@ -52,10 +71,21 @@ public struct GitStatusPorcelainV2: Equatable, Sendable {
             switch marker {
             case "#":
                 applyHeader(field, to: &result)
-            case "1", "u":
-                // `1 <XY> …` ordinary change, `u <XY> …` unmerged. One field each.
+            case "1":
+                // `1 <XY> …` ordinary change. One field each.
                 guard field.dropFirst().first == " " else { continue }
                 result.hasChanges = true
+            case "u":
+                // `u <XY> <sub> <m1> <m2> <m3> <mW> <h1> <h2> <h3> <path>`: ten
+                // space-separated columns, then the path — which runs to the NUL, so a
+                // path containing spaces survives only if it is taken as the remainder
+                // rather than as the last token.
+                guard field.dropFirst().first == " " else { continue }
+                result.hasChanges = true
+                let code = String(field.dropFirst(2).prefix(2))
+                if let path = Self.field(field, after: 10), !path.isEmpty {
+                    result.unmerged.append(Unmerged(path: path, code: code))
+                }
             case "2":
                 // A rename/copy record is followed by a second field holding the
                 // original path; consuming it here is what keeps the walk aligned.
@@ -71,6 +101,24 @@ public struct GitStatusPorcelainV2: Equatable, Sendable {
             }
         }
         return result
+    }
+
+    /// Everything after the first `columns` spaces in a porcelain record, or nil when the
+    /// record has fewer columns than that. The remainder is returned verbatim, which is
+    /// what makes a path with spaces in it survive.
+    static func field(_ record: String, after columns: Int) -> String? {
+        var seen = 0
+        var index = record.startIndex
+        while index < record.endIndex {
+            if record[index] == " " {
+                seen += 1
+                if seen == columns {
+                    return String(record[record.index(after: index)...])
+                }
+            }
+            index = record.index(after: index)
+        }
+        return nil
     }
 
     private static func applyHeader(_ field: String, to result: inout GitStatusPorcelainV2) {
