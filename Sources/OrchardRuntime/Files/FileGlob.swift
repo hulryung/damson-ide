@@ -7,6 +7,9 @@ import Foundation
 /// literals so a hostile pattern can't become a surprising regex.
 public struct FileGlob: Equatable, Sendable {
     public let pattern: String
+    /// ICU regex `FileGlob` compiled. The remote search transport sends this to the
+    /// far side so include/exclude keep the same meaning over ssh.
+    let regexPattern: String
     private let regex: NSRegularExpression
 
     public static func == (lhs: FileGlob, rhs: FileGlob) -> Bool {
@@ -23,7 +26,9 @@ public struct FileGlob: Equatable, Sendable {
         }
         self.pattern = trimmed
         do {
-            self.regex = try Self.compile(trimmed)
+            let compiled = try Self.compile(trimmed)
+            self.regexPattern = compiled.pattern
+            self.regex = compiled
         } catch {
             throw FileServiceError.invalidArgument("invalid glob '\(trimmed)'")
         }
