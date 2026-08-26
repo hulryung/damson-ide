@@ -197,14 +197,33 @@ extension LiveOrchestrationStore {
                     setupState: setup.field("state")?.stringValue,
                     effects: Self.encodeReceipt(.array(effects)))
 
-                // Stage: agent_readiness — tui-idle only; permission must not satisfy.
+                // Stage: agent_readiness. An agent TUI answers with tui-idle (permission
+                // must not satisfy). A bare shell cannot: "stopped painting" is also what
+                // a shell looks like while its startup files run, and input typed then is
+                // read by the tty in canonical mode, which truncates it — which is how a
+                // 6 KB contract loses its closing quote and strands the pane. So a shell
+                // is asked to *run something* instead (T82).
                 stage = "agent_readiness"
-                let wait = try await runtime.waitForAgentIdle(summary.handle, timeout)
-                guard wait.satisfied else {
-                    let state = wait.agentState.map { " (agent state: \($0.rawValue))" } ?? ""
-                    throw RPCServiceError(
-                        code: "agent_not_ready",
-                        message: "Agent did not become ready within \(Int(timeout))s\(state).")
+                let bareShell = ShellWorkerContract.needsShellContract(engineID: summary.engine)
+                if bareShell {
+                    guard await Self.shellHandshake(handle: summary.handle, runtime: runtime,
+                                                    deadline: Date().addingTimeInterval(timeout)) else {
+                        throw RPCServiceError(
+                            code: "agent_not_ready",
+                            message: "The shell did not run a readiness probe within \(Int(timeout))s.")
+                    }
+                    // The probe's output can arrive while the shell is still finishing
+                    // whatever it was doing; give the line editor its beat to take the
+                    // tty back before the contract arrives.
+                    try? await Task.sleep(nanoseconds: UInt64(Self.shellSettleDelay * 1_000_000_000))
+                } else {
+                    let wait = try await runtime.waitForAgentIdle(summary.handle, timeout)
+                    guard wait.satisfied else {
+                        let state = wait.agentState.map { " (agent state: \($0.rawValue))" } ?? ""
+                        throw RPCServiceError(
+                            code: "agent_not_ready",
+                            message: "Agent did not become ready within \(Int(timeout))s\(state).")
+                    }
                 }
 
                 // Stage: capability minting + authority binding (pane + incarnation are
@@ -218,19 +237,57 @@ extension LiveOrchestrationStore {
                     worktreeID: worktree?.id,
                     externalTerminal: external)
 
-                // Stage: dispatch_input — the verified injection of the preamble (or,
-                // for a shell-command dispatch, the self-settling command line).
+                // Stage: dispatch_input — the verified injection of the contract in the
+                // form this pane can act on. The engine decides, not the caller: an
+                // agent TUI reads prose as a prompt, while behind every other engine is
+                // a shell that reads it as *input* — which is how the preamble used to
+                // strand a shell worker at a `quote>` continuation prompt with the live
+                // capability in pending input (T82; the T80 verification found it on a
+                // local and a remote pane alike).
                 stage = "dispatch_input"
-                let preamble = shellCommandInput
-                    ? AutomationShellDispatch.commandLine(
+                let dispatchInput: String
+                let inputMode: String
+                var deliveryNonce: String?
+                if shellCommandInput {
+                    // T60's automation fire: the spec *is* a command line, so the pane
+                    // runs it and reports the exit status as this dispatch's outcome.
+                    dispatchInput = AutomationShellDispatch.commandLine(
                         prompt: task.spec, cliCommand: runtime.cliCommand,
                         workerHandle: summary.handle, capability: capability,
                         taskID: taskID, dispatchID: dispatchID)
-                    : self.workerPreamble(
+                    inputMode = AutomationShellDispatch.shellCommandMode
+                } else if bareShell {
+                    // A supervised shell worker: the spec is prose for whoever drives
+                    // the pane, so the same contract arrives as a document the shell
+                    // saves and prints, and the prompt comes back usable.
+                    let nonce = ShellWorkerContract.nonce()
+                    deliveryNonce = nonce
+                    dispatchInput = ShellWorkerContract.commandLine(
+                        preamble: self.workerPreamble(
+                            task: task, run: run, dispatchID: dispatchID,
+                            capability: capability, workerHandle: summary.handle,
+                            cliCommand: runtime.cliCommand, workerKind: .bareShell),
+                        cliCommand: runtime.cliCommand, workerHandle: summary.handle,
+                        capability: capability, taskID: taskID, dispatchID: dispatchID,
+                        deliveryNonce: nonce)
+                    inputMode = ShellWorkerContract.mode
+                } else {
+                    dispatchInput = self.workerPreamble(
                         task: task, run: run, dispatchID: dispatchID,
                         capability: capability, workerHandle: summary.handle,
                         cliCommand: runtime.cliCommand)
-                let delivered = try await runtime.injectPrompt(summary.handle, preamble)
+                    inputMode = "preamble"
+                }
+                // A shell's acceptance is a write, not a delivery, so its contract goes
+                // through the offer-verify-recover loop rather than a single injection.
+                let delivered: TerminalSendResult
+                if let deliveryNonce {
+                    delivered = try await Self.deliverShellContract(
+                        handle: summary.handle, line: dispatchInput, nonce: deliveryNonce,
+                        runtime: runtime, deadline: Date().addingTimeInterval(timeout))
+                } else {
+                    delivered = try await runtime.injectPrompt(summary.handle, dispatchInput)
+                }
                 guard delivered.accepted else {
                     let reason = delivered.refusedReason?.rawValue ?? "refused"
                     throw RPCServiceError(
@@ -242,8 +299,7 @@ extension LiveOrchestrationStore {
                     "role": .string("agent"),
                     "id": .string(summary.handle),
                     "state": .string("accepted"),
-                    "mode": .string(shellCommandInput
-                        ? AutomationShellDispatch.shellCommandMode : "preamble"),
+                    "mode": .string(inputMode),
                 ]))
                 let worker = try self.store.markWorkerDispatchReady(
                     dispatchID, effects: Self.encodeReceipt(.array(effects)))
@@ -269,6 +325,98 @@ extension LiveOrchestrationStore {
                     runtime: runtime)
             }
         }
+    }
+
+    /// How long one readiness probe is given to come back before another is sent. A
+    /// shell that had not taken the tty yet never saw the first one, so re-sending is
+    /// the recovery — not waiting longer.
+    static let shellProbeInterval: TimeInterval = 1.5
+    /// How much of the pane's tail a marker search reads. Comfortably more than the
+    /// handful of lines a probe or a printed contract adds.
+    static let shellProbeReadLimit = 400
+    /// How long one contract offer is given to come back with its marker.
+    static let shellContractVerifyWindow: TimeInterval = 4
+    /// How many offers the contract gets. Two is usually enough — the first can lose a
+    /// race with a still-starting shell, and by the second that shell is settled — so
+    /// three is the budget with a spare.
+    static let shellContractAttempts = 3
+    /// A beat after clearing a pane, so its line editor is back in charge before the
+    /// next multi-kilobyte offer arrives.
+    static let shellSettleDelay: TimeInterval = 0.5
+
+    /// Wait for `marker` to appear in the pane's own output.
+    ///
+    /// Only an *executed* probe can produce it: every marker this file builds puts `%s`
+    /// in a `printf` format and the nonce in the argument, so the echo of the command
+    /// and the output of the command are different strings.
+    static func awaitShellMarker(handle: String, marker: String,
+                                 runtime: WorkerRuntimeContext, deadline: Date) async -> Bool {
+        while true {
+            if let read = try? await runtime.readTerminal(handle, nil, shellProbeReadLimit),
+               read.lines.contains(where: { $0.contains(marker) }) {
+                return true
+            }
+            if Date() >= deadline { return false }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+    }
+
+    /// Ask the shell to run one short line, and wait for its output. Repeats with a
+    /// fresh nonce until the deadline, because the interesting failure is a probe that
+    /// was never read rather than one that was read and ignored.
+    static func shellHandshake(handle: String, runtime: WorkerRuntimeContext,
+                               deadline: Date) async -> Bool {
+        repeat {
+            let nonce = ShellWorkerContract.nonce()
+            guard let sent = try? await runtime.injectPrompt(
+                handle, ShellWorkerContract.readinessProbe(nonce: nonce)), sent.accepted else {
+                return false
+            }
+            let window = min(deadline, Date().addingTimeInterval(shellProbeInterval))
+            if await awaitShellMarker(handle: handle, marker: ShellWorkerContract.marker(nonce: nonce),
+                                      runtime: runtime, deadline: window) {
+                return true
+            }
+        } while Date() < deadline
+        return false
+    }
+
+    /// Put the contract in front of the shell until the shell proves it ran the whole
+    /// line — and never leave partial input in the pane when it did not.
+    ///
+    /// One offer is not enough on a pane whose shell has only just started. A login
+    /// shell that has already answered a probe may still be running the rest of its
+    /// startup files, and while it is, the line editor has not taken the tty back: input
+    /// is read in **canonical mode**, where anything past `MAX_CANON` (1024 bytes on
+    /// Darwin) is silently cut. What lands then is a contract without its closing quote
+    /// — the stranded pane, capability and all, that this task exists to prevent.
+    ///
+    /// So every attempt is verified by the marker the line's last command prints (an
+    /// echo of the line cannot produce it), and a failed attempt is cleared with an
+    /// interrupt — the recovery T80's verification had to perform by hand — before the
+    /// next one, which finds a settled shell. The interrupt runs on the last attempt
+    /// too: if this stage is going to fail, it fails with an empty prompt behind it.
+    static func deliverShellContract(handle: String, line: String, nonce: String,
+                                     runtime: WorkerRuntimeContext,
+                                     deadline: Date) async throws -> TerminalSendResult {
+        let marker = ShellWorkerContract.marker(nonce: nonce)
+        var attempts = 0
+        repeat {
+            attempts += 1
+            let sent = try await runtime.injectPrompt(handle, line)
+            guard sent.accepted else { return sent }
+            let window = min(deadline, Date().addingTimeInterval(shellContractVerifyWindow))
+            if await awaitShellMarker(handle: handle, marker: marker,
+                                      runtime: runtime, deadline: window) {
+                return sent
+            }
+            await runtime.interruptTerminal(handle)
+            try? await Task.sleep(nanoseconds: UInt64(shellSettleDelay * 1_000_000_000))
+        } while attempts < shellContractAttempts && Date() < deadline
+        throw RPCServiceError(
+            code: "agent_prompt_refused",
+            message: "The shell did not run the dispatch contract to completion after "
+                + "\(attempts) attempt(s); its input has been cleared.")
     }
 
     /// What the door check decided, and which host it already asked.
@@ -561,9 +709,16 @@ extension LiveOrchestrationStore {
 
     /// The injected worker contract with resolved gate Q&A appended — same construction
     /// as the `dispatch` verb, built here because worker-start owns its own injection.
+    ///
+    /// `workerKind` decides the after-`worker_done` half: an agent TUI returns to an
+    /// idle prompt the coordinator can re-engage with a fresh dispatch, while a shell
+    /// pane cannot be adopted as a worker at all (`worker-start --terminal` refuses a
+    /// terminal with no agent), so telling a shell worker to sit and wait would leave
+    /// it waiting for input that can never arrive.
     func workerPreamble(task: OrchestrationTask, run: OrchestrationRun,
                         dispatchID: String, capability: String?,
-                        workerHandle: String, cliCommand: String) -> String {
+                        workerHandle: String, cliCommand: String,
+                        workerKind: DispatchPreamble.WorkerKind = .promptReturningAgent) -> String {
         let resolved = ((try? store.listGates(taskID: task.id, status: .resolved)) ?? [])
             .compactMap { gate in gate.resolution.map { (question: gate.question, resolution: $0) } }
         return DispatchPreamble.build(DispatchPreamble.Params(
@@ -574,6 +729,7 @@ extension LiveOrchestrationStore {
             coordinatorHandle: run.coordinatorHandle ?? "run:\(run.id)",
             workerHandle: workerHandle,
             cliCommand: cliCommand,
+            workerKind: workerKind,
             resolvedGates: resolved))
     }
 

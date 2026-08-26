@@ -117,14 +117,27 @@ final class WorkerHardeningE2ETests: XCTestCase {
             let handle = box!.sessions.keys.first { !known.contains($0) }!
             return box!.sessions[handle]!
         }
-        // Back at the shell prompt: no foreground job. The pump keeps re-painting the
-        // prompt so the readiness stack (default spawn floor + idle debounce, no test
-        // shortcuts) sees a quiescent shell and declares tui-idle.
+        // Back at the shell prompt: no foreground job, and the pump keeps re-painting
+        // the prompt. Since T82 the shell also has to *answer*: worker-start proves a
+        // bare shell is executing input by running a nonce probe, and the scripted
+        // session has no shell behind it, so the pump prints what a real `printf`
+        // would — first for the readiness probe, then for the contract's own marker.
         await MainActor.run { session.hasRunningForegroundJob = false }
         let pump = Task { @MainActor in
+            var answered: Set<String> = []
             while !Task.isCancelled {
                 session.showScreen(["$ "])
-                try? await Task.sleep(nanoseconds: 100_000_000)
+                let text = session.writtenText
+                var from = text.startIndex
+                while let hit = text.range(of: "orchard-shell-ready %s\\n' '",
+                                           range: from..<text.endIndex) {
+                    let nonce = String(text[hit.upperBound...].prefix { $0.isLetter || $0.isNumber })
+                    if !nonce.isEmpty, answered.insert(nonce).inserted {
+                        session.emitOutput("orchard-shell-ready \(nonce)\n")
+                    }
+                    from = hit.upperBound
+                }
+                try? await Task.sleep(nanoseconds: 20_000_000)
             }
         }
         let response = await pending.value
@@ -136,13 +149,15 @@ final class WorkerHardeningE2ETests: XCTestCase {
             .first { $0.field("kind")?.stringValue == "terminal" }
         let handle = try XCTUnwrap(terminalEffect?.field("id")?.stringValue)
 
-        // The worker's view: the capability secret arrives only via the preamble.
+        // The worker's view: the capability secret arrives only via the dispatch input.
+        // Keyed on the secret's own prefix, not on the flag before it — a shell worker's
+        // contract (T82) also spells the flag with an exported variable reference, and
+        // only the value itself is common to every delivery shape.
         let typed = await MainActor.run { session.writtenText }
         XCTAssertTrue(typed.contains("--task-id \(taskID)"))
         XCTAssertTrue(typed.contains("--dispatch-id \(dispatchID)"))
-        let marker = "--dispatch-capability "
-        let markerRange = try XCTUnwrap(typed.range(of: marker))
-        let capability = String(typed[markerRange.upperBound...]
+        let secretStart = try XCTUnwrap(typed.range(of: "dcap_")).lowerBound
+        let capability = String(typed[secretStart...]
             .prefix { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" })
         XCTAssertTrue(capability.hasPrefix("dcap_"))
         return StartedWorker(taskID: taskID, dispatchID: dispatchID,
