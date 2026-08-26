@@ -60,12 +60,15 @@ public enum RemoteWorkspacePolicy: Sendable {
             return "Files live on \(host); the editor cannot open remote workspaces yet (remote_unsupported)."
         case .agents:
             // T39 made the agent itself possible on the far side, as a handoff-style
-            // pane opened through the CLI. What is still impossible is the *supervised*
-            // shape this control drives — the remote host has no orchard CLI, so a
-            // worker there cannot report worker_done, heartbeat, or answer a question.
-            return "Supervised agents cannot run on \(host): it has no orchard CLI, so a "
-                + "worker there cannot report back (remote_unsupported). Open a remote "
-                + "agent pane instead — it runs the agent there with live status only."
+            // pane opened through the CLI. T80 made the *supervised* shape possible too,
+            // but only for a host that passes `worker-start`'s precondition — and this
+            // control does not run it, so it cannot promise the result. It says which
+            // door does, rather than repeating a claim about the host it never checked.
+            return "Supervised agents cannot be started from here on \(host): this "
+                + "control does not run the host precondition worker-start uses "
+                + "(remote_unsupported). Use `orchard worker-start --worktree <id>`, "
+                + "which asks \(host) first, or open a remote agent pane for live "
+                + "status only."
         case .composer:
             return "New worktrees with agents cannot start on \(host) yet (remote_unsupported)."
         case .browser:

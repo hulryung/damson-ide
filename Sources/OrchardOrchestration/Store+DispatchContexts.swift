@@ -152,7 +152,12 @@ extension OrchestrationStore {
         _ dispatchID: String,
         error: String,
         workerProcessExited: Bool = false,
-        terminationReason: String? = nil
+        terminationReason: String? = nil,
+        /// The stage the worker row records. `process_exited` is a claim that the
+        /// process is gone, so a remote pane whose *connection* dropped passes
+        /// `connection_lost` instead — loss of contact is not evidence of death
+        /// (docs/design/remote-hosts.md §1, rule 2).
+        workerStage: String = "process_exited"
     ) throws -> DispatchContext? {
         try db.inSavepoint("fail_dispatch") {
             let changes = try db.run(
@@ -192,11 +197,11 @@ extension OrchestrationStore {
                 try db.run(
                     """
                     UPDATE worker_dispatches
-                    SET state = 'failed', stage = 'process_exited', last_error = ?, updated_at = datetime('now')
+                    SET state = 'failed', stage = ?, last_error = ?, updated_at = datetime('now')
                     WHERE dispatch_id = ?
                       AND state NOT IN ('failed', 'succeeded', 'stopped', 'abandoned')
                     """,
-                    [.text(error), .text(dispatchID)]
+                    [.text(workerStage), .text(error), .text(dispatchID)]
                 )
             }
             let taskStatus: TaskStatus = context.status == .circuitBroken ? .failed : .ready
