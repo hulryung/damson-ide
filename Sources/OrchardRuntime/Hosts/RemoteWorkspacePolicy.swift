@@ -1,12 +1,16 @@
 import Foundation
 
 /// Surfaces the runtime types as `remote_unsupported` (docs/design/remote-hosts.md
-/// stage 2/3). The file service, local git diff, editor, and agent engines all
-/// assume a filesystem on *this* machine; answering them for a remote workspace
-/// would either fail confusingly or — worse — find a same-named local directory.
+/// stage 2/3). The file service, local git diff, and editor assume a filesystem
+/// on *this* machine; answering them for a remote workspace would either fail
+/// confusingly or — worse — find a same-named local directory.
 ///
-/// The browser pane is local-only for the same reason: its workspace key is a
-/// local path, and a remote path handed to WKWebView is not a remote file tree.
+/// Agent panes and the composer are the exception (T39 + T84): `terminal create
+/// --worktree <remote> --engine <agent>` and `worktree create` already run on
+/// the far side, so the app offers those through the same verbs rather than
+/// hiding the controls. The browser pane stays local-only: its workspace key
+/// is a local path, and a remote path handed to WKWebView is not a remote file
+/// tree.
 public enum RemoteAffordance: String, CaseIterable, Sendable {
     case fileExplorer
     case diff
@@ -42,14 +46,21 @@ public enum RemoteWorkspacePolicy: Sendable {
     }
 
     public static func isAvailable(_ affordance: RemoteAffordance, hostId: String?) -> Bool {
-        !isRemote(hostId: hostId)
+        guard isRemote(hostId: hostId) else { return true }
+        switch affordance {
+        // T84: the CLI verbs already work; the app offers the same doors.
+        case .agents, .composer: return true
+        case .fileExplorer, .diff, .editor, .browser: return false
+        }
     }
 
     /// Short explanation shown on a disabled control. `nil` when the affordance
     /// is available (so a tooltip is not attached to a working button).
     public static func unsupportedExplanation(_ affordance: RemoteAffordance,
                                               hostId: String?) -> String? {
-        guard isRemote(hostId: hostId) else { return nil }
+        guard isRemote(hostId: hostId), !isAvailable(affordance, hostId: hostId) else {
+            return nil
+        }
         let host = hostLabel(hostId)
         switch affordance {
         case .fileExplorer:
@@ -58,19 +69,8 @@ public enum RemoteWorkspacePolicy: Sendable {
             return "Diffs live on \(host); the review pane cannot read remote workspaces yet (remote_unsupported)."
         case .editor:
             return "Files live on \(host); the editor cannot open remote workspaces yet (remote_unsupported)."
-        case .agents:
-            // T39 made the agent itself possible on the far side, as a handoff-style
-            // pane opened through the CLI. T80 made the *supervised* shape possible too,
-            // but only for a host that passes `worker-start`'s precondition — and this
-            // control does not run it, so it cannot promise the result. It says which
-            // door does, rather than repeating a claim about the host it never checked.
-            return "Supervised agents cannot be started from here on \(host): this "
-                + "control does not run the host precondition worker-start uses "
-                + "(remote_unsupported). Use `orchard worker-start --worktree <id>`, "
-                + "which asks \(host) first, or open a remote agent pane for live "
-                + "status only."
-        case .composer:
-            return "New worktrees with agents cannot start on \(host) yet (remote_unsupported)."
+        case .agents, .composer:
+            return nil
         case .browser:
             return "The browser tab is local-only; \(host) has no file tree this pane can open."
         }

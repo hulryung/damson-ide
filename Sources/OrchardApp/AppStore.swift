@@ -57,6 +57,9 @@ final class AppStore: ObservableObject {
     @Published var pendingDeletion: PendingDeletion?
     @Published var isJumpPaletteOpen = false
     @Published var isOpenRemotePresented = false
+    /// Last typed failure from a card start/restart, keyed by worktree record id.
+    /// Cleared on the next attempt; never swallowed by `try?`.
+    @Published var agentStartError: [UUID: String] = [:]
     /// Right-sidebar section (files explorer vs source-control). Session-only.
     @Published var rightSidebarSection: RightSidebarSection = .files
 
@@ -206,14 +209,17 @@ final class AppStore: ObservableObject {
     }
 
     var canCreateWorktree: Bool {
-        guard let project = selectedProject, !project.isRemote else { return false }
+        guard let project = selectedProject else { return false }
+        if project.isRemote { return project.repoID != nil }
         return project.worktrees.isGitRepository
     }
 
     /// Why the New Worktree control is disabled, or nil when it is available.
     var newWorktreeUnavailableReason: String? {
         if let project = selectedProject, project.isRemote {
-            return RemoteWorkspacePolicy.unsupportedExplanation(.composer, hostId: project.hostId)
+            return project.repoID == nil
+                ? "This remote repo is not in the registry yet."
+                : nil
         }
         return selectedProject?.worktrees.worktreeUnavailableReason
     }
@@ -1035,8 +1041,7 @@ final class AppStore: ObservableObject {
             addProjectViaPanel()
             return
         }
-        guard !project.isRemote else { return }
-        guard project.worktrees.isGitRepository else { return }
+        guard canCreateWorktree else { return }
         composerProjectID = project.id
     }
 
@@ -1046,17 +1051,20 @@ final class AppStore: ObservableObject {
 
     func compose(project: ProjectSession, name: String, prompt: String,
                  engineID: String, baseRef: String?, count: Int,
-                 workspaceStatus: String = WorkspaceStatus.inProgress.rawValue) throws {
-        if project.isRemote {
-            throw GitError(RemoteWorkspacePolicy.unsupportedExplanation(
-                .composer, hostId: project.hostId)
-                ?? "agents cannot run on a remote host yet")
-        }
+                 workspaceStatus: String = WorkspaceStatus.inProgress.rawValue) async throws {
         if let error = ComposerPlanning.validationError(name: name, count: count) {
             throw GitError(error)
         }
         guard AgentEngineRegistry.engine(id: engineID) != nil else {
-            throw GitError("engine '\(engineID)' isn't registered in this build.")
+            throw RemoteAgentStartError(
+                code: "unknown_engine",
+                message: "engine '\(engineID)' isn't registered in this build.")
+        }
+        if project.isRemote {
+            try await composeRemote(
+                project: project, name: name, prompt: prompt, engineID: engineID,
+                baseRef: baseRef, count: count, workspaceStatus: workspaceStatus)
+            return
         }
         // Plan names up front so cards get `-2`/`-3` titles, then spawn every
         // agent immediately — v2 has no scheduler, so fan-out is just N creates.
@@ -1088,31 +1096,186 @@ final class AppStore: ObservableObject {
     /// empty string leaves the engine waiting at its input box, matching ⌘N
     /// with a blank prompt. Used by the card start/restart row.
     func startAgent(in record: WorktreeRecord, project: ProjectSession,
-                    engineID: String, prompt: String? = nil) throws {
-        if project.isRemote {
-            throw GitError(RemoteWorkspacePolicy.unsupportedExplanation(
-                .agents, hostId: project.hostId)
-                ?? "agents cannot run on a remote host yet")
+                    engineID: String, prompt: String? = nil) async throws {
+        agentStartError[record.id] = nil
+        do {
+            if project.isRemote {
+                try await startRemoteAgent(
+                    in: record, project: project, engineID: engineID, prompt: prompt)
+                return
+            }
+            guard AgentEngineRegistry.engine(id: engineID) != nil else {
+                throw RemoteAgentStartError(
+                    code: "unknown_engine",
+                    message: "engine '\(engineID)' isn't registered in this build.")
+            }
+            for agent in project.liveAgents(in: record.id) where agent.state.isTerminal {
+                project.agents.retire(agent)
+            }
+            let delivered = prompt ?? record.lastPrompt ?? ""
+            let size = paneSpawnSize()
+            let agent = try project.agents.spawnAgent(
+                engineID: engineID,
+                prompt: delivered,
+                in: record.worktree,
+                title: record.title,
+                workspaceID: workspaceID(for: record, in: project),
+                initialCols: size.cols, initialRows: size.rows)
+            record.agentState = agent.state
+            if !delivered.isEmpty { record.lastPrompt = delivered }
+            bindAgentTab(agent, key: .worktree(record.id))
+            select(record, in: project)
+        } catch {
+            agentStartError[record.id] = RemoteAgentStart.describe(error)
+            throw error
         }
-        guard AgentEngineRegistry.engine(id: engineID) != nil else {
-            throw GitError("engine '\(engineID)' isn't registered in this build.")
+    }
+
+    /// Repo default the composer seeds for a remote project (`HEAD` when the
+    /// registry has not recorded one). Local projects keep using git.
+    func remoteComposerBaseRef(for project: ProjectSession) -> String {
+        guard let repoID = project.repoID,
+              let ref = workspaceService.repo(id: repoID)?.baseRef,
+              !ref.isEmpty else { return "HEAD" }
+        return ref
+    }
+
+    /// Connected non-shell panes the runtime already opened in this worktree
+    /// (`terminal create --engine`). Cards read this so a remote start is
+    /// visible without adopting the PTY into the local supervisor.
+    func remoteAgentSummaries(for record: WorktreeRecord,
+                              in project: ProjectSession) -> [TerminalSummary] {
+        guard project.isRemote,
+              let worktreeId = workspaceIdentity(for: record, in: project) else { return [] }
+        return (runtime?.terminalService.list(worktreeId: worktreeId) ?? [])
+            .filter { $0.engine != "shell" }
+    }
+
+    func hasLiveRemoteAgent(in record: WorktreeRecord, project: ProjectSession) -> Bool {
+        remoteAgentSummaries(for: record, in: project).contains(where: \.connected)
+    }
+
+    /// Create remote worktrees through `WorkspaceService.create` (the
+    /// `worktree-create` handler) and start each agent through `terminal-create`.
+    /// The create request must not set `agent` — that path still refuses remote
+    /// spawn; the pane is opened with the CLI verb instead.
+    private func composeRemote(project: ProjectSession, name: String, prompt: String,
+                               engineID: String, baseRef: String?, count: Int,
+                               workspaceStatus: String) async throws {
+        guard let repoID = project.repoID,
+              workspaceService.repo(id: repoID) != nil else {
+            throw RemoteAgentStartError(
+                code: "unknown_repo",
+                message: "this remote repo is not in the registry")
         }
-        for agent in project.liveAgents(in: record.id) where agent.state.isTerminal {
-            project.agents.retire(agent)
+        let names = ComposerPlanning.fanOutNames(
+            name: name, count: count, taken: project.composerTakenNames)
+        var first: WorktreeRecord?
+        for leaf in names {
+            let created = try await workspaceService.create(WorkspaceCreateRequest(
+                repo: repoID,
+                name: leaf,
+                displayName: leaf,
+                baseBranch: baseRef,
+                workspaceStatus: workspaceStatus,
+                origin: .manual,
+                captureSource: .manualAction))
+            guard let repo = workspaceService.repo(id: repoID) else {
+                throw RemoteAgentStartError(
+                    code: "unknown_repo",
+                    message: "this remote repo is not in the registry")
+            }
+            hydrateRemoteWorktrees(project, repo: repo, refresh: false)
+            guard let record = project.records.first(where: {
+                workspaceIdentity(for: $0, in: project) == created.workspace.id
+                    || $0.path.path == created.workspace.path
+            }) else {
+                throw RemoteAgentStartError(
+                    code: "unknown_worktree",
+                    message: "created \(leaf) on \(RemoteWorkspacePolicy.hostLabel(project.hostId)) but the sidebar has no card for it")
+            }
+            meta.setStatusID(workspaceStatus, for: record.id)
+            try await startRemoteAgent(
+                in: record, project: project, engineID: engineID, prompt: prompt)
+            if first == nil { first = record }
+        }
+        if let first { select(first, in: project) }
+    }
+
+    /// Same door as `orchard terminal create --worktree <id> --engine <agent>`.
+    private func startRemoteAgent(in record: WorktreeRecord, project: ProjectSession,
+                                  engineID: String, prompt: String?) async throws {
+        guard let runtime else {
+            throw RemoteAgentStartError(
+                code: "runtime_unavailable",
+                message: "the in-process runtime is not running")
+        }
+        guard let worktreeId = workspaceIdentity(for: record, in: project) else {
+            throw RemoteAgentStartError(
+                code: "unknown_worktree",
+                message: "this worktree has no runtime identity")
+        }
+        let pane = try await RemoteAgentStart.createPane(
+            using: runtime.inMemory,
+            worktreeId: worktreeId,
+            engineID: engineID,
+            title: record.title)
+        guard let session = runtime.terminalService.damsonSession(handle: pane.handle) else {
+            throw RemoteAgentStartError(
+                code: "terminal_spawn_failed",
+                message: "terminal create returned \(pane.handle) but the pane has no local surface")
         }
         let delivered = prompt ?? record.lastPrompt ?? ""
-        let size = paneSpawnSize()
-        let agent = try project.agents.spawnAgent(
-            engineID: engineID,
-            prompt: delivered,
-            in: record.worktree,
-            title: record.title,
-            workspaceID: workspaceID(for: record, in: project),
-            initialCols: size.cols, initialRows: size.rows)
-        record.agentState = agent.state
         if !delivered.isEmpty { record.lastPrompt = delivered }
-        bindAgentTab(agent, key: .worktree(record.id))
+        let key = WorkbenchKey.worktree(record.id)
+        bindRemoteAgentPane(pane, session: session, key: key)
         select(record, in: project)
+        objectWillChange.send()
+    }
+
+    /// Bind a runtime-created remote agent pane to a terminal tab. The PTY
+    /// already lives in the terminal service — this only points a tab at it
+    /// and stamps the host so the chip cannot be inferred later.
+    private func bindRemoteAgentPane(_ pane: RemoteAgentPaneRef, session: DamsonSession,
+                                     key: WorkbenchKey) {
+        var node = ensureLayout(for: key)
+        let title = AgentEngineRegistry.engine(id: pane.engineID)?.displayName ?? pane.engineID
+        var boundTabID: UUID?
+        if let groupID = node.firstGroupID() {
+            _ = node.mutateGroup(groupID) { group in
+                if let existing = group.tabs.first(where: {
+                    $0.kind == .terminal && remotePaneKeys[$0.id] == pane.paneKey
+                }) {
+                    group.selectedID = existing.id
+                    boundTabID = existing.id
+                    return
+                }
+                if let index = group.tabs.firstIndex(where: {
+                    $0.kind == .terminal && $0.agentID == nil && shells[$0.id] == nil
+                }) {
+                    group.tabs[index].title = title
+                    group.tabs[index].executionHostId = pane.executionHostId
+                    group.selectedID = group.tabs[index].id
+                    boundTabID = group.tabs[index].id
+                    return
+                }
+                let tab = WorkbenchTab(
+                    kind: .terminal, title: title,
+                    executionHostId: pane.executionHostId)
+                group.tabs.append(tab)
+                group.selectedID = tab.id
+                boundTabID = tab.id
+            }
+        }
+        layouts[key] = node
+        if let tabID = boundTabID {
+            shells[tabID] = session
+            remotePaneKeys[tabID] = pane.paneKey
+            if let host = ExecutionHostId(rawValue: pane.executionHostId) {
+                attachConnectionNote(tabID: tabID, host: host, session: session)
+            }
+        }
+        objectWillChange.send()
     }
 
     func requestDelete(_ record: WorktreeRecord, in project: ProjectSession) {
@@ -1392,13 +1555,20 @@ final class AppStore: ObservableObject {
                 }) {
                     group.tabs[index].agentID = agent.id
                     group.tabs[index].title = agent.engine.displayName
+                    if let hostId = executionHostId(for: key),
+                       RemoteWorkspacePolicy.isRemote(hostId: hostId) {
+                        group.tabs[index].executionHostId = hostId
+                    }
                     group.selectedID = group.tabs[index].id
                     bound = true
                 }
             }
         }
         if !bound, let groupID = node.firstGroupID() {
-            let tab = WorkbenchTab(kind: .terminal, title: agent.engine.displayName, agentID: agent.id)
+            let hostId = executionHostId(for: key)
+            let tab = WorkbenchTab(
+                kind: .terminal, title: agent.engine.displayName, agentID: agent.id,
+                executionHostId: RemoteWorkspacePolicy.isRemote(hostId: hostId) ? hostId : nil)
             _ = node.mutateGroup(groupID) { group in
                 group.tabs.append(tab)
                 group.selectedID = tab.id

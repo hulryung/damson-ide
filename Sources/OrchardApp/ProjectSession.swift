@@ -78,6 +78,17 @@ final class ProjectSession: ObservableObject, Identifiable {
         return RemoteWorkspacePolicy.hostLabel(hostId)
     }
 
+    /// Directory leaves already in the sidebar, so the composer can uniquify
+    /// remotely the same way `WorktreeService.takenNames` does locally.
+    var composerTakenNames: Set<String> {
+        if isRemote { return Set(records.map { $0.path.lastPathComponent }) }
+        return worktrees.takenNames
+    }
+
+    func composerSuggestedName() -> String {
+        WorktreeNaming.suggestName(taken: composerTakenNames)
+    }
+
     /// Sidebar / header subtitle. Remote repos never ask local git for a branch.
     var rootSubtitle: String {
         if isRemote { return hostLabel ?? "remote" }
