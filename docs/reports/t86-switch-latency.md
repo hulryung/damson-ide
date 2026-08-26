@@ -31,19 +31,30 @@ the `status` round-trip that carries none of this work.
 
 ### Against the live app
 
-The coordinator rebuilt from main and relaunched, then measured the same calls against the
-running app (three registered repos, four live panes). I re-measured the read-only half
-myself through the app's own runtime socket; the two agree.
+Two harnesses, because they answer different questions. The bench above isolates the work
+this task changed; the live app adds what the app *process* costs on top of it, and that
+turned out to be most of what was left. T86 landed in two steps, and the live app was
+measured after each — the enumeration fix (`7dae9c6`) and then the reaping fix (`ccc6a38`),
+which only measuring the live app could have found.
 
-| Call | Before (live app) | After (live app) |
-|---|---|---|
-| `orchard status` (baseline) | 30 ms | 25 ms |
-| `worktree list` (three repos) | 820 ms | 108 ms (mine: 116 ms) |
-| `terminal create --worktree` | 516–1000 ms | 110 ms |
+Three registered repos, four live panes, same method as the plan's original table.
+`terminal create --worktree` rows are the coordinator's (each sample opens a real pane in
+the user's workbench, so I did not run that one); the rest are mine, read-only, through the
+app's runtime socket. Where we both measured a row we agree to a few ms.
 
-Both harnesses are reported because they answer different questions. The headless bench
-isolates the work this task changed; the live app adds what the app process costs on top of
-it, and that turns out to be the whole of the remaining gap — see below.
+| Call (live app) | Before T86 | After enumeration fix | After reaping fix |
+|---|---|---|---|
+| `orchard status` (baseline) | 30 ms | 25 ms | 24–26 ms |
+| **`worktree list` (three repos)** | **820 ms** | 108–116 ms | **50 ms** |
+| `worktree list --repo <one>` | — | — | 48 ms |
+| `worktree show` (one spawn) | — | 111 ms | 48 ms |
+| **`terminal create --worktree`** | **516–1000 ms** | ~110 ms | **49 ms** |
+| `repo list` (no git at all) | — | — | 23 ms |
+| raw `git worktree list --porcelain` | — | — | 27 ms |
+
+Under the plan's target on both harnesses, and the live app's git-touching calls are now
+within about 25 ms of a call that touches no git at all — which is roughly what one raw git
+spawn costs on this machine.
 
 Reproduce with:
 
@@ -192,11 +203,11 @@ status.
 `swift build && swift test` (1294 tests, 2 skipped, 0 failures) and
 `scripts/e2e-headless.sh` both pass.
 
-## What is left, measured
+## The one the headless bench could not see
 
-Against the live app the residual is a **fixed per-`git`-spawn cost inside the app process**,
-not the enumeration this task removed. The evidence, all median-of-nine through the app's
-runtime socket:
+The headless numbers were already under target when the app was first relaunched, and the
+app still read ~110 ms. Measuring the live app is what found why. All median-of-nine through
+the app's runtime socket, at the point where only the enumeration fix had landed:
 
 | Call | Git spawns | Live app |
 |---|---|---|
@@ -205,28 +216,42 @@ runtime socket:
 | `worktree list --repo <one repo>` | 1 | 113 ms |
 | `worktree list` (three repos) | 3, in parallel | 116 ms |
 
-Git-free RPCs cost the round-trip baseline. Anything that touches git costs about 85 ms more,
-and that surcharge does not grow with the number of repos or spawns — one spawn and three
-parallel spawns cost the same. The same spawn costs ~10 ms from the headless runtime on the
-same machine.
+Git-free RPCs cost the round-trip baseline. Anything touching git cost about 85 ms more —
+and the surcharge did not grow with the number of repos or spawns: one spawn and three
+parallel spawns cost the same. The same spawn cost ~10 ms from the headless runtime on the
+same machine. A per-*call* surcharge, not a per-spawn one.
 
-`Process.waitUntilExit()` is the reason: it is documented to poll *the current run loop*, and
-on the app's main thread that is AppKit's. `GitRunner` now reaps through the process's
-termination handler and a semaphore instead, which is signalled off the run loop and costs
-the same everywhere. The corroboration is blunt: the full test suite went from 227 s to 107 s
-on the same machine with no other change, XCTest being another main-thread-with-a-run-loop
-host. What that does to the live-app numbers needs a rebuild and relaunch to confirm, which
-is the coordinator's to run.
+`Process.waitUntilExit()` was the reason. It is documented to poll *the current run loop*,
+and on the app's main thread that is AppKit's. `GitRunner` now reaps through the process's
+termination handler and a semaphore, which is signalled off the run loop and costs the same
+in every host; `waitUntilExit` survives only as a five-second fallback for a handler that
+never fires, which the drain having already seen EOF on both pipes makes very unlikely.
 
-## Found but not fixed
+Two independent confirmations. The full test suite went from 227 s to 107 s on the same
+machine with no other change — XCTest being another main-thread-with-a-run-loop host. And
+after the relaunch the live app's git-touching calls dropped from ~110 ms to ~50 ms while
+its baseline stayed at 24 ms, exactly as the diagnosis predicted.
 
-- **Live PTYs inflate every RPC.** With eight shells open, a `worktree list` that costs
-  33 ms alone costs ~105 ms, and `terminal list` scoped to a worktree does the same — with
-  no extra git involved. The main actor is doing per-pane work that scales with the number
-  of open panes. It is not a workspace-switch cost (a switch does not open eight panes) and
-  it is in the terminal layer rather than this task's ownership, but it is real and it is
-  measurable with the same harness. The benchmark closes each pane it opens so the create
-  numbers are not contaminated by it.
+## One finding that dissolved, and one that did not
+
+While the enumeration fix was the only one in, the benchmark showed live PTYs inflating
+*every* RPC: with eight shells open, a `worktree list` that cost 33 ms alone cost ~105 ms,
+with no extra git involved. That was written up here as an out-of-scope terminal-layer
+problem. It was the same run-loop poll: more live panes means a busier run loop, which means
+`waitUntilExit` woke later. Re-measured after the reaping fix, in a throwaway runtime with
+three repos:
+
+| | `status` | `worktree list` |
+|---|---|---|
+| no panes | 30 ms | 46 ms |
+| eight panes | 29 ms | 48 ms |
+
+The inflation is gone. It is recorded here because it was a real measurement and a wrong
+conclusion, and because it is the reason a fix worth having was found at all: the number
+that did not fit the story was the one worth chasing.
+
+Still open, and genuinely out of scope:
+
 - **`refreshAllStatuses` fans out unbounded.** It still starts one detached status read per
   worktree at once — now three git processes each rather than eight, so a repo with twenty
   worktrees goes from 160 concurrent spawns to 60. Better, still unbounded.

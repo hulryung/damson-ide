@@ -60,9 +60,10 @@ median_ms() {
     printf '%s\n' "${samples[@]}" | sort -n | awk -v n="$RUNS" 'NR==int((n+1)/2){print}'
 }
 
-# `terminal create` leaves a live PTY behind, and every live PTY adds main-actor work
-# that inflates *every* later RPC. Closing each sample's pane (outside the timed region)
-# is what keeps the create numbers comparable with each other and with the CLI baseline.
+# `terminal create` leaves a live PTY behind. Each sample's pane is closed outside the
+# timed region so a run does not finish holding N shells, and so the create rows measure
+# one creation rather than one creation on top of everything the previous samples left
+# running.
 median_create_ms() {
     local label=$1; shift
     local samples=() start end handle out
