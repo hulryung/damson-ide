@@ -1222,6 +1222,54 @@ main.swift window-frame autosave (why the smaller-window adopted-fit case is the
 common one), and — only if clipping recurs — damson exposing an unconditional
 follow re-pin.
 
+### Wave 23 (T83–T85) — finish the remote story
+
+The SSH harness is live for this wave: host `orchard-loopback` (127.0.0.1:2222,
+user-space sshd started by the coordinator; `orchard host check --name
+orchard-loopback` → reachable). The coordinator tears it down at the end. Register
+your own remote repo with `--host ssh:orchard-loopback` and drop it with
+`repo remove --forget` when you are done.
+
+**T83 — A real agent worker, supervised, on a remote host.** T80 and T82 proved the
+lifecycle with *shell* workers; a `claude-code` worker has never been driven to
+settlement over ssh, so the last unproven span of remote orchestration is the one that
+matters most in practice: an agent TUI on the far side receiving the preamble as a
+prompt, minting nothing locally, and sending `worker_done` back through the tunnel.
+Drive exactly one such worker with a trivial task (create one scratch file and report),
+release it promptly, and report what crossed — readiness detection (hooks vs
+fingerprints), transcript availability, archive contents, and anything that behaved
+differently from a local agent worker. Where a piece cannot work remotely, refuse it
+typed and say so rather than papering over it. Fix what the run exposes, inside your
+ownership. Owns: OrchardTerminals remote agent paths, OrchardRuntime/Orchestration
+worker verbs where the run demands it, matching tests,
+docs/reports/t83-remote-agent-worker.md. Does not touch Files/**, OrchardApp/**, or
+the repo registry.
+
+**T84 — Open a remote agent pane from the app.** `terminal create --worktree <remote>
+--engine <agent>` has worked since T39, but the GUI only reaches remote *shell* panes:
+the composer's engine picker and the workspace card's start/restart affordances stop at
+the host boundary. Make the app able to start an agent on a remote workspace through
+the same runtime verbs the CLI uses, with the host chip visible on the pane, failures
+surfaced typed inline (never silent), and affordances that cannot work remotely
+disabled with a reason rather than hidden. Verify live against `orchard-loopback` by
+driving the running app through computer-use for *reading* (screenshots + AX) — the
+coordinator will rebuild and relaunch for you on request; never launch or quit it
+yourself. Owns: Sources/OrchardApp/ComposerView.swift, SidebarView.swift card
+affordances, AppStore wiring, matching tests, docs/reports/t84-remote-agent-ui.md.
+Does not touch OrchardTerminals, Files/**, or WorkerVerbs.
+
+**T85 — A real remote file backend.** `file` verbs answer `remote_unsupported` for a
+remote workspace, deliberately: resolving a remote path locally would be worse than an
+error. Replace the refusal with a real backend for the operations that can be faithful
+over ssh — listing, search, preview/read with the same byte-fidelity rules T75
+established (never decode what will not round-trip), and open/reveal refused typed
+where they mean a local GUI action. Keep the honest refusal wherever fidelity or
+semantics cannot be preserved, and say which in the report. Verify live against
+`orchard-loopback`, including a non-UTF-8 file. Owns:
+OrchardRuntime/Files/**, a remote file transport where it belongs, matching tests,
+docs/reports/t85-remote-files.md. Does not touch OrchardApp/**, WorkerVerbs, or
+OrchardTerminals.
+
 ### Standing backlog (reconciled 2026-08-26)
 
 Everything the old wave-13+ list carried has since been closed and is recorded in its
