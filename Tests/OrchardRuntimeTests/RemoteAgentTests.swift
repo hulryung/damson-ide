@@ -153,7 +153,7 @@ final class RemoteAgentTests: XCTestCase {
         // IS the agent and its exit status is the agent's, not a wrapper shell's.
         XCTAssertTrue(command.hasPrefix("cd /home/ci/Orchard/worktrees/orchard/apricot && "),
                       command)
-        XCTAssertTrue(command.hasSuffix(" && exec claude"), command)
+        XCTAssertTrue(command.hasSuffix("exec claude'"), command)
         // The marker strip travels: `ssh` forwards no environment by default, but a
         // user's own SendEnv/AcceptEnv pair or the remote account's rc can still set
         // these, and an agent that believes it is a child session turns transcripts off.
@@ -161,7 +161,43 @@ final class RemoteAgentTests: XCTestCase {
                        "CLAUDE_CODE_SSE_PORT", "CLAUDE_CODE_SESSION_ID"] {
             XCTAssertTrue(command.contains(marker), "\(marker) missing from \(command)")
         }
-        XCTAssertTrue(command.contains(" && unset CLAUDECODE "), command)
+        XCTAssertTrue(command.contains("unset CLAUDECODE "), command)
+    }
+
+    /// T83, found live: `ssh host '<command>'` is **not** a login. sshd runs the command
+    /// through `$SHELL -c`, which reads no `.zprofile`/`.zshrc`, so PATH is sshd's own
+    /// (`/usr/bin:/bin:/usr/sbin:/sbin`) and `claude` — installed under homebrew, `~/.local`
+    /// or a version manager on every real machine — is not on it. The pane died at spawn
+    /// with `zsh:1: command not found: claude`.
+    ///
+    /// The local spawn has always wrapped an engine's argv in a login shell for exactly
+    /// this reason (`EngineLaunch.argv`); the remote one now does the same, which is what
+    /// makes `RemoteEngineLaunch`'s promise — send the *command* and let the far side
+    /// resolve it "as the user would" — actually true.
+    func testRemoteAgentRunsThroughALoginShellSoTheCommandResolves() {
+        let command = RemoteAgentLaunch.remoteCommand(
+            directory: worktreePath, launch: ClaudeCodeEngine().remoteLaunch!)
+        XCTAssertTrue(command.contains("exec \"${SHELL:-/bin/sh}\" -lc "), command)
+        // `${SHELL:-/bin/sh}` stays unquoted so the far side expands it, and keeps its
+        // fallback: a host with no SHELL would otherwise exec the empty string.
+        XCTAssertFalse(command.contains("'\"${SHELL:-/bin/sh}\"'"), command)
+        // The agent still ends up as the PTY's remote child — one `exec` into the login
+        // shell, one out of it — so `HostLiveness.verdictForPTYEnd` reads the agent's own
+        // exit status and not a wrapper's.
+        XCTAssertEqual(command.components(separatedBy: "exec ").count - 1, 2, command)
+        // The whole inner command is one quoted argument, so nothing in it can be split
+        // by the outer shell.
+        let inner = String(command[command.range(of: " -lc ")!.upperBound...])
+        XCTAssertTrue(inner.hasPrefix("'") && inner.hasSuffix("'"), inner)
+        XCTAssertFalse(inner.dropFirst().dropLast().contains("'"), inner)
+    }
+
+    /// An engine with no environment to strip still gets the login shell — the PATH
+    /// problem has nothing to do with the markers.
+    func testARemoteLaunchWithNothingToUnsetStillGetsTheLoginShell() {
+        let command = RemoteAgentLaunch.remoteCommand(
+            directory: "/w", launch: RemoteEngineLaunch(command: "codex", arguments: ["--x"]))
+        XCTAssertEqual(command, "cd /w && exec \"${SHELL:-/bin/sh}\" -lc 'exec codex --x'")
     }
 
     func testRemoteArgvIsSSHWithTheTunnelAndTheHostsOwnDestinationRules() {
@@ -361,7 +397,7 @@ final class RemoteAgentTests: XCTestCase {
         XCTAssertTrue(limitation.contains("fingerprints only"), limitation)
         // The agent still launches — just without a channel home.
         XCTAssertFalse(plan.argv.contains("-R"))
-        XCTAssertTrue(plan.remoteCommand.hasSuffix("exec claude"))
+        XCTAssertTrue(plan.remoteCommand.hasSuffix("exec claude'"))
         // And nothing was written on the far side pointing at a port nobody holds.
         XCTAssertFalse(runner.ran("printf %s"))
     }
@@ -380,12 +416,42 @@ final class RemoteAgentTests: XCTestCase {
         XCTAssertFalse(plan.argv.contains("-R"))
     }
 
+    /// T83, found live: the hook install was the first thing to touch the far side, and
+    /// it used `mkdir -p` — so on a host where the worktree was gone (removed underneath
+    /// the registry, a stale row) it *created* the directory, and the pane's `cd` then
+    /// succeeded into an empty one. The agent came up in a directory wearing the
+    /// workspace's name with none of its files in it.
+    ///
+    /// It must create nothing. The launch that follows then fails honestly with the far
+    /// side's own `cd: no such file or directory`.
+    func testAMissingRemoteWorktreeIsRefusedRatherThanCreated() async throws {
+        scriptTunnel()
+        runner.on("[ -d \(worktreePath) ]",
+                  HostCommandResult(exitCode: 66,
+                                    stderr: "orchard-remote-worktree-missing\n"))
+        let plan = try await RemoteAgentService(host: host, runner: runner, timeout: 1)
+            .plan(engine: ClaudeCodeEngine(), worktreePath: worktreePath,
+                  hookToken: "tok", localHookPort: 9091)
+        // The pane still opens — a hook install is never fatal — but it says what it
+        // lost rather than claiming a channel nothing will POST to.
+        XCTAssertEqual(plan.detection.mode, .fingerprintOnly)
+        let limitation = try XCTUnwrap(plan.detection.limitation)
+        XCTAssertTrue(limitation.contains("remote_worktree_missing"), limitation)
+        XCTAssertTrue(limitation.contains(worktreePath), limitation)
+        // And the guard runs *before* the mkdir, in the same command, so no round trip
+        // can land between the check and the create.
+        let write = try XCTUnwrap(runner.commandLines.first { $0.contains("mkdir -p") })
+        let guardIndex = try XCTUnwrap(write.range(of: "[ -d \(worktreePath) ]"))
+        let mkdirIndex = try XCTUnwrap(write.range(of: "mkdir -p"))
+        XCTAssertLessThan(guardIndex.lowerBound, mkdirIndex.lowerBound, write)
+    }
+
     func testAnEngineWithNoHookMechanismIsFingerprintOnlyWithoutTouchingTheHost() async throws {
         let plan = try await RemoteAgentService(host: host, runner: runner, timeout: 1)
             .plan(engine: CodexEngine(), worktreePath: worktreePath,
                   hookToken: "tok", localHookPort: 9091)
         XCTAssertEqual(plan.detection.mode, .fingerprintOnly)
-        XCTAssertTrue(plan.remoteCommand.hasSuffix("exec codex"))
+        XCTAssertTrue(plan.remoteCommand.hasSuffix("exec codex'"))
         XCTAssertTrue(runner.commandLines.isEmpty)
     }
 
@@ -444,7 +510,7 @@ final class RemoteAgentTests: XCTestCase {
         XCTAssertTrue(argv.contains("47110:127.0.0.1:9091"))
         XCTAssertTrue(argv.last?.contains("cd /home/ci/Orchard/worktrees/orchard/apricot") ?? false,
                       argv.last ?? "")
-        XCTAssertTrue(argv.last?.hasSuffix("exec claude") ?? false, argv.last ?? "")
+        XCTAssertTrue(argv.last?.hasSuffix("exec claude'") ?? false, argv.last ?? "")
         // The prompt stays empty: for a `.typeWhenIdle` engine the prompt is what gets
         // TYPED into the agent, and an ssh command line typed into Claude is a message,
         // not a launch.

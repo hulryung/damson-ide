@@ -45,10 +45,24 @@ public struct RemoteHookConfig: Sendable {
                                   "the hook config was not valid UTF-8")
         }
         let directory = Self.settingsDirectory(worktreePath: worktreePath)
+        // The worktree must already be there. `mkdir -p` would happily create the whole
+        // chain, and a hook install is the *first* thing that touches the far side —
+        // so on a host where the worktree is gone (removed out from under the registry,
+        // a stale row, a path that never existed) this step used to conjure the
+        // directory, and the pane's `cd` then succeeded into an empty one. An agent
+        // running in an empty directory that is wearing the workspace's name is the
+        // same class of mistake as a local pane in a remote path: the work happens
+        // somewhere that is not the workspace (T83, docs/design/remote-hosts.md §1).
+        // Failing here is safe — the caller degrades the pane to fingerprint-only —
+        // and the launch that follows now fails honestly, with the far side's own
+        // `cd: no such file or directory` in the readiness receipt.
+        //
         // `printf %s` rather than a heredoc: the JSON travels as one quoted *argument*,
         // so the far side's shell never scans it for `$`, backticks or a terminator that
         // happens to appear inside a hook command.
-        let command = "mkdir -p \(SSHCommand.shellQuote(directory)) && "
+        let command = "[ -d \(SSHCommand.shellQuote(worktreePath)) ] || "
+            + "{ printf '%s\\n' \(SSHCommand.shellQuote(Self.missingWorktreeMarker)) >&2; exit 66; }; "
+            + "mkdir -p \(SSHCommand.shellQuote(directory)) && "
             + "printf %s \(SSHCommand.shellQuote(json)) > \(SSHCommand.shellQuote(file))"
         let outcome = await runner.run(command)
         switch outcome {
@@ -58,6 +72,13 @@ public struct RemoteHookConfig: Sendable {
                                                reason: reason)
         case .answered(let code, _, let stderr):
             guard code == 0 else {
+                if code == 66 || (SSHRunner.firstLine(stderr) ?? "")
+                    .contains(Self.missingWorktreeMarker) {
+                    throw RemoteHostError(
+                        "remote_worktree_missing",
+                        "\(worktreePath) does not exist on \(hostName), so nothing was "
+                            + "created there and no hook config was written.")
+                }
                 let detail = SSHRunner.firstLine(stderr) ?? "exit \(code)"
                 throw RemoteHostError("remote_hook_install_failed",
                                       "writing \(file) on \(hostName) failed: \(detail)")
@@ -85,6 +106,10 @@ public struct RemoteHookConfig: Sendable {
             + "printf '%s\\n' \(quotedPattern) >> \"$p\"; }"
         _ = await runner.run(command)
     }
+
+    /// What the far side prints when the worktree is not there. Matched as well as the
+    /// exit status because a login shell is allowed to overwrite `$?` on its way out.
+    static let missingWorktreeMarker = "orchard-remote-worktree-missing"
 
     public static func settingsDirectory(worktreePath: String) -> String {
         joined(worktreePath, ".claude")

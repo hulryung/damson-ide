@@ -420,7 +420,7 @@ final class RemoteWorktreeTests: XCTestCase {
             "fingerprint-only")
         let argv = try XCTUnwrap(terminalSpecs.last?.launchArgv)
         XCTAssertEqual(argv.first, "/usr/bin/ssh")
-        XCTAssertTrue(argv.last?.hasSuffix("exec claude") ?? false, argv.last ?? "")
+        XCTAssertTrue(argv.last?.hasSuffix("exec claude'") ?? false, argv.last ?? "")
     }
 
     func testAgentFirstCreateOnARemoteRepoIsRefused() async throws {

@@ -353,6 +353,70 @@ final class WorkerVerbTests: XCTestCase {
         XCTAssertEqual(try store.task(taskID)?.status, .failed)
     }
 
+    /// T83, found live: the first remote `claude-code` worker died at spawn because
+    /// `ssh host '<command>'` runs without a login shell, so `claude` was not on PATH.
+    /// The receipt said only "terminal '…' process has exited" — a sentence about
+    /// Orchard's state — while the pane held the one line that explained it, and the
+    /// pane is what this failure is about to close. A coordinator should not have to go
+    /// and find that, and after cleanup could not.
+    func testAgentReadinessFailureQuotesWhatThePaneLastSaid() async throws {
+        let taskID = try await makeTask()
+        let known = await MainActor.run { [terminalHarness] in
+            Set(terminalHarness!.sessions.keys)
+        }
+        let handler = handler!
+        let pending = Task {
+            await handler.handle(RPCRequest(method: "worker-start", params: .object([
+                "task": .string(taskID),
+                "agent": .string("claude-code"),
+                "worktree": .string("new-top-level"),
+                "repo": .string("demo"),
+                "timeout-ms": .number(5000),
+            ])))
+        }
+        try await waitUntil("agent terminal spawn") { [terminalHarness] in
+            terminalHarness!.sessions.keys.contains { !known.contains($0) }
+        }
+        await MainActor.run { [terminalHarness] in
+            let handle = terminalHarness!.sessions.keys.first { !known.contains($0) }!
+            let session = terminalHarness!.sessions[handle]!
+            session.emitOutput("zsh:1: command not found: claude\n")
+            session.emitOutput("Connection to 127.0.0.1 closed.\n")
+            session.exit(code: 1)
+        }
+        let response = await pending.value
+        let error = try XCTUnwrap(response.error)
+        XCTAssertEqual(error.code, "worker_start_failed")
+        let receipt = try XCTUnwrap(error.data)
+        XCTAssertEqual(receipt.field("failedStage")?.stringValue, "agent_readiness")
+        let lastError = try XCTUnwrap(receipt.field("lastError")?.stringValue)
+        XCTAssertTrue(lastError.contains("command not found: claude"), lastError)
+        // And as a field, so a coordinator that parses receipts never has to parse prose.
+        let pane = try XCTUnwrap(receipt.field("paneOutput")?.arrayValue?
+            .compactMap { $0.stringValue })
+        XCTAssertEqual(pane, ["zsh:1: command not found: claude",
+                              "Connection to 127.0.0.1 closed."])
+    }
+
+    /// A pane that never said anything still produces the typed refusal — the quote is
+    /// evidence when there is some, not a precondition.
+    func testAgentReadinessFailureWithASilentPaneStillRefusesTyped() async throws {
+        let taskID = try await makeTask()
+        let response = await call("worker-start", [
+            "task": .string(taskID),
+            "agent": .string("claude-code"),
+            "worktree": .string("new-top-level"),
+            "repo": .string("demo"),
+            "timeout-ms": .number(300),
+        ])
+        let receipt = try XCTUnwrap(response.error?.data)
+        XCTAssertEqual(receipt.field("failedStage")?.stringValue, "agent_readiness")
+        XCTAssertNil(receipt.field("paneOutput"))
+        let lastError = try XCTUnwrap(receipt.field("lastError")?.stringValue)
+        XCTAssertTrue(lastError.contains("did not become ready"), lastError)
+        XCTAssertFalse(lastError.contains("last output"), lastError)
+    }
+
     // MARK: - T35: engine alias, rollback, injected CLI command
 
     /// dogfood-1 finding 1: `--agent claude` is the spelling every surface advertises
