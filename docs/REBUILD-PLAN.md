@@ -1292,6 +1292,45 @@ OrchardRuntime/Files/**, a remote file transport where it belongs, matching test
 docs/reports/t85-remote-files.md. Does not touch OrchardApp/**, WorkerVerbs, or
 OrchardTerminals.
 
+### Wave 24 (T86) — workspace switching is slow
+
+The user reports that selecting a workspace takes noticeably long to change the pane.
+Measured on the live runtime (2026-08-27, three repos with one worktree each):
+
+| Call | Cost |
+|---|---|
+| `orchard status` (CLI round-trip baseline) | **30 ms** |
+| `terminal create --cwd <path>` (no worktree selector) | **~40 ms** |
+| `terminal create --worktree id:<repo>::<path>` | **~530 ms** |
+| `worktree list` (all three repos) | **~520 ms** |
+| `worktree list --repo name:<one>` | **~210 ms each** |
+| raw `git worktree list --porcelain` / `git status --porcelain` | **~29 ms each** |
+
+So resolving a worktree selector costs half a second, and it is not git being slow:
+one repo with ONE worktree spends ~210 ms, which is roughly six or seven `git`
+spawns. The app pays this on the main thread — `AppStore.session(for:)` calls
+`runtime.terminalService.create(worktreeId:…)` inline while the pane materializes —
+so the first switch to a workspace stalls the UI for as long as the enumeration takes.
+
+**T86 — Make workspace switching immediate.** Two halves, both required.
+(1) *Make resolution cheap.* An `id:<repoId>::<path>` selector already names its repo
+and path: resolving it must not enumerate anything. Where enumeration is genuinely
+needed, collapse the per-worktree git calls (a single `git status --porcelain=v2
+--branch` carries branch, ahead/behind and changes that separate spawns fetch today),
+cache what is stable with honest invalidation, and parallelize across repos. Do not
+trade correctness for speed: a cache that can serve a stale branch or status must
+either be invalidated on the operations that change it or not exist.
+(2) *Never block the main thread.* Pane materialization must not run a git enumeration
+inline during view rendering; the pane should appear at once and fill in as the
+session arrives, or the session should be prepared off the critical path.
+Acceptance, measured the same way and reported in a table next to the numbers above:
+`worktree list` for three repos and `terminal create --worktree` each **under 100 ms**,
+and the app's workspace switch showing no synchronous git work on the main thread.
+Owns: OrchardCore/Git + OrchardCore/Worktrees, OrchardRuntime/Workspaces,
+Sources/OrchardApp/AppStore.swift pane materialization, matching tests,
+docs/reports/t86-switch-latency.md. Does not touch Files/**, Conflicts/**,
+Automations/**, or the remote transports.
+
 ### Standing backlog (reconciled 2026-08-26)
 
 Everything the old wave-13+ list carried has since been closed and is recorded in its
