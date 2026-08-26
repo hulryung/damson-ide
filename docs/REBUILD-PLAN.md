@@ -1222,6 +1222,55 @@ main.swift window-frame autosave (why the smaller-window adopted-fit case is the
 common one), and — only if clipping recurs — damson exposing an unconditional
 follow re-pin.
 
+### Standing backlog (reconciled 2026-08-26)
+
+Everything the old wave-13+ list carried has since been closed and is recorded in its
+wave section: respacedLines on the wire (T55), capture fidelity — root-caused
+Orchard-side, damson untouched (T54) with `respacedLines: 0` in every dogfood since,
+both intermittent test failures (T76 + coordinator), branch deletion and the
+human-readable remote worktree-list (T53), window lifecycle (T51), the reverse-forward
+hook grant and remote identity (T78), supervised remote dispatch (T80), and the
+shell-worker contract (T82). What genuinely remains:
+
+**Remote, still real work**
+- A supervised worker running a real *agent* engine on a remote host. T80/T82 proved
+  the lifecycle with shell workers; a remote `claude-code` worker has never been driven
+  to settlement.
+- App-side opening of a remote *agent* pane. `terminal create --engine <agent>` against
+  a remote worktree works since T39, but the GUI reaches remote shell panes only.
+- A real remote file backend: `file` verbs answer `remote_unsupported` for a remote
+  workspace by design (resolving remote paths locally would be worse than an error).
+- Durable connection with a generation counter, and connection multiplexing — today
+  each command is its own `ssh`.
+- `HostLiveness.live` has no producer (deliberate: presentation-only).
+
+**Open by design (revisit only if a use case appears)**
+- Remote provider transcripts are unresolvable; a restored ended pane has no scrollback
+  (the keeper cannot hand back a dead pane's buffer).
+- `skills`, `artifacts`, and `computer` command groups are out of scope (T77).
+
+**Owed to a human**
+- GUI surfaces that shipped unit- and CLI-verified but never driven by a person:
+  the conflict-review pane's per-hunk controls, the source-control panel's staging and
+  commit flow, the floating terminal, and the Automations editor sheet. Synthetic input
+  cannot stand in — `orca computer press-key` does not reach SwiftUI's key handling
+  (System Events key codes do), and taps on SwiftUI gesture handlers do not fire.
+
+### Wave 16 source findings (from dogfood-4, docs/reports/dogfood-4.md)
+
+Automations hardening: (1) fire-due races the in-process scheduler → double fire in
+one minute slot; (2) shell-provider fires PASTE the preamble+prompt into zsh but
+never execute it — the pane is left holding an unsubmitted paste carrying a live
+capability (also a hygiene issue: don't leave capabilities sitting in pane input);
+(3) '* * * * *' refires every minute until removed — consider a one-shot/`once`
+schedule and/or auto-disable after N failures; (4) automation dispatches never
+settle (worker-release lands retained/identity_unproven after worker-stop) — decide
+the settlement story for automation-fired workers. Plus: repo-remove verb (registry
+is permanent from the CLI today), typed errors still exit 0, help/flag nits,
+main.swift window-frame autosave (why the smaller-window adopted-fit case is the
+common one), and — only if clipping recurs — damson exposing an unconditional
+follow re-pin.
+
 ### Wave 13+ backlog
 
 T52 follow-ups: (a) Report.respacedLines exists but the runtime's chromeStripped
