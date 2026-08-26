@@ -373,7 +373,8 @@ struct ProjectCheckoutDiffPane: View {
         DiffPaneView(
             worktreeURL: project.repo,
             baseRef: "HEAD",
-            branch: project.worktrees.currentBranchName ?? "",
+            // The published reading, not a fresh `git rev-parse`: this is a view body.
+            branch: project.checkoutStatus.branch == "HEAD" ? "" : project.checkoutStatus.branch,
             stat: project.checkoutStatus.stat,
             hasUncommittedChanges: project.checkoutStatus.hasUncommittedChanges,
             unpushedCommits: project.checkoutStatus.unpushedCommits,
@@ -455,6 +456,13 @@ struct DiffFileRow: View {
                 Text("bin")
                     .font(.system(size: 9, weight: .medium))
                     .foregroundStyle(Tokens.textTertiary)
+            } else if !file.linesCounted {
+                // A real change whose size nobody measured. "+0" would read as "nothing
+                // in it" and "bin" would read as "nothing to show", and it is neither.
+                Text("—")
+                    .font(.system(size: 9, weight: .medium))
+                    .foregroundStyle(Tokens.textTertiary)
+                    .help("Too large to count lines for.")
             } else {
                 HStack(spacing: 3) {
                     if file.added > 0 {

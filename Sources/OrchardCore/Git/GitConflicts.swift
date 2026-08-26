@@ -546,11 +546,53 @@ public struct GitConflictService: Sendable {
         return .none
     }
 
-    private func gitDirectory(worktree: URL) -> URL? {
+    /// The worktree's own git dir, resolved the way git resolves it — without asking git.
+    ///
+    /// `rev-parse --absolute-git-dir` is a whole process, and on the workspace-switch path
+    /// it was one of two spawns buying facts that a `stat` and a one-line file read
+    /// already answer: `<worktree>/.git` is either the directory itself (a primary
+    /// checkout) or a file holding `gitdir: <path>` (a linked worktree). The `rev-parse`
+    /// remains as the fallback for a layout neither shape covers, so a repo this reader
+    /// does not understand degrades to the old cost rather than to a wrong answer.
+    func gitDirectory(worktree: URL) -> URL? {
+        if let direct = Self.gitDirectoryWithoutGit(worktree: worktree) { return direct }
         guard let out = git.line(in: worktree, ["rev-parse", "--absolute-git-dir"]) else {
             return nil
         }
         return URL(fileURLWithPath: out)
+    }
+
+    /// `<worktree>/.git` read as git reads it, or nil when it is neither a directory nor a
+    /// `gitdir:` pointer.
+    public static func gitDirectoryWithoutGit(worktree: URL) -> URL? {
+        let dotGit = worktree.appendingPathComponent(".git")
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: dotGit.path, isDirectory: &isDirectory) else {
+            return nil
+        }
+        if isDirectory.boolValue { return dotGit }
+        guard let text = try? String(contentsOf: dotGit, encoding: .utf8) else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("gitdir:") else { return nil }
+        let target = String(trimmed.dropFirst("gitdir:".count))
+            .trimmingCharacters(in: .whitespaces)
+        guard !target.isEmpty else { return nil }
+        if target.hasPrefix("/") { return URL(fileURLWithPath: target) }
+        return URL(fileURLWithPath: target, relativeTo: worktree).standardizedFileURL
+    }
+
+    /// The repo-wide git dir shared by every worktree (`refs/`, `packed-refs`, `objects/`).
+    /// A linked worktree's git dir holds a `commondir` file naming it; for a primary
+    /// checkout the two are the same directory.
+    public static func commonDirectory(gitDirectory: URL) -> URL {
+        let marker = gitDirectory.appendingPathComponent("commondir")
+        guard let text = try? String(contentsOf: marker, encoding: .utf8) else {
+            return gitDirectory
+        }
+        let target = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !target.isEmpty else { return gitDirectory }
+        if target.hasPrefix("/") { return URL(fileURLWithPath: target) }
+        return URL(fileURLWithPath: target, relativeTo: gitDirectory).standardizedFileURL
     }
 
     /// Unmerged paths, from `git status --porcelain -z`.
@@ -563,6 +605,26 @@ public struct GitConflictService: Sendable {
     public func summary(worktree: URL) -> GitConflictSummary {
         GitConflictSummary(operation: operation(worktree: worktree),
                            files: conflictedFiles(worktree: worktree))
+    }
+
+    /// The same summary built from unmerged entries a caller already has.
+    ///
+    /// `GitService.facts` runs `git status --porcelain=v2 -z`, which names every unmerged
+    /// path and its conflict code; asking `git status --porcelain` again for the identical
+    /// list was the expensive half of every `refreshConflicts`. This spelling exists so
+    /// that reading costs nothing extra.
+    public func summary(worktree: URL,
+                        unmerged: [GitStatusPorcelainV2.Unmerged]) -> GitConflictSummary {
+        let files = unmerged
+            .compactMap { entry in
+                GitConflictKind.from(code: entry.code)
+                    .map { GitConflictedFile(path: entry.path, kind: $0) }
+            }
+            .sorted { $0.path < $1.path }
+        // The operation still has to be asked for even with no conflicted files: a merge
+        // whose conflicts are all staged is mid-flight and unfinished, and that is exactly
+        // the state where the user needs to be told what to do next.
+        return GitConflictSummary(operation: operation(worktree: worktree), files: files)
     }
 
     /// Decode `git status --porcelain -z` output into the unmerged entries only.

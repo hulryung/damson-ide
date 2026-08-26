@@ -117,6 +117,11 @@ public final class WorktreeService {
     }
 
     /// Refresh every worktree's git status (after a create, delete, or agent turn).
+    ///
+    /// The fan-out is no longer unbounded: every reading now goes through `GitFactsCache`,
+    /// which runs at most a handful at a time on its own queue. A repo with twenty
+    /// worktrees used to start sixty git processes at once and starve the thread pool the
+    /// rest of the app's async work runs on.
     public func refreshAllStatuses() {
         for record in worktrees {
             Task { await record.refresh() }
@@ -164,11 +169,23 @@ public final class WorktreeService {
     /// main-thread git read — which is precisely what made selecting a project root stall
     /// the workbench.
     public func primaryCheckoutStatus() async -> GitWorktreeStatus {
+        await primaryCheckoutFacts().status
+    }
+
+    /// The primary checkout's status *and* conflict summary, from one reading, served from
+    /// `GitFactsCache` when nothing has changed since the last one.
+    public func primaryCheckoutFacts(
+        urgency: GitFactsCache.Urgency = .background) async -> GitWorktreeFacts {
         guard isGitRepository else { return .unknown }
-        let repo = baseRepo
-        return await Task.detached(priority: .utility) {
-            GitService().status(worktree: repo, baseRef: "HEAD")
-        }.value
+        return await GitFactsCache.shared.facts(worktree: baseRepo, baseRef: "HEAD",
+                                                urgency: urgency)
+    }
+
+    /// The cached reading for the primary checkout, or nil when there is none. Spawn-free
+    /// and synchronous — what selecting a project root reaches for first.
+    public func cachedPrimaryCheckoutFacts() -> GitWorktreeFacts? {
+        guard isGitRepository else { return nil }
+        return GitFactsCache.shared.cached(worktree: baseRepo, baseRef: "HEAD")
     }
 
     // MARK: - Create
@@ -298,6 +315,9 @@ public final class WorktreeService {
                                   branch: record.branch, branchMerged: preflight.branchMerged,
                                   branchDeleted: false)
         guard removed else { return kept }
+        // The directory is gone: drop its reading and its watcher rather than leaving a
+        // stream open on a path that no longer exists.
+        GitFactsCache.shared.forget(worktree: record.path)
         worktrees.removeAll { $0.id == record.id }
         eventSink.yield(.worktreeRemoved(worktreeID: record.id, branch: record.branch))
         let branchDeleted = dropBranch && !branchStillExists(record.branch)

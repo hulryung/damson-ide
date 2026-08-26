@@ -137,6 +137,47 @@ final class FileWatcherTests: XCTestCase {
         XCTAssertFalse(snap.keys.contains { $0.hasPrefix("escape/") })
     }
 
+    /// T87: `start` is called from a view update when a workspace is selected, so the
+    /// baseline walk cannot happen on the caller's thread — a 500 MB checkout is a few
+    /// thousand `stat`s, and the switch froze for all of them.
+    func testStartDoesNotWalkTheTreeOnTheCallersThread() throws {
+        for index in 0..<600 { try write("x", to: "deep/\(index % 20)/file-\(index).txt") }
+        let watcher = FileWatcher(debounce: 0.05)
+        defer { watcher.stop() }
+
+        let start = DispatchTime.now().uptimeNanoseconds
+        try watcher.start(root: tmp)
+        let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+
+        // The walk itself, for scale: `start` has to be a small fraction of it.
+        let walkStart = DispatchTime.now().uptimeNanoseconds
+        let entries = try FileWatchReconciler.identities(root: tmp)
+        let walkMS = Double(DispatchTime.now().uptimeNanoseconds - walkStart) / 1_000_000
+        XCTAssertGreaterThan(entries.count, 600)
+        XCTAssertLessThan(ms, max(walkMS / 2, 5),
+                          "start() took \(ms) ms against a \(walkMS) ms walk — it is still walking")
+    }
+
+    /// …and moving the walk off the caller must not make the first reconcile report the
+    /// whole workspace as freshly created, which is what diffing against an empty baseline
+    /// would do.
+    func testTheFirstReconcileDoesNotReportPreexistingFilesAsCreated() async throws {
+        for index in 0..<50 { try write("x", to: "existing/file-\(index).txt") }
+        let watcher = FileWatcher(debounce: 0.05)
+        defer { watcher.stop() }
+        try watcher.start(root: tmp)
+
+        let batch = try await mutateAndWait(watcher, timeout: 8, matching: { batch in
+            batch.changes.contains { $0.relativePath.hasSuffix("brand-new.txt") }
+        }) {
+            try write("new", to: "brand-new.txt")
+        }
+        let created = batch.changes.filter { $0.kind == .created }.map(\.relativePath)
+        XCTAssertTrue(created.contains { $0.hasSuffix("brand-new.txt") })
+        XCTAssertFalse(created.contains { $0.contains("existing/") },
+                       "reconciled against an empty baseline: \(created.prefix(5))")
+    }
+
     func testLiveWatcherEmitsCreateDeleteRename() async throws {
         let watcher = FileWatcher(debounce: 0.05)
         let stream = watcher.events()

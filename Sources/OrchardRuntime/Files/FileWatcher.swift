@@ -125,6 +125,10 @@ public final class FileWatcher: @unchecked Sendable {
     private var stream: FSEventStreamRef?
     private var debounceWork: DispatchWorkItem?
     private var previous: [String: FileWatchIdentity] = [:]
+    /// Whether `previous` is a real reading of the tree rather than the empty placeholder
+    /// `start` leaves while the baseline walk is still queued. Reconciling against the
+    /// placeholder would report every file in the workspace as freshly created.
+    private var baselineReady = false
     private var root: URL?
     private var running = false
     private let queue: DispatchQueue
@@ -173,12 +177,19 @@ public final class FileWatcher: @unchecked Sendable {
         }
         guard isDir.boolValue else { throw FileServiceError.notADirectory }
 
-        let snap = try FileWatchReconciler.identities(root: resolved)
+        // The baseline walk is the expensive part — a 500 MB checkout is a few thousand
+        // `stat`s — and `start` is called from a view update when a workspace is selected,
+        // so doing it here froze the switch for as long as the walk took. It runs on the
+        // watcher's own serial queue instead, enqueued *before* the stream is created: any
+        // event the stream delivers therefore queues behind it and reconciles against a
+        // real baseline rather than against an empty one.
         lock.lock()
         self.root = resolved
-        self.previous = snap
+        self.previous = [:]
+        self.baselineReady = false
         self.running = true
         lock.unlock()
+        queue.async { [weak self] in self?.takeBaseline(root: resolved) }
 
         var context = FSEventStreamContext(
             version: 0,
@@ -211,6 +222,29 @@ public final class FileWatcher: @unchecked Sendable {
         }
         lock.lock()
         stream = created
+        lock.unlock()
+    }
+
+    /// Walk the tree once to establish what "unchanged" looks like. Runs on `queue`.
+    private func takeBaseline(root: URL) {
+        let snap = try? FileWatchReconciler.identities(root: root)
+        lock.lock()
+        guard running, self.root == root, !baselineReady else {
+            lock.unlock()
+            return
+        }
+        guard let snap else {
+            lock.unlock()
+            // The root is gone or is not a directory — the same conclusion `reconcile`
+            // reaches, reported the same way rather than as silence.
+            let batch = FileWatchBatch(rootDeleted: true)
+            emit(batch)
+            notifyReconciled(batch)
+            stop()
+            return
+        }
+        previous = snap
+        baselineReady = true
         lock.unlock()
     }
 
@@ -259,7 +293,7 @@ public final class FileWatcher: @unchecked Sendable {
 
     private func reconcile(forceRootCheck _: Bool) {
         lock.lock()
-        guard running, let root else {
+        guard running, baselineReady, let root else {
             lock.unlock()
             return
         }

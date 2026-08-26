@@ -350,17 +350,14 @@ private final class FileExplorerModel: ObservableObject {
         self.root = root
         self.files = files
         reload()
+        let mark = AppStore.traceBegin()
         startWatching()
+        AppStore.traceEnd("explorer.watch", mark)
     }
 
     func reload() {
-        let traceStart = DispatchTime.now().uptimeNanoseconds
-        defer {
-            if AppStore.traceSwitch {
-                let ms = Double(DispatchTime.now().uptimeNanoseconds - traceStart) / 1_000_000
-                NSLog("ORCHARD_TRACE explorer.reload %.1f ms", ms)
-            }
-        }
+        let mark = AppStore.traceBegin()
+        defer { AppStore.traceEnd("explorer.reload", mark) }
         children = [:]
         expanded = []
         error = nil

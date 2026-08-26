@@ -251,10 +251,15 @@ struct WorkspaceStatusSlot: View {
 struct DiffStatBadge: View {
     let added: Int
     let deleted: Int
+    /// False when a refresh declined to read some untracked file, which makes `added` a
+    /// floor rather than a total. The badge says so instead of printing a number it knows
+    /// is short.
+    var countsComplete = true
 
     init(stat: GitDiffStat) {
         added = stat.added
         deleted = stat.deleted
+        countsComplete = stat.countsComplete
     }
 
     init(added: Int, deleted: Int) {
@@ -266,7 +271,8 @@ struct DiffStatBadge: View {
         if added > 0 || deleted > 0 {
             HStack(spacing: 4) {
                 if added > 0 {
-                    Text("+\(added)").foregroundStyle(Tokens.Git.added)
+                    Text(countsComplete ? "+\(added)" : "+\(added)…")
+                        .foregroundStyle(Tokens.Git.added)
                 }
                 if deleted > 0 {
                     Text("−\(deleted)").foregroundStyle(Tokens.Git.deleted)
@@ -274,6 +280,7 @@ struct DiffStatBadge: View {
             }
             .font(Tokens.fontMeta)
             .monospacedDigit()
+            .help(countsComplete ? "" : "Some untracked files were too large to count.")
         }
     }
 }

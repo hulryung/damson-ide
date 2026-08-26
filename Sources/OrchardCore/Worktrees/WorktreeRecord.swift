@@ -23,9 +23,12 @@ public final class WorktreeRecord: ObservableObject, @MainActor Identifiable {
     /// still fully usable, just idle.
     @Published public var agentState: AgentRuntimeState?
 
-    /// Cached git status. Refreshed by `refresh()` rather than on every read, since each
-    /// call is several git subprocesses.
+    /// Last git status published for this worktree. Refreshed by `refresh()` rather than
+    /// on every read, since a fresh reading is several git subprocesses.
     @Published public private(set) var status: GitWorktreeStatus = .unknown
+    /// Unmerged state, from the same reading as `status` — porcelain v2 names every
+    /// conflicted path, so this costs no extra git.
+    @Published public private(set) var conflicts: GitConflictSummary = .none
     @Published public private(set) var isRefreshing = false
 
     /// Set when an agent finishes a turn while this worktree isn't the one on screen, so
@@ -74,16 +77,41 @@ public final class WorktreeRecord: ObservableObject, @MainActor Identifiable {
         }
     }
 
-    /// Re-read git status. Runs the git calls off the main actor so a large repo's status
-    /// can't stutter the UI.
-    public func refresh() async {
-        guard !isRefreshing else { return }
+    /// The base commit this worktree forked from, as the status reader spells it.
+    public var effectiveBaseRef: String {
+        worktree.baseRef.isEmpty ? "HEAD" : worktree.baseRef
+    }
+
+    /// Publish the cached reading if `GitFactsCache` still holds one, without running git
+    /// or suspending. Returns whether it had one.
+    ///
+    /// This is what a workspace switch calls first: selecting a workspace visited a moment
+    /// ago must not spawn anything, and must not wait for a hop off the main actor either.
+    @discardableResult
+    public func applyCachedFacts() -> Bool {
+        guard let facts = GitFactsCache.shared.cached(worktree: worktree.path,
+                                                      baseRef: effectiveBaseRef)
+        else { return false }
+        apply(facts)
+        return true
+    }
+
+    /// Re-read git facts. The reading itself never touches the main actor, and several
+    /// callers asking at once share one — the sidebar row, the workbench's conflict check
+    /// and the source-control panel used to run their own.
+    public func refresh(urgency: GitFactsCache.Urgency = .background) async {
+        if applyCachedFacts() { return }
         isRefreshing = true
-        let manager = self.manager
-        let wt = self.worktree
-        let fresh = await Task.detached(priority: .utility) { manager.status(wt) }.value
-        status = fresh
+        let fresh = await GitFactsCache.shared.facts(worktree: worktree.path,
+                                                     baseRef: effectiveBaseRef,
+                                                     urgency: urgency)
+        apply(fresh)
         isRefreshing = false
+    }
+
+    private func apply(_ facts: GitWorktreeFacts) {
+        if status != facts.status { status = facts.status }
+        if conflicts != facts.conflicts { conflicts = facts.conflicts }
     }
 }
 

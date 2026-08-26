@@ -16,6 +16,9 @@ struct ComposerView: View {
     @State private var workspaceStatus = WorkspaceStatus.inProgress.rawValue
     @State private var errorMessage: String?
     @State private var isCreating = false
+    /// Local branches, loaded once off the main actor when the sheet appears.
+    /// `availableBaseRefs()` shells out to git, and `branches` is read from `body`.
+    @State private var localBranches: [String] = []
     @FocusState private var nameFocused: Bool
 
     private var engines: [EngineOption] { EngineOption.all }
@@ -30,7 +33,7 @@ struct ComposerView: View {
         }
         return ComposerPlanning.seedBaseRefs(
             resolvedDefault: project.worktrees.baseRef,
-            localBranches: project.worktrees.availableBaseRefs())
+            localBranches: localBranches)
     }
 
     private var plannedNames: [String] {
@@ -181,6 +184,7 @@ struct ComposerView: View {
             }
             nameFocused = true
         }
+        .task { localBranches = await project.baseRefChoices() }
     }
 
     private func field<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
@@ -231,13 +235,45 @@ struct DeleteWorktreeSheet: View {
     @State private var errorMessage: String?
     @State private var resultMessage: String?
 
-    private var preflight: WorktreeDeletionPreflight {
-        project.worktrees.deletionPreflight(record)
-    }
+    /// What deleting this would discard. Loaded once off the main actor: the reading is a
+    /// full `git status` (three processes), and this used to be a computed property
+    /// evaluated inside `body` — so every re-render of the sheet ran it again, on the main
+    /// thread, while the user was reading the warnings it produced.
+    @State private var preflight: WorktreeDeletionPreflight?
 
     var body: some View {
-        let flight = preflight
-        return VStack(alignment: .leading, spacing: 14) {
+        Group {
+            if let flight = preflight {
+                content(flight)
+            } else {
+                pending
+            }
+        }
+        .padding(18)
+        .frame(width: 420)
+        .onAppear { deleteBranch = store.settings.deleteBranchWithWorktree }
+        .task { preflight = await project.deletionPreflight(record) }
+    }
+
+    /// What the sheet shows while the reading is in flight. Not the delete controls: a
+    /// button that would have to guess `force` is worse than one that has not appeared.
+    private var pending: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Delete “\(record.title)”?")
+                .font(.system(size: 13, weight: .semibold))
+            Text("Checking what this would discard…")
+                .font(Tokens.fontMeta)
+                .foregroundStyle(Tokens.textSecondary)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+            }
+        }
+    }
+
+    private func content(_ flight: WorktreeDeletionPreflight) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
             HStack(spacing: 9) {
                 Image(systemName: resultMessage != nil
                       ? "checkmark.circle.fill"
@@ -324,9 +360,6 @@ struct DeleteWorktreeSheet: View {
                 }
             }
         }
-        .padding(18)
-        .frame(width: 420)
-        .onAppear { deleteBranch = store.settings.deleteBranchWithWorktree }
     }
 
     private func performDelete(force: Bool) {
