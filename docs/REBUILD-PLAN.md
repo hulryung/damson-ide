@@ -1119,7 +1119,30 @@ OrchardProtocol/CommandSpec.swift + guides, the worktree/project handlers in
 OrchardRuntime/Workspaces/**, WorkerVerbs' read path for `hasOlder`, matching tests.
 Does not touch Files/**, WorktreeManager.swift, Conflicts/**, or Automations.
 
-### Wave 22 (T79–T81) — the last two open items
+### Wave 22 (T79–T82) — MERGED 2026-08-26, 1243 tests, e2e PASS
+
+Both open items closed, and the verification found a third thing worth fixing.
+
+- **T79** `repo remove --forget`: unregisters a remote repo view — the row and the
+  local rows projecting its remote worktrees — touching nothing on the host. A local
+  repo still refuses (`forget_local_refused`). Verified live, and dogfood-7 confirmed
+  the far side's worktrees survive byte-for-byte.
+- **T80** supervised dispatch across a host boundary: `worker-start` no longer
+  *assumes* a remote host cannot carry a dispatch, it *asks* — running the CLI over
+  ssh with the identity the pane will carry and opening the door only when the far
+  side reaches THIS runtime, keeping ready / refused / unverifiable distinct.
+  Verified live end to end (docs/reports/t80-remote-dispatch-verification.md) and
+  again by dogfood-7. The T80 worker died mid-review after ten hours of silence with
+  its work uncommitted; the coordinator verified, committed and merged it.
+- **T81** dogfood cycle 7: waves 19–21 all hold, plus the remote cycle and `--forget`.
+- **T82** the defect that verification exposed: `worker-start` typed the agent preamble
+  into a *shell* pane, whose first apostrophe left zsh in quote continuation with the
+  live capability stranded in pending input — so a shell worker could never run its
+  task. Dispatch input is now shaped by the engine (TUI keeps the prompt; a shell gets
+  one executable line that writes the contract to a mode-600 file). Fixing it surfaced
+  the deeper cause: input typed before the shell takes the tty is read in canonical
+  mode and cut at MAX_CANON (1024 bytes), losing the tail whatever the quoting, so a
+  bare shell's readiness is now a nonce handshake the shell must actually run.
 
 A real SSH transport is available for this wave: host `orchard-loopback`
 (127.0.0.1:2222, user-space sshd started by the coordinator, `orchard host check
