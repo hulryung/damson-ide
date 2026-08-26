@@ -1,5 +1,6 @@
 import SwiftUI
 import OrchardCore
+import OrchardRuntime
 
 /// ⌘N — name, prompt, live-registry engine, base branch, fan-out, initial status.
 struct ComposerView: View {
@@ -14,13 +15,20 @@ struct ComposerView: View {
     @State private var count = 1
     @State private var workspaceStatus = WorkspaceStatus.inProgress.rawValue
     @State private var errorMessage: String?
+    @State private var isCreating = false
     @FocusState private var nameFocused: Bool
 
     private var engines: [EngineOption] { EngineOption.all }
 
     /// Repo default first (often `origin/main`, not a local branch), then locals.
+    /// Remote repos have no local `for-each-ref`; seed the registry default.
     private var branches: [String] {
-        ComposerPlanning.seedBaseRefs(
+        if project.isRemote {
+            return ComposerPlanning.seedBaseRefs(
+                resolvedDefault: store.remoteComposerBaseRef(for: project),
+                localBranches: [])
+        }
+        return ComposerPlanning.seedBaseRefs(
             resolvedDefault: project.worktrees.baseRef,
             localBranches: project.worktrees.availableBaseRefs())
     }
@@ -28,9 +36,9 @@ struct ComposerView: View {
     private var plannedNames: [String] {
         ComposerPlanning.fanOutNames(
             name: name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                ? project.worktrees.suggestedName() : name,
+                ? project.composerSuggestedName() : name,
             count: max(count, 1),
-            taken: project.worktrees.takenNames)
+            taken: project.composerTakenNames)
     }
 
     private var branchPreview: String {
@@ -50,6 +58,7 @@ struct ComposerView: View {
                         .font(Tokens.fontMeta)
                         .foregroundStyle(Tokens.textSecondary)
                 }
+                HostChip(hostId: project.hostId)
                 Spacer()
             }
             .padding(.horizontal, 16)
@@ -90,6 +99,13 @@ struct ComposerView: View {
                         }
                         .labelsHidden()
                         .pickerStyle(.menu)
+                        .accessibilityIdentifier("composer-engine")
+                        if project.isRemote {
+                            Text("Starts on \(RemoteWorkspacePolicy.hostLabel(project.hostId)) through `terminal create --engine`, the same runtime verb as the CLI.")
+                                .font(Tokens.fontMeta)
+                                .foregroundStyle(Tokens.textTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                     }
                     field("Base branch") {
                         Picker("", selection: $baseRef) {
@@ -141,9 +157,12 @@ struct ComposerView: View {
                 Spacer()
                 Button("Cancel") { dismiss() }
                     .keyboardShortcut(.cancelAction)
-                Button(count == 1 ? "Create" : "Create \(count)") { create() }
+                Button(isCreating
+                       ? "Starting…"
+                       : (count == 1 ? "Create" : "Create \(count)")) { create() }
                     .keyboardShortcut(.return, modifiers: .command)
                     .buttonStyle(.borderedProminent)
+                    .disabled(isCreating)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
@@ -151,8 +170,10 @@ struct ComposerView: View {
         .frame(width: 500)
         .frame(maxHeight: 640)
         .onAppear {
-            name = project.worktrees.suggestedName()
-            baseRef = project.worktrees.baseRef
+            name = project.composerSuggestedName()
+            baseRef = project.isRemote
+                ? store.remoteComposerBaseRef(for: project)
+                : project.worktrees.baseRef
             engineID = store.settings.resolvedDefaultEngineID
             if store.statusVocabulary.contains(where: { $0.id == workspaceStatus }) == false {
                 workspaceStatus = store.statusVocabulary.first?.id
@@ -178,18 +199,23 @@ struct ComposerView: View {
             errorMessage = error
             return
         }
-        do {
-            try store.compose(
-                project: project,
-                name: trimmedName,
-                prompt: trimmedPrompt,
-                engineID: engineID,
-                baseRef: baseRef.isEmpty ? nil : baseRef,
-                count: count,
-                workspaceStatus: workspaceStatus)
-            dismiss()
-        } catch {
-            errorMessage = String(describing: error)
+        isCreating = true
+        errorMessage = nil
+        Task {
+            defer { isCreating = false }
+            do {
+                try await store.compose(
+                    project: project,
+                    name: trimmedName,
+                    prompt: trimmedPrompt,
+                    engineID: engineID,
+                    baseRef: baseRef.isEmpty ? nil : baseRef,
+                    count: count,
+                    workspaceStatus: workspaceStatus)
+                dismiss()
+            } catch {
+                errorMessage = RemoteAgentStart.describe(error)
+            }
         }
     }
 }

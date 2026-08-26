@@ -287,8 +287,10 @@ struct RepoHeader: View {
                 store.selectedProjectID = project.id
                 store.requestNewWorktree()
             }
-            .disabled(project.isRemote)
-            .help(RemoteWorkspacePolicy.unsupportedExplanation(.composer, hostId: project.hostId) ?? "")
+            .disabled(project.isRemote && project.repoID == nil)
+            .help(project.isRemote && project.repoID == nil
+                  ? "This remote repo is not in the registry yet."
+                  : "Create a worktree and start an agent")
             Divider()
             Button("Reveal in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([project.repo])
@@ -379,7 +381,13 @@ struct WorkspaceCard: View {
     private var agents: [AgentSession] { project.liveAgents(in: record.id) }
     /// Finished/errored sessions still sit in the supervisor until dismissed;
     /// the start/restart row is for when nothing is actually running.
-    private var hasLiveAgent: Bool { agents.contains { !$0.state.isTerminal } }
+    private var hasLiveAgent: Bool {
+        agents.contains { !$0.state.isTerminal }
+            || store.hasLiveRemoteAgent(in: record, project: project)
+    }
+    private var remoteAgents: [TerminalSummary] {
+        store.remoteAgentSummaries(for: record, in: project)
+    }
     private var unseen: Bool { store.isUnread(workspace: record.id) }
     private var archived: Bool { store.meta.isArchived(for: record.id) }
     private var moveAmongIDs: [UUID] {
@@ -395,10 +403,16 @@ struct WorkspaceCard: View {
         VStack(alignment: .leading, spacing: 4) {
             titleRow
             metaRow
-            ForEach(agents) { agent in
-                AgentInlineRow(agent: agent)
+            if project.isRemote {
+                ForEach(remoteAgents, id: \.handle) { summary in
+                    RemoteAgentInlineRow(summary: summary)
+                }
+            } else {
+                ForEach(agents) { agent in
+                    AgentInlineRow(agent: agent)
+                }
             }
-            if !hasLiveAgent, !project.isRemote {
+            if !hasLiveAgent {
                 StartAgentRow(project: project, record: record)
             }
         }
@@ -490,12 +504,20 @@ struct WorkspaceCard: View {
             Menu(record.lastPrompt == nil ? "Start agent" : "Restart agent") {
                 ForEach(EngineOption.all) { engine in
                     Button(engine.displayName) {
-                        _ = try? store.startAgent(in: record, project: project, engineID: engine.id)
+                        Task {
+                            do {
+                                try await store.startAgent(
+                                    in: record, project: project, engineID: engine.id)
+                            } catch {
+                                // startAgent records the typed failure on the card.
+                            }
+                        }
                     }
                 }
             }
-            .disabled(project.isRemote)
-            .help(RemoteWorkspacePolicy.unsupportedExplanation(.agents, hostId: project.hostId) ?? "")
+            .help(project.isRemote
+                  ? "Spawn an agent on \(RemoteWorkspacePolicy.hostLabel(project.hostId)) through terminal create --engine, the same runtime verb as the CLI."
+                  : "")
         } else {
             Button("Dismiss agents") {
                 project.agents.retireAgents(inWorktree: record.id)
@@ -564,7 +586,7 @@ struct StartAgentRow: View {
                     }
                 }
                 .buttonStyle(.plain)
-                .disabled(project.isRemote)
+                .accessibilityIdentifier(isRestart ? "restart-agent" : "start-agent")
                 Spacer(minLength: 4)
                 Menu {
                     ForEach(EngineOption.all) { engine in
@@ -578,18 +600,19 @@ struct StartAgentRow: View {
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
-                .disabled(project.isRemote)
             }
             .help(project.isRemote
-                  ? (RemoteWorkspacePolicy.unsupportedExplanation(.agents, hostId: project.hostId) ?? "")
+                  ? "Spawn an agent on \(RemoteWorkspacePolicy.hostLabel(project.hostId)) through terminal create --engine, the same runtime verb as the CLI."
                   : (isRestart
                      ? "Spawn a new agent in this worktree. The last prompt is sent again if one was saved."
                      : "Spawn an agent in this worktree. Prompt is optional — empty waits at the input box."))
-            if let errorMessage {
-                Text(errorMessage)
+            if let shown = errorMessage ?? store.agentStartError[record.id] {
+                Text(shown)
                     .font(Tokens.fontMeta)
                     .foregroundStyle(.red)
                     .padding(.leading, 17)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("agent-start-error")
             }
         }
         .padding(.leading, 20)
@@ -598,10 +621,59 @@ struct StartAgentRow: View {
 
     private func start(engineID: String) {
         errorMessage = nil
-        do {
-            try store.startAgent(in: record, project: project, engineID: engineID)
-        } catch {
-            errorMessage = String(describing: error)
+        Task {
+            do {
+                try await store.startAgent(in: record, project: project, engineID: engineID)
+            } catch {
+                errorMessage = store.agentStartError[record.id]
+                    ?? RemoteAgentStart.describe(error)
+            }
+        }
+    }
+}
+
+/// Card row for a remote agent pane the runtime already opened. Status comes
+/// from the terminal summary (hooks / fingerprints on that pane), not from a
+/// locally spawned supervisor session.
+struct RemoteAgentInlineRow: View {
+    let summary: TerminalSummary
+
+    private var dot: DashboardDotState {
+        switch summary.agentState {
+        case .working: return .working
+        case .permission: return .blocked
+        case .idle: return .idle
+        case nil: return summary.connected ? .working : .done
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Text(DashboardProjection.glyph(for: dot))
+                .font(.system(size: 10, weight: .semibold, design: .monospaced))
+                .foregroundStyle(dot.color)
+                .frame(width: 12)
+            Text(AgentEngineRegistry.engine(id: summary.engine)?.displayName ?? summary.engine)
+                .font(Tokens.fontMeta)
+                .foregroundStyle(Tokens.textTertiary)
+            Text(dotLabel)
+                .font(Tokens.fontMeta)
+                .foregroundStyle(Tokens.textSecondary)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            HostChip(hostId: summary.executionHostId)
+        }
+        .padding(.leading, 20)
+        .padding(.vertical, 1)
+    }
+
+    private var dotLabel: String {
+        if !summary.connected { return "Disconnected" }
+        switch summary.agentState {
+        case .working: return "Working"
+        case .permission: return "Needs approval"
+        case .idle: return "Idle"
+        case nil: return "Starting"
         }
     }
 }

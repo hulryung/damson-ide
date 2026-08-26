@@ -38,6 +38,8 @@ struct HostChip: View {
                 }
             }
             .help(helpText(label: label, liveness: liveness))
+            .accessibilityIdentifier("host-chip")
+            .accessibilityLabel(label)
         }
     }
 

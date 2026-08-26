@@ -16,10 +16,19 @@ final class RemoteWorkspacePolicyTests: XCTestCase {
         XCTAssertFalse(RemoteWorkspacePolicy.isRemote(hostId: nil))
     }
 
-    func testRemoteHostDisablesTypedAffordances() {
+    func testRemoteHostKeepsAgentAndComposerAffordances() {
+        let host = "ssh:build"
+        XCTAssertTrue(RemoteWorkspacePolicy.isAvailable(.agents, hostId: host))
+        XCTAssertTrue(RemoteWorkspacePolicy.isAvailable(.composer, hostId: host))
+        XCTAssertNil(RemoteWorkspacePolicy.unsupportedExplanation(.agents, hostId: host))
+        XCTAssertNil(RemoteWorkspacePolicy.unsupportedExplanation(.composer, hostId: host))
+    }
+
+    func testRemoteHostDisablesLocalFilesystemAffordances() {
         let host = "ssh:build"
         XCTAssertTrue(RemoteWorkspacePolicy.isRemote(hostId: host))
-        for affordance in RemoteAffordance.allCases {
+        let localOnly: [RemoteAffordance] = [.fileExplorer, .diff, .editor, .browser]
+        for affordance in localOnly {
             XCTAssertFalse(RemoteWorkspacePolicy.isAvailable(affordance, hostId: host),
                            affordance.rawValue)
             let reason = RemoteWorkspacePolicy.unsupportedExplanation(affordance, hostId: host)
@@ -32,9 +41,6 @@ final class RemoteWorkspacePolicyTests: XCTestCase {
                               "\(affordance): \(reason!)")
             }
         }
-        XCTAssertTrue(
-            RemoteWorkspacePolicy.unsupportedExplanation(.agents, hostId: host)!
-                .contains("remote_unsupported"))
         XCTAssertTrue(
             RemoteWorkspacePolicy.unsupportedExplanation(.browser, hostId: host)!
                 .contains("local-only"))
