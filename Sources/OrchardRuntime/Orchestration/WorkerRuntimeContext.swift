@@ -53,6 +53,14 @@ public struct WorkerRuntimeContext: Sendable {
     ) async throws -> TerminalWaitResult
     /// `dispatch_input`: the verified injection pipeline (typed refusals preserved).
     public var injectPrompt: @Sendable (_ handle: String, _ text: String) async throws -> TerminalSendResult
+    /// Clear whatever is pending in a pane's input (Ctrl-C).
+    ///
+    /// T82 uses it as the recovery half of shell-contract delivery: a shell whose line
+    /// editor had not taken the tty back truncates a multi-kilobyte contract, and what
+    /// is left sitting at the continuation prompt includes the dispatch capability.
+    /// Interrupting is the manual fix T80's verification had to perform by hand, so
+    /// `worker-start` performs it itself — before the pane is ever called ready.
+    public var interruptTerminal: @Sendable (_ handle: String) async -> Void
     /// Bounded output read (stream cursor paging; `cursor: nil` = the tail).
     public var readTerminal: @Sendable (
         _ handle: String, _ cursor: Int?, _ limit: Int
@@ -77,6 +85,7 @@ public struct WorkerRuntimeContext: Sendable {
         lookupTerminal: @escaping @Sendable (String) async -> WorkerTerminalLookup,
         waitForAgentIdle: @escaping @Sendable (String, TimeInterval) async throws -> TerminalWaitResult,
         injectPrompt: @escaping @Sendable (String, String) async throws -> TerminalSendResult,
+        interruptTerminal: @escaping @Sendable (String) async -> Void = { _ in },
         readTerminal: @escaping @Sendable (String, Int?, Int) async throws -> TerminalReadResult,
         resolveProviderTranscript: @escaping @Sendable (String, Int) async -> ProviderTranscriptResolution = { _, _ in .unavailable(reason: "provider_session_unavailable") },
         closeTerminal: @escaping @Sendable (String) async throws -> Void,
@@ -95,6 +104,7 @@ public struct WorkerRuntimeContext: Sendable {
         self.lookupTerminal = lookupTerminal
         self.waitForAgentIdle = waitForAgentIdle
         self.injectPrompt = injectPrompt
+        self.interruptTerminal = interruptTerminal
         self.readTerminal = readTerminal
         self.resolveProviderTranscript = resolveProviderTranscript
         self.closeTerminal = closeTerminal
@@ -187,6 +197,9 @@ public struct WorkerRuntimeContext: Sendable {
             },
             injectPrompt: { handle, text in
                 try await terminals.send(handle: handle, text: text, enter: true)
+            },
+            interruptTerminal: { handle in
+                _ = try? await terminals.send(handle: handle, interrupt: true, requireAgent: false)
             },
             readTerminal: { handle, cursor, limit in
                 try await terminals.read(handle: handle, cursor: cursor, limit: limit)

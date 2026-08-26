@@ -35,6 +35,8 @@ final class WorkerVerbTests: XCTestCase {
         /// Host ids the precondition was asked about, in order — so a test can pin that
         /// the second gate does not pay for a round trip the preflight already made.
         var remoteProbes: [String] = []
+        /// Handles whose pending input worker-start cleared, in order (T82).
+        var interrupts: [String] = []
 
         init() {
             var detector = ReadinessDetector.Config()
@@ -117,6 +119,11 @@ final class WorkerVerbTests: XCTestCase {
             },
             injectPrompt: { handle, text in
                 try await harness.service.send(handle: handle, text: text, enter: true)
+            },
+            interruptTerminal: { handle in
+                await MainActor.run { harness.interrupts.append(handle) }
+                _ = try? await harness.service.send(handle: handle, interrupt: true,
+                                                    requireAgent: false)
             },
             readTerminal: { handle, cursor, limit in
                 try await harness.service.read(handle: handle, cursor: cursor, limit: limit)
@@ -247,13 +254,13 @@ final class WorkerVerbTests: XCTestCase {
     /// sends without it are rejected).
     private func injectedCapability(handle: String) async throws -> String {
         let text = try await session(handle).writtenText
-        let marker = "--dispatch-capability "
-        let markerRange = try XCTUnwrap(text.range(of: marker),
-                                        "no --dispatch-capability in the injected preamble")
-        // A shell-command dispatch line single-quotes the value; the preamble does not.
-        let secret = text[markerRange.upperBound...].drop { $0 == "'" }
-            .prefix { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
-        XCTAssertTrue(secret.hasPrefix("dcap_"), "unexpected capability shape: \(secret)")
+        // Keyed on the secret's own prefix, not on the flag before it: the three
+        // delivery shapes spell the surroundings differently (bare in the preamble,
+        // single-quoted in a shell-command line, an exported variable reference in a
+        // shell contract) and only the value is common to all of them.
+        let start = try XCTUnwrap(text.range(of: "dcap_"),
+                                  "no dispatch capability in the injected input").lowerBound
+        let secret = text[start...].prefix { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" }
         return String(secret)
     }
 
@@ -1247,6 +1254,112 @@ final class WorkerVerbTests: XCTestCase {
         await MainActor.run { host.shutdown() }
     }
 
+    // MARK: - Shell readiness handshake (T82)
+
+    /// A scripted session has no shell behind it, so the test plays that part: every
+    /// readiness probe `worker-start` types gets its marker emitted back, exactly as a
+    /// real `printf` would print it. Answering is what proves the pane runs commands —
+    /// the whole point of the handshake, so nothing here can be short-circuited.
+    @MainActor
+    private static func answerShellProbes(_ session: ScriptedTerminalSession,
+                                          answered: inout Set<String>) {
+        let text = session.writtenText
+        var from = text.startIndex
+        while let hit = text.range(of: "orchard-shell-ready %s\\n' '", range: from..<text.endIndex) {
+            let nonce = String(text[hit.upperBound...].prefix { $0.isLetter || $0.isNumber })
+            if !nonce.isEmpty, answered.insert(nonce).inserted {
+                session.emitOutput("orchard-shell-ready \(nonce)\n")
+            }
+            from = hit.upperBound
+        }
+    }
+
+    /// Run `answerShellProbes` until cancelled. Every shell worker-start needs one.
+    ///
+    /// `stopAtContract` plays the pane that took the contract but never ran it to the
+    /// end — a truncated paste sitting at a `quote>` continuation. Its readiness probes
+    /// were answered; the contract's own closing marker never arrives.
+    private func shellProbeResponder(_ session: ScriptedTerminalSession,
+                                     stopAtContract: Bool = false) -> Task<Void, Never> {
+        Task { @MainActor in
+            var answered: Set<String> = []
+            while !Task.isCancelled {
+                if !(stopAtContract && session.writtenText.contains("orchard_dispatch_text=")) {
+                    Self.answerShellProbes(session, answered: &answered)
+                }
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+        }
+    }
+
+    /// Start a shell worker with a caller-supplied responder policy and a short budget.
+    private func startShellWorkerExpectingFailure(
+        taskID: String, stopAtContract: Bool
+    ) async throws -> RPCResponse {
+        let known = await MainActor.run { [terminalHarness] in Set(terminalHarness!.sessions.keys) }
+        let handler = handler!
+        let request = RPCRequest(method: "worker-start", params: .object([
+            "task": .string(taskID),
+            "agent": .string("shell"),
+            "worktree": .string("new-top-level"),
+            "repo": .string("demo"),
+            "timeout-ms": .number(1500),
+        ]))
+        let pending = Task { await handler.handle(request) }
+        try await waitUntil("shell terminal spawn") { [terminalHarness] in
+            terminalHarness!.sessions.keys.contains { !known.contains($0) }
+        }
+        let session = await MainActor.run { [terminalHarness] () -> ScriptedTerminalSession in
+            let handle = terminalHarness!.sessions.keys.first { !known.contains($0) }!
+            return terminalHarness!.sessions[handle]!
+        }
+        let responder = stopAtContract ? shellProbeResponder(session, stopAtContract: true) : nil
+        defer { responder?.cancel() }
+        return await pending.value
+    }
+
+    /// A shell that never runs anything is not "ready" — it is a pane that will swallow
+    /// the contract. The old tui-idle gate could not tell the two apart (a shell running
+    /// its startup files is exactly as quiet as one waiting at a prompt), and what got
+    /// through it was a worker that could never answer.
+    func testShellWorkerStartFailsWhenTheShellNeverRunsAnything() async throws {
+        let taskID = try await makeTask()
+        let response = try await startShellWorkerExpectingFailure(taskID: taskID,
+                                                                 stopAtContract: false)
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.error?.code, "worker_start_failed")
+        XCTAssertEqual(response.error?.data?.field("failedStage")?.stringValue, "agent_readiness")
+        XCTAssertTrue(response.error?.message.contains("readiness probe") == true,
+                      response.error?.message ?? "")
+        // T35: the failure settles with a full receipt — the pane that swallowed the
+        // probes is a named residual with the command that removes it.
+        let residuals = try XCTUnwrap(response.error?.data?.field("residualResources")?.arrayValue)
+        XCTAssertTrue(residuals.contains { $0.field("kind")?.stringValue == "terminal" }, "\(residuals)")
+        XCTAssertEqual(response.error?.data?.field("state")?.stringValue, "failed")
+    }
+
+    /// The other half: the shell answered probes, took the contract — and never reached
+    /// the end of it. That is the stranded pane T82 exists to prevent, so the stage
+    /// fails rather than reporting a `ready` worker that is holding partial input.
+    func testShellWorkerStartFailsWhenTheContractIsNotRunToCompletion() async throws {
+        let taskID = try await makeTask()
+        let response = try await startShellWorkerExpectingFailure(taskID: taskID,
+                                                                 stopAtContract: true)
+        XCTAssertFalse(response.ok)
+        XCTAssertEqual(response.error?.data?.field("failedStage")?.stringValue, "dispatch_input")
+        XCTAssertTrue(response.error?.message.contains("run the dispatch contract") == true,
+                      response.error?.message ?? "")
+        // The capability must not be left sitting in that pane's input, even on the way
+        // out: every failed offer is cleared, including the last one.
+        let handle = try XCTUnwrap(response.error?.data?.field("effects")?.arrayValue?
+            .first { $0.field("kind")?.stringValue == "terminal" }?.field("id")?.stringValue)
+        let interrupts = await MainActor.run { [terminalHarness] in terminalHarness!.interrupts }
+        XCTAssertFalse(interrupts.isEmpty)
+        XCTAssertTrue(interrupts.allSatisfy { $0 == handle }, "\(interrupts)")
+        XCTAssertEqual(try store.workerDispatch(
+            try XCTUnwrap(response.error?.data?.field("dispatchId")?.stringValue))?.state, .failed)
+    }
+
     // MARK: - T60: shell-command dispatch input + settlement of automation-fired shells
 
     /// Route PTY ends into the T11 reconciler, as RuntimeAssembly does.
@@ -1259,8 +1372,8 @@ final class WorkerVerbTests: XCTestCase {
         }
     }
 
-    /// `worker-start --agent shell` with `dispatch-input shell-command`: drive the
-    /// scripted shell to idle and wait for the command line (not a preamble) to land.
+    /// `worker-start --agent shell` with `dispatch-input shell-command`: answer the
+    /// readiness probes and wait for the command line (not a preamble) to land.
     private func startShellCommandWorker(taskID: String) async throws -> RPCResponse {
         let known = await MainActor.run { [terminalHarness] in Set(terminalHarness!.sessions.keys) }
         let handler = handler!
@@ -1279,7 +1392,8 @@ final class WorkerVerbTests: XCTestCase {
             let handle = terminalHarness!.sessions.keys.first { !known.contains($0) }!
             return terminalHarness!.sessions[handle]!
         }
-        await MainActor.run { session.emitOSC(["9999", "idle"]) }
+        let responder = shellProbeResponder(session)
+        defer { responder.cancel() }
         try await waitUntil("shell command injection") {
             session.writtenText.contains("orchard_automation_command")
         }
@@ -1401,6 +1515,90 @@ final class WorkerVerbTests: XCTestCase {
         XCTAssertEqual(release.result?.field("processAction")?.stringValue, "closed_exited_terminal")
         let exists = await terminalExists(handle)
         XCTAssertFalse(exists)
+    }
+
+    // MARK: - T82: a supervised shell worker's contract
+
+    /// `worker-start --agent shell` with no `dispatch-input` override: answer the
+    /// readiness probes and wait for the contract line (not the prose) to land.
+    private func startSupervisedShellWorker(taskID: String) async throws -> RPCResponse {
+        let known = await MainActor.run { [terminalHarness] in Set(terminalHarness!.sessions.keys) }
+        let handler = handler!
+        let request = RPCRequest(method: "worker-start", params: .object([
+            "task": .string(taskID),
+            "agent": .string("shell"),
+            "worktree": .string("new-top-level"),
+            "repo": .string("demo"),
+        ]))
+        let pending = Task { await handler.handle(request) }
+        try await waitUntil("shell terminal spawn") { [terminalHarness] in
+            terminalHarness!.sessions.keys.contains { !known.contains($0) }
+        }
+        let session = await MainActor.run { [terminalHarness] () -> ScriptedTerminalSession in
+            let handle = terminalHarness!.sessions.keys.first { !known.contains($0) }!
+            return terminalHarness!.sessions[handle]!
+        }
+        let responder = shellProbeResponder(session)
+        defer { responder.cancel() }
+        try await waitUntil("shell contract injection") {
+            session.writtenText.contains("orchard_dispatch_text=")
+        }
+        return await pending.value
+    }
+
+    /// The defect T80's verification found: the agent preamble typed into a shell opens
+    /// a quote and strands the pane, capability and all. A shell worker gets the same
+    /// contract as one submitted, newline-free line instead.
+    func testSupervisedShellWorkerGetsTheContractAsOneSubmittedLine() async throws {
+        let taskID = try await makeTask(spec: "Don't 'quote' me: audit $PATH")
+        let response = try await startSupervisedShellWorker(taskID: taskID)
+        XCTAssertTrue(response.ok, String(describing: response.error))
+        let receipt = try XCTUnwrap(response.result)
+        XCTAssertEqual(receipt.field("state")?.stringValue, "ready")
+        let input = receipt.field("effects")?.arrayValue?
+            .first { $0.field("kind")?.stringValue == "dispatch_input" }
+        XCTAssertEqual(input?.field("mode")?.stringValue, "shell-contract")
+        let dispatchID = try XCTUnwrap(receipt.field("dispatchId")?.stringValue)
+
+        let handle = try agentHandle(response)
+        let typed = try await session(handle).writtenText
+        // The contract itself still crosses — it is the same worker contract, carried as
+        // data the shell writes and prints instead of prose the shell tries to run.
+        XCTAssertTrue(typed.contains("=== TASK ==="))
+        XCTAssertTrue(typed.contains("=== ORCHARD SHELL WORKER ==="))
+        XCTAssertTrue(typed.contains("Don'\\''t '\\''quote'\\'' me: audit $PATH"),
+                      "the spec travels inside one single-quoted argument")
+        XCTAssertTrue(typed.contains("export ORCHARD_DISPATCH_CAPABILITY='dcap_"))
+        XCTAssertTrue(typed.contains("export ORCHARD_DISPATCH_ID='\(dispatchID)'"))
+        XCTAssertTrue(typed.contains("Exit the shell after completion."),
+                      "a shell pane cannot be re-adopted, so it must not be told to idle")
+        XCTAssertFalse(typed.contains("eval "), "a supervised spec is prose, never a command")
+        // Submitted, and nothing typed after it.
+        let written = try await session(handle).written
+        XCTAssertEqual(written.last, Data([0x0D]), "the contract line must be submitted")
+        // One newline-free line inside the paste frame: there is no input state in which
+        // the capability can sit at a `quote>` continuation prompt.
+        let payload = typed.replacingOccurrences(of: "\u{1B}[200~", with: "")
+            .replacingOccurrences(of: "\u{1B}[201~", with: "")
+            .replacingOccurrences(of: "\r", with: "")
+        XCTAssertFalse(payload.contains("\n"), String(payload.prefix(400)))
+
+        // And the capability it carries really settles the dispatch.
+        try await reportDone(taskID: taskID, dispatchID: dispatchID, handle: handle)
+        XCTAssertEqual(try store.workerDispatch(dispatchID)?.state, .succeeded)
+    }
+
+    /// An agent TUI is untouched: it still receives the prose prompt, and still the
+    /// prompt-returning half of the after-`worker_done` contract.
+    func testAgentWorkerStillReceivesThePreamble() async throws {
+        let taskID = try await makeTask()
+        let response = try await startReadyWorker(taskID: taskID)
+        let input = response.result?.field("effects")?.arrayValue?
+            .first { $0.field("kind")?.stringValue == "dispatch_input" }
+        XCTAssertEqual(input?.field("mode")?.stringValue, "preamble")
+        let typed = try await session(try agentHandle(response)).writtenText
+        XCTAssertFalse(typed.contains("orchard_dispatch_text="))
+        XCTAssertTrue(typed.contains("Do not exit the shell."))
     }
 
     func testShellCommandDispatchInputRequiresTheShellEngine() async throws {
