@@ -96,15 +96,20 @@ public enum SSHCommand {
             + [destination(for: host), command]
     }
 
+    /// The far side's own login shell, as a word its shell expands: `"${SHELL:-/bin/sh}"`.
+    ///
+    /// Deliberately unquoted by `shellQuote` — the expansion has to happen *there*. The
+    /// `:-` default is for a host where `SHELL` is unset (some `sshd` setups), which
+    /// would otherwise exec the empty string and kill the pane at spawn.
+    public static let loginShell = "\"${SHELL:-/bin/sh}\""
+
     /// `cd '<dir>' && exec "${SHELL:-/bin/sh}" -l` — what a pane in a remote worktree
     /// runs.
     ///
     /// `exec` rather than a nested shell so the pane's PTY child *is* the login shell:
     /// an extra wrapper layer would swallow the exit status the liveness verdict reads.
-    /// `${SHELL:-/bin/sh}` because a host where `SHELL` is unset (some `sshd` setups)
-    /// would otherwise exec the empty string and the pane would die instantly.
     public static func cdAndLoginShellCommand(directory: String) -> String {
-        "cd \(shellQuote(directory)) && exec \"${SHELL:-/bin/sh}\" -l"
+        "cd \(shellQuote(directory)) && exec \(loginShell) -l"
     }
 
     /// The remote-shell argv as one shell command line, for the launch paths that take

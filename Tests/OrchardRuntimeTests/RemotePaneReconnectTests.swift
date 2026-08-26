@@ -192,7 +192,7 @@ final class RemotePaneReconnectTests: XCTestCase {
         let argv = try XCTUnwrap(remote.launchArgv)
         XCTAssertEqual(argv.first, "/usr/bin/ssh")
         XCTAssertTrue(argv.contains("47110:127.0.0.1:9091"), argv.joined(separator: " "))
-        XCTAssertTrue(argv.last?.hasSuffix("exec claude") ?? false, argv.last ?? "")
+        XCTAssertTrue(argv.last?.hasSuffix("exec claude'") ?? false, argv.last ?? "")
         XCTAssertEqual(remote.tunnel, KeeperTunnelRecord(remotePort: 47110, localPort: 9091))
         XCTAssertEqual(pane.hookToken, token)
 

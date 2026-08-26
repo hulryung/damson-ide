@@ -217,12 +217,26 @@ extension LiveOrchestrationStore {
                     // tty back before the contract arrives.
                     try? await Task.sleep(nanoseconds: UInt64(Self.shellSettleDelay * 1_000_000_000))
                 } else {
-                    let wait = try await runtime.waitForAgentIdle(summary.handle, timeout)
+                    // The wait can fail two ways, and both used to reach the coordinator
+                    // as a sentence about *Orchard's* state ("did not become ready",
+                    // "process has exited") with the pane's own explanation left behind
+                    // in a terminal it is about to lose. T83's first remote run was a
+                    // one-line answer — `zsh:1: command not found: claude` — that cost a
+                    // full round of manual digging to read. So whichever way this stage
+                    // fails, it fails with what the pane last said.
+                    let wait: TerminalWaitResult
+                    do {
+                        wait = try await runtime.waitForAgentIdle(summary.handle, timeout)
+                    } catch {
+                        throw await Self.agentNotReady(
+                            handle: summary.handle, runtime: runtime,
+                            reason: Self.describe(error))
+                    }
                     guard wait.satisfied else {
                         let state = wait.agentState.map { " (agent state: \($0.rawValue))" } ?? ""
-                        throw RPCServiceError(
-                            code: "agent_not_ready",
-                            message: "Agent did not become ready within \(Int(timeout))s\(state).")
+                        throw await Self.agentNotReady(
+                            handle: summary.handle, runtime: runtime,
+                            reason: "Agent did not become ready within \(Int(timeout))s\(state).")
                     }
                 }
 
@@ -343,6 +357,49 @@ extension LiveOrchestrationStore {
     /// A beat after clearing a pane, so its line editor is back in charge before the
     /// next multi-kilobyte offer arrives.
     static let shellSettleDelay: TimeInterval = 0.5
+
+    /// How many of the pane's trailing lines a readiness failure quotes back. Enough to
+    /// carry a launch error and the line that followed it, short enough that the receipt
+    /// stays readable in a terminal.
+    static let readinessResidualLines = 6
+
+    /// The `agent_not_ready` refusal, carrying the pane's own last words.
+    ///
+    /// A launch that fails on the far side explains itself exactly once, in the pane,
+    /// and the pane is the thing this failure is about to close. `command not found`,
+    /// an ssh authentication refusal, a remote agent that exits on a bad config — each
+    /// is one line the coordinator otherwise has to go and find (T83), or cannot find at
+    /// all once the residual terminal is cleaned up. Reading it is best-effort: a pane
+    /// that cannot be read still produces the refusal, just without the quote.
+    static func agentNotReady(handle: String, runtime: WorkerRuntimeContext,
+                              reason: String) async -> RPCServiceError {
+        let residual = await paneResidual(handle: handle, runtime: runtime)
+        var data: [String: JSONValue] = [
+            "terminalHandle": .string(handle),
+            "reason": .string(reason),
+        ]
+        var message = reason
+        if !residual.isEmpty {
+            data["paneOutput"] = .array(residual.map(JSONValue.string))
+            // The reasons come from several layers and not all of them end a sentence;
+            // one is added so the quote does not run into the verdict.
+            let stop = reason.hasSuffix(".") || reason.hasSuffix("!") ? "" : "."
+            message += "\(stop) The pane's last output was: "
+                + residual.joined(separator: " / ")
+        }
+        return RPCServiceError(code: "agent_not_ready", message: message, data: .object(data))
+    }
+
+    /// The pane's last non-blank lines, newest last. Empty when nothing can be read.
+    static func paneResidual(handle: String, runtime: WorkerRuntimeContext) async -> [String] {
+        guard let read = try? await runtime.readTerminal(handle, nil, shellProbeReadLimit) else {
+            return []
+        }
+        let lines = read.lines
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return Array(lines.suffix(readinessResidualLines))
+    }
 
     /// Wait for `marker` to appear in the pane's own output.
     ///
@@ -538,6 +595,12 @@ extension LiveOrchestrationStore {
             "rollback": .array(rollback),
             "residualResources": .array(residuals),
         ]
+        // `lastError` already reads the pane's last words (they are part of the stage's
+        // message), but a coordinator that parses receipts should not have to parse
+        // prose to get them. Carried as a field when the failing stage collected one.
+        if let structured = (error as? RPCServiceError)?.rpcError.data?.field("paneOutput") {
+            receipt["paneOutput"] = structured
+        }
         if worker?.state == .startUnknown {
             receipt["nextCommands"] = .array([
                 .string("\(runtime.cliCommand) worker-show --dispatch \(dispatchID) --json"),

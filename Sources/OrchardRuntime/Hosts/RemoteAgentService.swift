@@ -34,10 +34,14 @@ public struct RemoteAgentPlan: Sendable {
 /// an agent Orchard can see less of beats no agent at all. What is *not* allowed is
 /// pretending: a pane with no hook channel never reports itself as hook-attested.
 ///
-/// What this deliberately does not do is make the remote agent a supervised worker. The
-/// far side has no `orchard` CLI, so it cannot send `worker_done`, heartbeat, or answer
-/// a question — the lifecycle duties a dispatch requires. Remote agent panes are
-/// handoff-style, with live status only, and `worker-start` refuses them typed.
+/// Whether the resulting pane can also be a *supervised worker* is a separate question,
+/// and no longer this type's to assume. It was, once: the far side had no `orchard` CLI
+/// and no Orchard identity, so a remote agent could not send `worker_done`, heartbeat or
+/// answer a question, and `worker-start` refused every remote placement typed. T78 gave
+/// the pane its identity, T80 replaced the assumption with a precondition the host
+/// itself answers, and T83 drove a real `claude-code` worker to settlement across this
+/// launch path. So a pane built here may be handoff-style *or* supervised; what decides
+/// is `RemoteDispatchProbe`, not this file.
 public struct RemoteAgentService: Sendable {
     public let runner: SSHRunner
     /// Candidate remote ports for the tunnel; overridable so tests can pin the walk.
