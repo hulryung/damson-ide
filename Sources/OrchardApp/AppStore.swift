@@ -97,6 +97,7 @@ final class AppStore: ObservableObject {
     var showOrchestration: (() -> Void)?
     var showAutomations: (() -> Void)?
     var showVault: (() -> Void)?
+    var showSpace: (() -> Void)?
     var showSettings: (() -> Void)?
     var showFloatingTerminal: (() -> Void)?
     var hideFloatingTerminal: (() -> Void)?
@@ -722,6 +723,8 @@ final class AppStore: ObservableObject {
             showAutomations?()
         case .openVault:
             showVault?()
+        case .openSpace:
+            showSpace?()
         case .showTerminal:
             focusMainWindow?()
             selectKind(.terminal)

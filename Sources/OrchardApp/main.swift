@@ -31,6 +31,7 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private var orchestrationWindow: NSWindow?
     private var automationsWindow: NSWindow?
     private var vaultWindow: NSWindow?
+    private var spaceWindow: NSWindow?
     private var floatingWindow: NSWindow?
     /// T51: disabled app-menu row; title is refreshed from `runtimePresence`.
     private var appRuntimeMenuItem: NSMenuItem?
@@ -61,6 +62,9 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             }
             store.showVault = { [weak self] in
                 MainActor.assumeIsolated { self?.showVault(nil) }
+            }
+            store.showSpace = { [weak self] in
+                MainActor.assumeIsolated { self?.showSpace(nil) }
             }
             store.showSettings = { [weak self] in
                 MainActor.assumeIsolated { self?.showSettings(nil) }
@@ -211,6 +215,17 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             role: .vault,
             rootView: VaultView()
+                .environmentObject(store)
+                .preferredColorScheme(.dark))
+    }
+
+    @MainActor @objc func showSpace(_ sender: Any?) {
+        presentAuxiliaryWindow(
+            existing: &spaceWindow,
+            title: "Space",
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            role: .space,
+            rootView: SpaceView()
                 .environmentObject(store)
                 .preferredColorScheme(.dark))
     }
@@ -455,6 +470,9 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         let vault = NSMenuItem(title: "Vault", action: #selector(showVault(_:)), keyEquivalent: "")
         vault.target = self
         goMenu.addItem(vault)
+        let space = NSMenuItem(title: "Space", action: #selector(showSpace(_:)), keyEquivalent: "")
+        space.target = self
+        goMenu.addItem(space)
         goMenu.addItem(.separator())
         for (index, item) in [
             ("Terminal", #selector(showTerminalTab(_:))),

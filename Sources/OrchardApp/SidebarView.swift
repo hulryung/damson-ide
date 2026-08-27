@@ -233,6 +233,13 @@ struct SidebarView: View {
             .controlSize(.small)
             .help("Scheduled automations")
 
+            Button { store.showSpace?() } label: {
+                Image(systemName: "internaldrive")
+            }
+            .buttonStyle(.borderless)
+            .controlSize(.small)
+            .help("Workspace disk usage")
+
             Menu {
                 Picker("Theme", selection: Binding(
                     get: { store.settings.themeName },

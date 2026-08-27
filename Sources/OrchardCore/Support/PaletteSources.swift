@@ -92,6 +92,7 @@ public enum PaletteCommand: String, CaseIterable, Sendable, Identifiable {
     case openOrchestration
     case openAutomations
     case openVault
+    case openSpace
     case showTerminal
     case showDiff
     case showEditor
@@ -107,7 +108,7 @@ public enum PaletteCommand: String, CaseIterable, Sendable, Identifiable {
     /// Go-menu items the palette must execute. Order matches `buildMenu()` in
     /// `OrchardAppDelegate` (Jump itself is the palette, so it is omitted).
     public static let goMenuSurface: [PaletteCommand] = [
-        .openDashboard, .openOrchestration, .openAutomations, .openVault,
+        .openDashboard, .openOrchestration, .openAutomations, .openVault, .openSpace,
         .showTerminal, .showDiff, .showEditor, .showBrowser, .refreshDiff,
     ]
 
@@ -119,6 +120,7 @@ public enum PaletteCommand: String, CaseIterable, Sendable, Identifiable {
         case .openOrchestration: return "Orchestration"
         case .openAutomations: return "Automations"
         case .openVault: return "Vault"
+        case .openSpace: return "Space"
         case .showTerminal: return "Terminal"
         case .showDiff: return "Diff"
         case .showEditor: return "Editor"
@@ -138,6 +140,7 @@ public enum PaletteCommand: String, CaseIterable, Sendable, Identifiable {
         case .openOrchestration: return "list.bullet.indent"
         case .openAutomations: return "clock.arrow.2.circlepath"
         case .openVault: return "archivebox"
+        case .openSpace: return "internaldrive"
         case .showTerminal: return "terminal"
         case .showDiff: return "plusminus"
         case .showEditor: return "doc.text"
@@ -161,7 +164,7 @@ public enum PaletteCommand: String, CaseIterable, Sendable, Identifiable {
         case .newWorktree: return "⌘N"
         case .toggleChat: return "⇧⌘J"
         case .settings: return "⌘,"
-        case .openOrchestration, .openAutomations, .openVault: return nil
+        case .openOrchestration, .openAutomations, .openVault, .openSpace: return nil
         }
     }
 
@@ -171,6 +174,7 @@ public enum PaletteCommand: String, CaseIterable, Sendable, Identifiable {
         case .openOrchestration: return ["orchestration", "tasks", "run", "dispatch", "go"]
         case .openAutomations: return ["automations", "schedule", "cron", "scheduled", "go"]
         case .openVault: return ["vault", "archives", "transcripts", "go"]
+        case .openSpace: return ["space", "disk", "storage", "reclaim", "usage", "worktree size", "go"]
         case .showTerminal: return ["terminal", "shell", "pty", "go 1"]
         case .showDiff: return ["diff", "changes", "git diff", "go 2"]
         case .showEditor: return ["editor", "edit file", "go 3"]
