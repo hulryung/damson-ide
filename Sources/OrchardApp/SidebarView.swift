@@ -22,7 +22,15 @@ struct SidebarView: View {
         // Keep the pinned New/toggle row above the window status bar (the
         // safe-area inset stops at the AppKit column boundary).
         .padding(.bottom, Tokens.statusBarHeight)
-        .background(Tokens.sidebar)
+        // A panel with edges rather than a translucent macOS sidebar that dissolves
+        // into the titlebar: opaque fill, square corners, and a hard rule on the side
+        // that meets the workbench, so the two columns read as two panes.
+        .background(Tokens.sidebarPanel)
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(Tokens.border)
+                .frame(width: 1)
+        }
     }
 
     private var navHeader: some View {

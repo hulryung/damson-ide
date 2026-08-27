@@ -12,6 +12,9 @@ enum Tokens {
     static let background = Color(nsColor: .windowBackgroundColor)
     static let surface = Color(nsColor: .controlBackgroundColor)
     static let sidebar = Color(nsColor: .underPageBackgroundColor)
+    /// The workspace column reads as its own pane, so it gets an opaque fill instead
+    /// of the translucent sidebar material AppKit hands a NavigationSplitView column.
+    static let sidebarPanel = Color(nsColor: .controlBackgroundColor)
     static let border = Color(nsColor: .separatorColor)
     static let rowHover = Color(nsColor: .quaternaryLabelColor).opacity(0.5)
     static let rowSelected = Color.accentColor.opacity(0.18)

@@ -144,13 +144,15 @@ indirect enum SplitNode: Identifiable, Hashable {
         }
     }
 
+    /// A new workspace opens with a terminal and nothing else. The diff used to be
+    /// created alongside it, which meant every workspace carried a tab the user had
+    /// not asked for; Go ▸ Diff (⌘2) and the tab strip's + both still open one.
+    /// `includeLocalOnlyTabs` stays in the signature because callers use it to say
+    /// whether local-only tab kinds may be created here at all (a remote workspace
+    /// cannot host a local diff).
     static func makeDefault(executionHostId: String? = nil,
                             includeLocalOnlyTabs: Bool = true) -> SplitNode {
         let term = WorkbenchTab(kind: .terminal, executionHostId: executionHostId)
-        if includeLocalOnlyTabs {
-            let diff = WorkbenchTab(kind: .diff)
-            return .group(TabGroup(tabs: [term, diff], selectedID: term.id))
-        }
         return .group(TabGroup(tabs: [term], selectedID: term.id))
     }
 
