@@ -338,6 +338,7 @@ private final class FileExplorerModel: ObservableObject {
 
     private var root: URL?
     private var files = FileService()
+    private var searchToken = UUID()
     private var watcher: FileWatcher?
     private var watchTask: Task<Void, Never>?
 
@@ -350,14 +351,14 @@ private final class FileExplorerModel: ObservableObject {
         self.root = root
         self.files = files
         reload()
-        let mark = AppStore.traceBegin()
-        startWatching()
-        AppStore.traceEnd("explorer.watch", mark)
+        AppStore.trace("explorer.watch") { startWatching() }
     }
 
     func reload() {
-        let mark = AppStore.traceBegin()
-        defer { AppStore.traceEnd("explorer.reload", mark) }
+        AppStore.trace("explorer.reload") { reloadBody() }
+    }
+
+    private func reloadBody() {
         children = [:]
         expanded = []
         error = nil
@@ -375,18 +376,41 @@ private final class FileExplorerModel: ObservableObject {
         }
     }
 
+    /// Run the tree search off the main actor.
+    ///
+    /// `FileService.search` walks the workspace until it has enough matches, and this is
+    /// driven by `onChange(of: filter)` — one walk per keystroke. On the main thread, on a
+    /// checkout of a few thousand files, that is the same class of stutter as a git call
+    /// in a view body. The token drops the answer to a query the user has already typed
+    /// past, so results cannot arrive out of order.
     func applyFilter() {
         let needle = filter.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let root, !needle.isEmpty else {
+            searchToken = UUID()
             hits = []
             return
         }
-        do {
-            let result = try files.search(root: root, query: needle, showDotfiles: showDotfiles, limit: 64)
-            hits = result.files
-            error = nil
-        } catch {
-            self.error = String(describing: error)
+        let token = UUID()
+        searchToken = token
+        let files = self.files
+        let showDotfiles = self.showDotfiles
+        Task { [weak self] in
+            let result = await Task.detached(priority: .userInitiated) { () -> Result<[FileSearchHit], Error> in
+                do {
+                    return .success(try files.search(root: root, query: needle,
+                                                     showDotfiles: showDotfiles, limit: 64).files)
+                } catch {
+                    return .failure(error)
+                }
+            }.value
+            guard let self, self.searchToken == token else { return }
+            switch result {
+            case .success(let found):
+                self.hits = found
+                self.error = nil
+            case .failure(let error):
+                self.error = String(describing: error)
+            }
         }
     }
 

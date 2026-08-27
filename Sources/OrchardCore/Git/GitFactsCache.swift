@@ -57,9 +57,40 @@ public final class GitFactsCache: @unchecked Sendable {
     private var generations: [String: UInt64] = [:]
     private var watchers: [String: GitTreeWatcher] = [:]
     private var inFlight: [String: Task<GitWorktreeFacts, Never>] = [:]
+    /// The urgency a key's in-flight reading is queued at, and its scheduler ticket once
+    /// it has one. A reading started for the sidebar's background fan-out and then asked
+    /// for by a selection has to change queues, or the workspace the user just picked
+    /// waits behind the fan-out it happened to be part of.
+    private var inFlightUrgency: [String: Urgency] = [:]
+    private var inFlightTicket: [String: ReadScheduler.Ticket] = [:]
     private var observers: [UUID: @Sendable (URL) -> Void] = [:]
     private var stats = Stats()
     private let service: GitService
+
+    /// Counts the readings one call waited on, so a trace can attribute git to the phase
+    /// that caused it.
+    ///
+    /// A process-wide counter cannot: at launch every worktree in every repo asks at once,
+    /// and those readings land inside whatever phase window happens to be open — which is
+    /// how a `refreshConflicts` running a single reading reported four. This is bound as a
+    /// task local around a phase, and only that phase's own calls reach it.
+    public final class ReadTally: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = 0
+        public init() {}
+        public var count: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+        func bump() {
+            lock.lock()
+            value += 1
+            lock.unlock()
+        }
+    }
+
+    @TaskLocal public static var tally: ReadTally?
 
     /// Whether a reading is the one the user is waiting for.
     ///
@@ -108,6 +139,10 @@ public final class GitFactsCache: @unchecked Sendable {
     public func facts(worktree: URL, baseRef: String,
                       urgency: Urgency = .background) async -> GitWorktreeFacts {
         if let hit = cached(worktree: worktree, baseRef: baseRef) { return hit }
+        // Counted on a miss, whether this call starts the reading or joins one already
+        // running: either way it is waiting on git, which is what the phase's duration is
+        // made of and what "zero git on the critical path" is a claim about.
+        Self.tally?.bump()
         return await reading(worktree: worktree, baseRef: baseRef, urgency: urgency).value
     }
 
@@ -121,13 +156,18 @@ public final class GitFactsCache: @unchecked Sendable {
         defer { lock.unlock() }
         if let running = inFlight[key] {
             stats.coalesced += 1
+            if urgency == .foreground, inFlightUrgency[key] != .foreground {
+                inFlightUrgency[key] = .foreground
+                if let ticket = inFlightTicket[key] { scheduler.promote(ticket) }
+            }
             return running
         }
+        inFlightUrgency[key] = urgency
         let generation = generations[key] ?? 0
         stats.computes += 1
         let task = Task<GitWorktreeFacts, Never> { [weak self] in
             guard let self else { return .unknown }
-            let fresh = await self.read(worktree: worktree, baseRef: baseRef, urgency: urgency)
+            let fresh = await self.read(key: key, worktree: worktree, baseRef: baseRef)
             self.store(fresh, key: key, worktree: worktree, baseRef: baseRef,
                        startedAt: generation)
             return fresh
@@ -136,13 +176,22 @@ public final class GitFactsCache: @unchecked Sendable {
         return task
     }
 
-    private func read(worktree: URL, baseRef: String,
-                      urgency: Urgency) async -> GitWorktreeFacts {
+    private func read(key: String, worktree: URL, baseRef: String) async -> GitWorktreeFacts {
         let service = self.service
         return await withCheckedContinuation { continuation in
-            scheduler.submit(urgency) {
+            // Read under the lock: a selection may have promoted this key between the task
+            // being created and the work being queued.
+            lock.lock()
+            let urgency = inFlightUrgency[key] ?? .background
+            lock.unlock()
+            let ticket = scheduler.submit(urgency) {
                 continuation.resume(returning: service.facts(worktree: worktree, baseRef: baseRef))
             }
+            lock.lock()
+            let promoted = inFlightUrgency[key] == .foreground && urgency == .background
+            inFlightTicket[key] = ticket
+            lock.unlock()
+            if promoted { scheduler.promote(ticket) }
         }
     }
 
@@ -153,6 +202,8 @@ public final class GitFactsCache: @unchecked Sendable {
         let watched = ensureWatcher(key: key, worktree: worktree)
         lock.lock()
         inFlight[key] = nil
+        inFlightUrgency[key] = nil
+        inFlightTicket[key] = nil
         let current = generations[key] ?? 0
         if watched, current == generation {
             entries[key] = Entry(facts: facts, baseRef: baseRef, generation: current)
@@ -298,9 +349,18 @@ public final class GitFactsCache: @unchecked Sendable {
 /// Work already in flight is never preempted — a git process is not interruptible — so the
 /// wait is bounded by one reading, not by the backlog.
 final class ReadScheduler: @unchecked Sendable {
+    /// One queued reading. Identity matters: a reading queued in the background can be
+    /// promoted once someone starts waiting for it, and promoting the wrong one would
+    /// reorder somebody else's work.
+    final class Ticket: @unchecked Sendable {
+        let work: @Sendable () -> Void
+        var started = false
+        init(work: @escaping @Sendable () -> Void) { self.work = work }
+    }
+
     private let lock = NSLock()
-    private var foreground: [@Sendable () -> Void] = []
-    private var background: [@Sendable () -> Void] = []
+    private var foreground: [Ticket] = []
+    private var background: [Ticket] = []
     private var running = 0
     private let limit: Int
     private let queue = DispatchQueue(label: "orchard.git-facts", attributes: .concurrent)
@@ -309,13 +369,31 @@ final class ReadScheduler: @unchecked Sendable {
         self.limit = limit
     }
 
-    func submit(_ urgency: GitFactsCache.Urgency, _ work: @escaping @Sendable () -> Void) {
+    @discardableResult
+    func submit(_ urgency: GitFactsCache.Urgency,
+                _ work: @escaping @Sendable () -> Void) -> Ticket {
+        let ticket = Ticket(work: work)
         lock.lock()
         if urgency == .foreground {
-            foreground.append(work)
+            foreground.append(ticket)
         } else {
-            background.append(work)
+            background.append(ticket)
         }
+        lock.unlock()
+        pump()
+        return ticket
+    }
+
+    /// Move a queued reading to the front queue. A no-op once it has started — a git
+    /// process is not interruptible, and pretending otherwise would just double-run it.
+    func promote(_ ticket: Ticket) {
+        lock.lock()
+        guard !ticket.started, let index = background.firstIndex(where: { $0 === ticket }) else {
+            lock.unlock()
+            return
+        }
+        background.remove(at: index)
+        foreground.append(ticket)
         lock.unlock()
         pump()
     }
@@ -327,7 +405,7 @@ final class ReadScheduler: @unchecked Sendable {
                 lock.unlock()
                 return
             }
-            let next: (@Sendable () -> Void)?
+            let next: Ticket?
             if !foreground.isEmpty {
                 next = foreground.removeFirst()
             } else if !background.isEmpty {
@@ -335,11 +413,14 @@ final class ReadScheduler: @unchecked Sendable {
             } else {
                 next = nil
             }
-            if next != nil { running += 1 }
+            if let next {
+                next.started = true
+                running += 1
+            }
             lock.unlock()
             guard let next else { return }
             queue.async { [weak self] in
-                next()
+                next.work()
                 self?.finish()
             }
         }

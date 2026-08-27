@@ -145,55 +145,48 @@ final class AppStore: ObservableObject {
     /// when ORCHARD_TRACE_SWITCH=1 so a normal run prints nothing.
     static let traceSwitch = ProcessInfo.processInfo.environment["ORCHARD_TRACE_SWITCH"] == "1"
 
-    /// A phase's start: wall-clock, the readings this phase caused, and the process-wide
-    /// `git` spawn count.
+    /// One traced phase: wall-clock, the readings **this phase itself** waited on, and the
+    /// process-wide `git` spawn count.
     ///
     /// T87's acceptance is a spawn count, not only a duration — "no phase over 50 ms" is
     /// satisfiable by a slow machine doing the wrong work, and "zero git on the critical
     /// path" is the claim that actually has to hold.
     ///
-    /// Two counters, because they answer different questions and only one of them is
-    /// attributable. `git=` is process-wide: anything else running in the app — the
-    /// startup fan-out over every worktree, another workspace's background refresh —
-    /// lands inside whatever phase window happens to be open, which is why a launch-path
-    /// `refreshConflicts` can read 33 spawns while doing none of its own. `reads=` is the
-    /// number of *fresh readings this phase caused*, counted by the cache that owns them:
-    /// a phase that served everything from cache reads 0, and each reading is exactly
-    /// three git processes. `reads=0` is the acceptance claim; `git=` is context.
-    struct TraceMark {
-        let nanos: UInt64
-        let spawns: Int
-        let reads: Int
-    }
-
-    static func traceBegin() -> TraceMark {
-        TraceMark(nanos: DispatchTime.now().uptimeNanoseconds,
-                  spawns: traceSwitch ? GitRunner.Trace.snapshot().spawns : 0,
-                  reads: traceSwitch ? GitFactsCache.shared.snapshotStats().computes : 0)
-    }
-
-    static func traceEnd(_ label: String, _ mark: TraceMark) {
-        guard traceSwitch else { return }
-        let ms = Double(DispatchTime.now().uptimeNanoseconds - mark.nanos) / 1_000_000
-        let spawns = GitRunner.Trace.snapshot().spawns - mark.spawns
-        let reads = GitFactsCache.shared.snapshotStats().computes - mark.reads
-        NSLog("ORCHARD_TRACE %@ %.1f ms, reads=%d, git=%d (process-wide)",
-              label, ms, reads, spawns)
-    }
-
+    /// Two counters, because only one of them is attributable. `git=` is process-wide:
+    /// anything else running in the app — the startup fan-out over every worktree, another
+    /// workspace's background refresh — lands inside whatever phase window happens to be
+    /// open, which is why a launch-path `refreshConflicts` reads dozens of spawns while
+    /// running one reading of its own. `reads=` is bound as a task local *around the phase
+    /// body*, so it counts only the readings that phase's own calls asked for; each one is
+    /// exactly three git processes. `reads=0` is the acceptance claim, `git=` is context.
+    ///
+    /// The task local is why these are closures rather than a begin/end pair: a value has
+    /// to be bound around the work, not merely sampled either side of it.
     static func trace<T>(_ label: String, _ body: () -> T) -> T {
         guard traceSwitch else { return body() }
-        let mark = traceBegin()
-        let value = body()
-        traceEnd(label, mark)
+        let tally = GitFactsCache.ReadTally()
+        let start = DispatchTime.now().uptimeNanoseconds
+        let spawns = GitRunner.Trace.snapshot().spawns
+        let value = GitFactsCache.$tally.withValue(tally) { body() }
+        emit(label, since: start, spawns: spawns, tally: tally)
         return value
     }
+
     static func traceAsync<T>(_ label: String, _ body: () async -> T) async -> T {
         guard traceSwitch else { return await body() }
-        let mark = traceBegin()
-        let value = await body()
-        traceEnd(label, mark)
+        let tally = GitFactsCache.ReadTally()
+        let start = DispatchTime.now().uptimeNanoseconds
+        let spawns = GitRunner.Trace.snapshot().spawns
+        let value = await GitFactsCache.$tally.withValue(tally) { await body() }
+        emit(label, since: start, spawns: spawns, tally: tally)
         return value
+    }
+
+    private static func emit(_ label: String, since start: UInt64, spawns: Int,
+                             tally: GitFactsCache.ReadTally) {
+        let ms = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+        NSLog("ORCHARD_TRACE %@ %.1f ms, reads=%d, git=%d (process-wide)",
+              label, ms, tally.count, GitRunner.Trace.snapshot().spawns - spawns)
     }
 
     private var cancellables = Set<AnyCancellable>()
@@ -333,8 +326,10 @@ final class AppStore: ObservableObject {
     // MARK: - Selection
 
     func select(_ record: WorktreeRecord, in project: ProjectSession) {
-        let mark = Self.traceBegin()
-        defer { Self.traceEnd("select(sync)", mark) }
+        Self.trace("select(sync)") { selectBody(record, in: project) }
+    }
+
+    private func selectBody(_ record: WorktreeRecord, in project: ProjectSession) {
         selectedProjectID = project.id
         selection = .worktree(record.id)
         applyUnread(.focusedWorkspace(record.id))
@@ -355,8 +350,10 @@ final class AppStore: ObservableObject {
     }
 
     func selectProjectRoot(_ project: ProjectSession) {
-        let mark = Self.traceBegin()
-        defer { Self.traceEnd("selectProjectRoot(sync)", mark) }
+        Self.trace("selectProjectRoot(sync)") { selectProjectRootBody(project) }
+    }
+
+    private func selectProjectRootBody(_ project: ProjectSession) {
         selectedProjectID = project.id
         selection = .projectRoot(project.id)
         ensureLayout(for: .projectRoot(project.id))
@@ -1458,8 +1455,10 @@ final class AppStore: ObservableObject {
     /// Git runs off the main actor — a conflicted repo is exactly when the user is
     /// clicking around, and a stuttering tab strip is the last thing that helps.
     func refreshConflicts(for key: WorkbenchKey) async {
-        let mark = Self.traceBegin()
-        defer { Self.traceEnd("refreshConflicts", mark) }
+        await Self.traceAsync("refreshConflicts") { await refreshConflictsBody(for: key) }
+    }
+
+    private func refreshConflictsBody(for key: WorkbenchKey) async {
         guard !isRemote(key), let root = workspaceRoot(for: key) else {
             conflictSummaries[key] = GitConflictSummary.none
             return
