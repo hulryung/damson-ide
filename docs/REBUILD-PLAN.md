@@ -1359,7 +1359,38 @@ Sources/OrchardApp/AppStore.swift pane materialization, matching tests,
 docs/reports/t86-switch-latency.md. Does not touch Files/**, Conflicts/**,
 Automations/**, or the remote transports.
 
-### Wave 25 (T87) — switching is still not instant
+### Wave 25 (T87) — MERGED 2026-08-27: a revisit costs no git at all
+
+| | before | after |
+|---|---|---|
+| `git` processes per workspace, first visit | 5 | **3** |
+| `git` processes per workspace, **revisit** | 5 | **0** (0.004 ms) |
+| explorer watcher, per switch, on the main actor | **229 ms** (3754-entry walk) | **0.45 ms** |
+| `git` in a view body, per sidebar re-render | 1 per project | **0** |
+
+Status and conflicts are one reading now (they were five processes across two callers
+that did not know about each other), cached per worktree and served only while a
+watcher is alive over everything that could make the reading untrue — no watcher, no
+cache, because a value nobody is watching can quietly become a lie.
+
+Two findings came out of refusing a number rather than accepting it. The `reads=4` the
+worker first reported as attributable was still process-wide sampling; it is a task
+local bound *around* the phase now, which is also why the trace helpers became closures
+— a value has to be bound around the work, not sampled either side of it. Chasing that
+exposed the real one: the workspace the user just picked joined the launch fan-out's
+*queue position* along with its reading, so being coalesced made it wait. A foreground
+request now promotes the queued ticket out of the background queue (a no-op once the
+git process has started, since that is not interruptible).
+
+Five synchronous-git-in-a-view-body sites are gone: `rootSubtitle` (the branch was
+already in the status reading — there was never anything to ask git for),
+ProjectCheckoutDiffPane, ComposerView.branches (`git for-each-ref` per keystroke),
+DeleteWorktreeSheet.preflight (a whole 3-process reading per render of the sheet), and
+FileExplorerModel.applyFilter (a tree walk per keystroke). The biggest single number was
+in nobody's trace at all: `FileWatcher.start` took its baseline snapshot synchronously.
+
+Still PENDING: the switch-path rows measured through the GUI. The report names the exact
+invocation and the six clicks; the instrumentation ships behind `ORCHARD_TRACE_SWITCH=1`.
 
 The user, after T86: "still a bit slow — cc-rate-widget to CAN-debugger-hw". The
 coordinator instrumented the live app (`ORCHARD_TRACE_SWITCH=1`, committed) and
