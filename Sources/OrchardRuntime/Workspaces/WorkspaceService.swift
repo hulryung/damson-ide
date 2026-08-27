@@ -23,6 +23,12 @@ public final class WorkspaceService {
     public var hostCommandRunner: HostCommandRunner = ProcessHostCommandRunner()
     /// Ceiling on one remote git command (see `SSHRunner.defaultTimeout`).
     public var remoteCommandTimeout: TimeInterval = SSHRunner.defaultTimeout
+    /// T89: the runtime's durable per-host connections. When set, remote git reads
+    /// share one multiplexed `ssh` instead of paying a connect, a key exchange and an
+    /// authentication each — a `worktree list` on a remote repo is several commands.
+    /// nil keeps the historical behaviour (one `ssh` per call), which is what the
+    /// scripted-runner tests pin.
+    public var remoteConnections: RemoteConnectionPool?
 
     private var gitServices: [String: WorktreeService] = [:]
     private var repoChangeContinuations: [UUID: AsyncStream<[RepoRecord]>.Continuation] = [:]

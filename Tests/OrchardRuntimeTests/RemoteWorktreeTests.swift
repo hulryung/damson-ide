@@ -38,7 +38,17 @@ final class ScriptedSSHRunner: HostCommandRunner, @unchecked Sendable {
     }
 
     func run(_ argv: [String], timeout: TimeInterval) async -> HostCommandResult {
-        answer(argv)
+        let result = answer(argv)
+        // A real `ssh -M` leaves its control socket on disk, and the absence of that
+        // file is exactly how `RemoteConnection` detects a dead master (T89 — verified
+        // against a real sshd: a missing socket produces no warning at all). A fake that
+        // skipped it would make every generation look lost the moment it was opened.
+        if result.exitCode == 0, argv.contains("ControlMaster=yes"),
+           let option = argv.first(where: { $0.hasPrefix("ControlPath=") }) {
+            FileManager.default.createFile(
+                atPath: String(option.dropFirst("ControlPath=".count)), contents: Data())
+        }
+        return result
     }
 
     /// The locked half, kept out of the async function so the lock is never held across

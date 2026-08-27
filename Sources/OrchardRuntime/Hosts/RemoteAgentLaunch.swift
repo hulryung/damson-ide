@@ -34,7 +34,13 @@ public enum RemoteAgentLaunch {
     /// - `exec` twice, so the PTY's remote child *is* the agent: neither the login shell
     ///   nor an extra wrapper layer survives to swallow the exit status that
     ///   `HostLiveness.verdictForPTYEnd` reads.
-    public static func remoteCommand(directory: String, launch: RemoteEngineLaunch) -> String {
+    /// - `identityToken`, when present, writes the pane's far-side identity record
+    ///   *before* the `cd`, in the shell whose pid the two `exec`s will preserve — so
+    ///   what gets recorded is the pid the agent itself will run under, which is the
+    ///   only pid worth asking the host about.
+    public static func remoteCommand(directory: String, launch: RemoteEngineLaunch,
+                                     identityToken: String? = nil,
+                                     generation: String? = nil) -> String {
         var inner = ""
         if !launch.strippedEnvironment.isEmpty {
             // `unset` of a variable that is not set succeeds, so this never breaks the
@@ -44,7 +50,8 @@ public enum RemoteAgentLaunch {
         }
         inner += "exec " + ([launch.command] + launch.arguments)
             .map(SSHCommand.shellQuote).joined(separator: " ")
-        return "cd \(SSHCommand.shellQuote(directory)) && "
+        return SSHCommand.prelude(identityToken, generation)
+            + "cd \(SSHCommand.shellQuote(directory)) && "
             + "exec \(SSHCommand.loginShell) -lc \(SSHCommand.shellQuote(inner))"
     }
 

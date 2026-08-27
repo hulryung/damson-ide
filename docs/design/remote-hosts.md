@@ -1,13 +1,14 @@
 # Remote hosts (SSH execution boundary)
 
-Status: **stages 1–4 shipped** — T29 (wave 7): host registry, bounded connectivity probe,
+Status: **stages 1–5 shipped** — T29 (wave 7): host registry, bounded connectivity probe,
 remote shell panes. T32 (wave 8): remote repo registration, remote worktree
 list/create/rm over a bounded ssh runner, remote worktrees in the workspace registry,
 panes that open a login shell inside one. T39 (wave 10): remote agent panes with their
 hook channel carried over an SSH reverse tunnel, and supervised dispatch refused typed
 at the host boundary. T43 (wave 11): remote panes restored across an app restart with
 their host, directory, invocation and hook channel — and a reconnect affordance when the
-connection did not survive.
+connection did not survive. T89 (wave 26): a durable multiplexed connection with a
+**generation counter**, a producer for `live`, and remote provider transcripts.
 
 This document is the contract for every later remote feature. It exists before the
 features do because the expensive mistakes here are *semantic*, not mechanical: what a
@@ -53,11 +54,15 @@ Corollary (inventory §1.8): when liveness or authority cannot be proven, **degr
 read-only inspection — never fall back to local execution.**
 
 Implementation: `HostLivenessVerdict` / `HostLiveness` in
-`Sources/OrchardRuntime/Hosts/HostLiveness.swift`. Stage 1 produces `unverifiable` and
-`exited`; `live` still has no producer — stage 3 (T39) deliberately did not add one,
-because a remote agent pane's PTY is local and its agent state comes from hooks and
-fingerprints, neither of which is *the owning host confirming the process is running*.
-The word stays defined so no stage invents a fourth one.
+`Sources/OrchardRuntime/Hosts/HostLiveness.swift`. Stages 1–4 produced only
+`unverifiable` and `exited`; `live` was defined with no producer, deliberately, because
+a remote agent pane's PTY is local and its agent state comes from hooks and fingerprints,
+neither of which is *the owning host confirming the process is running*.
+
+**T89 gave it one** (§3.2). The pane records, on the far side, the pid its command is
+about to become and when that pid started; asking the host about that record is the only
+thing Orchard has ever had that satisfies the definition. The word did not change and no
+fourth one was invented — what changed is that something is finally entitled to say it.
 
 ### Applying rule 2 to a PTY that ends
 
@@ -166,6 +171,157 @@ at least one remote repo or remote pane exists. Reachability is published in mem
 workspace, worktree, terminal, or worker, and copy never implies remote work
 stopped. `orchard host list` shows the live status and its age; sidebar host chips
 and Open Remote render the same snapshot.
+
+## 3.1 The durable connection, and its generation counter (T89)
+
+Before this, every remote command was its own `ssh`: a TCP connect, a key exchange and
+an authentication, for a `git rev-parse`. A remote `worktree list` is several such
+commands. `RemoteConnection` (one per host, pooled in `RemoteConnectionPool`) holds an
+OpenSSH `ControlMaster` those commands share.
+
+```
+ssh -o BatchMode=yes -o ConnectTimeout=5 \
+    -o ControlMaster=yes -o ControlPath=<run>/mux/<hash>-<sequence> \
+    -o ControlPersist=120 -N -f <dest>          # the master
+ssh -o ControlMaster=no -o ControlPath=<same>  … <dest> <command>   # every command
+```
+
+Measured against `orchard-loopback`: 11 ms per multiplexed command against 46 ms for a
+direct one on **loopback**, where the handshake is as cheap as it will ever get. Three
+`worktree list` calls cost **zero** new SSH connections with the master up, and three
+with it down (one per call — the pre-T89 shape, and the fallback below).
+
+### The counter is the point, not the speed
+
+A shared transport is the first thing Orchard has ever had that could be *the same
+connection twice* — and the moment that exists, the interesting question stops being "is
+it up" and becomes "is it still the one you were talking about". A generation names one
+continuous span of contact:
+
+```
+RemoteConnectionGeneration = "<host>#<sequence>.<epoch>"      e.g. build#3.7a1c9f02
+```
+
+`sequence` increments on every open and is never reused. `epoch` is minted per
+`RemoteConnection`, because two runtimes both start at sequence 1 and a label that
+repeats across restarts is a label a stale record could claim continuity with. **The
+sequence is in the control socket path**, so a master left over from generation 3
+listens on a socket generation 4 never names — continuity cannot be inherited by
+accident, only claimed on purpose.
+
+Reopening always mints a new generation, including when the current one is still open.
+Reopening is by definition not continuing.
+
+### What the fence refuses
+
+`acquire(fencedTo:)` is the whole discipline in one method.
+
+| the caller asked | what happens |
+| --- | --- |
+| nothing (`fencedTo: nil`) | the transport is opened on demand; the answer is stamped with whichever generation served it |
+| `fencedTo: g`, and `g` is open | it runs on `g` |
+| `fencedTo: g`, and the connection has moved on, been lost, or been closed | **refused** `connection_generation_ended`, naming both generations |
+
+The split is not arbitrary. A question about the *machine* — a file, a process, a git
+tree — is answered as well by one connection as another, so it is not fenced. A question
+whose answer only means anything *within* one connection is, because serving it from a
+later one would present a reconnect as continuity. That is the failure the counter
+exists to prevent, and it is the one a reader of the answer could never detect
+afterwards.
+
+Two more places the same rule bites:
+
+- **An answer that bypassed the master did not come from that generation.** When the
+  control socket is stale OpenSSH says so on stderr and connects directly anyway. A
+  fenced call's answer is then discarded — even a clean exit 0, because it is not a
+  smaller answer, it is an answer to a different question. An unfenced call keeps the
+  answer (a direct connection answers a question about the machine perfectly well) but
+  the attribution is dropped, so nothing records it as having come from a span it did
+  not.
+- **A socket that is simply gone says nothing at all.** Verified against a real `sshd`:
+  with the file absent, OpenSSH prints no warning and connects directly with exit 0. So
+  the connection is checked with a `stat` in front of every acquisition rather than
+  waiting for a confession that never comes. Without that, a killed master would leave
+  the state reading `open` while every command quietly opened its own connection.
+
+### What multiplexing must not touch
+
+Three paths deliberately keep their own connection, and each would answer a subtly
+different question if they did not:
+
+| path | why |
+| --- | --- |
+| `host check` | a reachability probe *is* the connect. Run over an existing master it would answer "the master is still there", which is a fact about this machine. |
+| the reverse-tunnel port walk (`RemoteHookTunnel`) | a `-R` requested over a shared master belongs to the master's lifetime, not to the client that asked. It would probe a forward the pane will never own. |
+| a pane's own `ssh` | a pane is an interactive session carrying its own forward. Folding it into a shared master would tie a running agent's life to that master's. |
+
+### Failing to multiplex is never a verdict
+
+If the master cannot be established — an unreachable host, a control path that will not
+fit in a `sockaddr_un`, a filesystem that will not hold a socket — the command runs on
+its own `ssh` instead. That is exactly the pre-T89 behaviour, and whatever *it* answers
+is the honest answer: a genuinely unreachable host still says so through the command
+itself. Turning a multiplexing problem into `unverifiable` would manufacture a verdict
+out of a local inconvenience. A failed open is not retried in front of every command
+(30 s backoff), so a host having a bad minute does not pay twice per call. The explicit
+`orchard host connect` verb still reports the failure typed, because there the user
+asked for the connection itself.
+
+CLI: `orchard host connect|disconnect|connection [<name>]`. Runtime shutdown closes
+every master it opened.
+
+## 3.2 A producer for `live` (T89)
+
+`live` requires *the owning host confirming the process is running*. A remote pane's PTY
+child is `ssh`, so nothing on this side has ever qualified — an ended PTY, a timed-out
+probe and a silent hook channel are all facts about here.
+
+The pane writes one small record on the far side, in the shell that is about to *become*
+the remote command:
+
+```
+{ __opd="$HOME/.orchard/panes"; __opg="<generation>";
+  mkdir -p "$__opd" && printf "%s\t%s\t%s\n" "$$" "$(ps -o lstart= -p $$ … )" "$__opg" \
+    > "$__opd/<token>.pane";
+  find "$__opd" -name "*.pane" -mtime +7 -delete; } >/dev/null 2>&1 || true;
+cd '<worktree>' && exec …
+```
+
+Four things about it matter:
+
+- **`$$` is already the right pid.** `exec` replaces a process without changing its pid,
+  twice over for an agent pane (`exec $SHELL -lc`, then `exec <agent>`), so the number
+  recorded here is the one the agent will run under. Verified live: the recorded pid was
+  the far side's `/bin/zsh -l`, with the recorded start time matching `ps` exactly.
+- **The start time is recorded too, and it is not optional.** A pid alone is a trap —
+  numbers are reused, and "pid 41207 exists" can be an unrelated process minutes later,
+  which would report a finished agent as `live`. The marker is never parsed, only
+  compared, and both sides produce it with literally the same `ps` invocation, so its
+  format never has to be understood — only to be stable, which it is.
+- **It cannot break the launch.** Output and status are both discarded and it ends with
+  `;`, not `&&`. A host with a read-only `$HOME` or no `ps` opens its pane exactly as
+  before and simply has nothing to answer with, which reads `unverifiable`.
+- **It carries the generation** (§3.1), which is what makes the answer fenceable.
+
+`orchard terminal liveness --pane <k> | --terminal <h> [--generation <label>]` asks:
+
+| the host said | verdict |
+| --- | --- |
+| the pid is running and its start time still matches | `live` |
+| there is no such pid | `exited` — the positive evidence the word requires |
+| the pid exists but started at a different time | `exited` — the number was reused, so the process we launched is gone |
+| there is no record for this pane | `unverifiable` — nobody ever wrote down what to look for |
+| the record names a *later* generation | **refused** `superseded`, reported as `unverifiable` with both labels, and the pid withheld: it belongs to a process the asker has never seen |
+| contact was lost | `unverifiable` |
+
+It is a question somebody asks, never a loop that publishes. A background sweep that
+turned "the host has not answered lately" into pane state would be manufacturing exactly
+the status rule 2 forbids.
+
+The payoff is a case stage 4 could not answer at all: **a pane whose connection ended is
+no longer permanently `unverifiable`.** Verified live — a remote pane read `live` with a
+real far-side pid, then `exited` after that pid was killed, with the pane already
+disconnected on this side the whole time.
 
 ## 4. Remote terminals
 
@@ -292,11 +448,9 @@ shape later stages inherit:
   stay refused. Agent engines asked to run in remote files were the other refusal
   here; stage 3 below replaced that with a real remote launch.
 
-Still open for a later stage: a durable connection with a generation counter, so a
-reconnect cannot be mistaken for continuity; connection multiplexing (today each command
-is its own `ssh`, and a user who wants `ControlMaster` already has it in their config);
-remote file write/watch; and a remote git-diff that matches `GitService.diff`'s
-untracked `--no-index` contract.
+Closed since, in stage 5: a durable connection with a generation counter, and
+connection multiplexing (§3.1). Still open for a later stage: remote file write/watch,
+and a remote git-diff that matches `GitService.diff`'s untracked `--no-index` contract.
 
 **Stage 3 — remote agents (T39, wave 10, done).** `terminal create --worktree <remote id>
 --engine <agent>` runs the agent CLI on the far side and watches it from here. What
@@ -353,12 +507,11 @@ question, which are the duties a dispatch is. Remote agent panes are therefore
 handoff-style: live status, no lifecycle. A coordinator waiting on a settlement that can
 never arrive is strictly worse than a refusal at the door.
 
-Still open here: the provider transcript is not resolvable across the boundary (T24's
-pins read `~/.claude/projects` on *this* machine), so `worker-read --source transcript`
-has nothing to resolve for a remote pane; and dispatch authority carrying the host
-(`process_incarnation` proving a pane *on a host*, with an unprovable worker escalating
-as `unverifiable` rather than being reaped) waits for the stage where a dispatch can
-legitimately live there at all.
+Closed since, in stage 5: the provider transcript, which was not resolvable across the
+boundary because T24's pins read `~/.claude/projects` on *this* machine (§6, stage 5).
+Still open here: dispatch authority carrying the host (`process_incarnation` proving a
+pane *on a host*, with an unprovable worker escalating as `unverifiable` rather than
+being reaped) waits for the stage where a dispatch can legitimately live there at all.
 
 **Stage 4 — remote pane restoration (T43, wave 11, done).** T23's keeper already hands
 local PTY masters across an app restart, and a remote pane's master is local too, so
@@ -423,6 +576,53 @@ pane's buffered output (a claim requires a live fd), so a restored ended pane ha
 scrollback; and adoption is not yet *fenced* per host in the §5 sense, because one
 runtime still holds one host's worth of panes.
 
+Since stage 5, a reconnect also **mints a new pane generation and re-stamps the recorded
+launch with it** (`RemotePaneGeneration`, §3.1's label shape). The rewrite is strict —
+only an assignment to `__opg` that Orchard itself wrote is touched, the same discipline
+the `-R` retarget already followed, because rewriting a command we did not author is how
+somebody else's script quietly acquires our semantics. The label's characters survive
+both layers of shell quoting a remote launch goes through, which is what makes a plain
+substring rewrite safe. A respawn does the same, for the same reason: it too opens a new
+connection. Verified live — reconnect reported `orchard-loopback#1.…` ended and
+`orchard-loopback#2.…` open, the far-side record moved to the new label with a new pid,
+and a liveness question naming the old label came back refused.
+
+**Stage 5 — durability: one connection, counted (T89, wave 26, done).** §3.1 (the durable
+multiplexed connection and its generation counter) and §3.2 (the producer for `live`) are
+this stage. The third piece is remote provider transcripts.
+
+- **`worker-read --source transcript` on a remote pane.** The old answer was
+  `remote_provider_transcript_unsupported` for every remote pane, and it was right at the
+  time: the resolver read `~/.claude/projects` on *this* machine, and a remote pane's
+  local cwd is only where `ssh` was launched from — so it would have found nothing, or
+  worse pinned an unrelated local session's transcript and labelled it this worker's
+  evidence. The fix was not to relax that but to ask the machine the file is on
+  (`RemoteProviderTranscript`).
+- **The far side resolves its own directory.** `cd <remoteCwd> && pwd -P`, then the
+  provider's `/` → `-` encoding. The provider encodes the *resolved* path, and on the
+  host verified against, `/tmp` resolves to `/private/tmp` — encoding what we recorded
+  would have looked for a directory that never exists. An exact miss falls back to a
+  single-match glob on the session id; two matches are refused
+  `provider_transcript_ambiguous`, because picking one would be a coin flip presented as
+  evidence.
+- **Bytes, not text.** The tail travels base64, so a transcript containing a byte
+  sequence that is not UTF-8 comes back `provider_transcript_invalid_utf8` rather than as
+  replacement characters pretending to be the agent's words. Verified live: a Latin-1
+  `0xe9` arrived intact and was typed, not decoded.
+- **A whole first line.** A byte-bounded tail almost always starts mid-record; the
+  partial line is dropped here exactly as it is locally, so the pin stays parseable
+  JSONL.
+- **Rule 2, again.** A host that does not answer is
+  `remote_provider_transcript_unverifiable`, never `provider_transcript_not_found`. For a
+  worker's evidence, "we could not look" and "there is nothing there" are the whole
+  difference.
+
+What this stage does *not* claim: the remote half is verified live against
+`orchard-loopback` (resolution, encoding, byte fidelity, and the `no-cwd` /
+`not-found` refusals), and the runtime wiring is unit-tested, but the two have not been
+driven together by a real remote Claude session — that needs the hook-attested
+`providerSessionID` T83 proved crosses the tunnel, and no run in this wave produced one.
+
 ## 7. Non-goals
 
 Orchard does not reimplement OpenSSH. No in-process SSH client, no key management, no
@@ -430,3 +630,9 @@ known-hosts UI, no relay/agent deployment onto the far side (Orca's `ssh-relay-*
 Orchard shells out to the system `ssh` and lets the user's own `~/.ssh/config` be the
 configuration surface. If a host works in a terminal, it works here — and if it does not,
 the fix is in the user's SSH config, where they can already test it.
+
+Stage 5's `ControlMaster` is not a departure from that. Orchard runs OpenSSH's own
+multiplexing with its own control path, on the paths it owns; a user's `ControlMaster`
+settings for their other work are untouched, and nothing here parses, resolves or
+reimplements any part of their config. What Orchard added is a **counter**, which
+OpenSSH has no notion of and no reason to.

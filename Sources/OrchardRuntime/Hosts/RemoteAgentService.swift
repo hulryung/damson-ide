@@ -14,6 +14,9 @@ public struct RemoteAgentPlan: Sendable {
     public let hookToken: String
     /// What this pane's status can be read from, and what it therefore cannot say.
     public let detection: TerminalStatusDetection
+    /// The far-side identity token this launch records its pid under (T89), or nil
+    /// when the caller did not ask for one.
+    public let identityToken: String?
 }
 
 /// Stage 3 of docs/design/remote-hosts.md: an agent CLI running in a worktree on
@@ -93,14 +96,18 @@ public struct RemoteAgentService: Sendable {
     /// `hookToken` is minted by the caller so the pane's `AgentSession` can be created
     /// with the same token the remote config already carries.
     public func plan(engine: AgentEngine, worktreePath: String, hookToken: String,
-                     localHookPort: UInt16) async throws -> RemoteAgentPlan {
+                     localHookPort: UInt16,
+                     identityToken: String? = nil,
+                     generation: String? = nil) async throws -> RemoteAgentPlan {
         let launch = try Self.requireRemoteLaunch(engine, hostName: hostName)
         let path = worktreePath.trimmingCharacters(in: .whitespacesAndNewlines)
         guard path.hasPrefix("/") else {
             throw RemoteHostError.invalidArgument(
                 "a remote worktree needs an absolute path on \(hostName) (got '\(worktreePath)')")
         }
-        let remoteCommand = RemoteAgentLaunch.remoteCommand(directory: path, launch: launch)
+        let remoteCommand = RemoteAgentLaunch.remoteCommand(directory: path, launch: launch,
+                                                            identityToken: identityToken,
+                                                            generation: generation)
 
         let (tunnel, detection) = await resolveHookChannel(
             engine: engine, worktreePath: path, hookToken: hookToken,
@@ -111,7 +118,8 @@ public struct RemoteAgentService: Sendable {
                                          tunnel: tunnel),
             remoteCommand: remoteCommand,
             hookToken: hookToken,
-            detection: detection)
+            detection: detection,
+            identityToken: identityToken)
     }
 
     /// Claim a port, write the config, and say what the pane ended up with.

@@ -73,14 +73,21 @@ public struct RemoteHostError: Error, Equatable, CustomStringConvertible {
 /// `BatchMode=yes` so OpenSSH fails instead of prompting a human who is not there, and
 /// `ConnectTimeout` so the connect phase cannot absorb the whole deadline.
 ///
-/// Each call is its own `ssh` invocation. Orchard deliberately does not implement
-/// connection multiplexing (design §7): a user who wants it already has `ControlMaster`
-/// in `~/.ssh/config`, and that config is the configuration surface.
+/// Since T89 a runner may carry a `RemoteConnection`, and then its calls share one
+/// multiplexed `ssh` transport instead of paying a TCP connect, a key exchange and an
+/// authentication each (design §3.1). With no connection it behaves exactly as before —
+/// one `ssh` per call — which is what every fake-runner test pins and what the paths
+/// that must *not* share a transport (the reverse-tunnel port walk, the reachability
+/// probe) deliberately keep.
 public struct SSHRunner: Sendable {
     public let host: HostRecord
     private let runner: HostCommandRunner
     public let timeout: TimeInterval
     public let connectTimeoutSeconds: Int
+    /// The durable connection these calls ride, when there is one. nil is the
+    /// historical behaviour: every call its own `ssh`, and no continuity claimed
+    /// between two of them.
+    public let connection: RemoteConnection?
 
     /// Ceiling on one remote command. Generous like `GitRunner.defaultTimeout` — a
     /// `worktree add` on a large repo is slow but legitimate — and still finite,
@@ -91,11 +98,20 @@ public struct SSHRunner: Sendable {
     public init(host: HostRecord,
                 runner: HostCommandRunner = ProcessHostCommandRunner(),
                 timeout: TimeInterval = SSHRunner.defaultTimeout,
-                connectTimeoutSeconds: Int = 5) {
+                connectTimeoutSeconds: Int = 5,
+                connection: RemoteConnection? = nil) {
         self.host = host
         self.runner = runner
         self.timeout = timeout
         self.connectTimeoutSeconds = connectTimeoutSeconds
+        self.connection = connection
+    }
+
+    /// The same runner, riding a durable connection. Used where a caller builds the
+    /// runner first and learns about the pool second.
+    public func multiplexed(over connection: RemoteConnection?) -> SSHRunner {
+        SSHRunner(host: host, runner: runner, timeout: timeout,
+                  connectTimeoutSeconds: connectTimeoutSeconds, connection: connection)
     }
 
     public var hostName: String { host.name }
@@ -110,9 +126,61 @@ public struct SSHRunner: Sendable {
     }
 
     /// Run a command line on the far side and classify what came back.
+    ///
+    /// With a durable connection this rides the shared transport, and the answer is
+    /// discarded if OpenSSH admits it did not (see `RemoteConnection.settle`).
     public func run(_ commandLine: String, options: [String] = []) async -> RemoteCommandOutcome {
-        let result = await runner.run(argv(for: commandLine, options: options), timeout: timeout)
-        return Self.classify(result, host: host)
+        await runReporting(commandLine, options: options).outcome
+    }
+
+    /// `run`, plus the generation that answered.
+    ///
+    /// Separate from `run` because most callers do not care which span of contact
+    /// produced a stateless read — but anything that *records* an answer does, since an
+    /// answer is only as current as the connection that carried it.
+    public func runReporting(_ commandLine: String, options: [String] = []) async
+        -> (outcome: RemoteCommandOutcome, generation: RemoteConnectionGeneration?) {
+        guard let connection else {
+            let result = await runner.run(argv(for: commandLine, options: options),
+                                          timeout: timeout)
+            return (Self.classify(result, host: host), nil)
+        }
+        switch await connection.acquire() {
+        case .refused(let error):
+            return (.unverifiable(reason: error.message), nil)
+        case .ready(let generation, let multiplexOptions):
+            let result = await runner.run(
+                argv(for: commandLine, options: multiplexOptions + options), timeout: timeout)
+            let outcome = Self.classify(result, host: host)
+            return await connection.settle(generation: generation, result: result,
+                                           outcome: outcome, fenced: false)
+        }
+    }
+
+    /// Run a command line, but only on `generation` — and refuse if that span of
+    /// contact has ended.
+    ///
+    /// This is the fence. It exists for the questions whose answer only means anything
+    /// *within* one connection, where serving them from a later one would present a
+    /// reconnect as continuity. The refusal is a typed `connection_generation_ended`,
+    /// never a silent retry on the new connection.
+    public func runFenced(_ commandLine: String, options: [String] = [],
+                          generation: RemoteConnectionGeneration) async -> RemoteCommandOutcome {
+        guard let connection else {
+            return .unverifiable(reason: RemoteHostError.generationEnded(
+                generation, current: nil,
+                reason: "this runner holds no durable connection").message)
+        }
+        switch await connection.acquire(fencedTo: generation) {
+        case .refused(let error):
+            return .unverifiable(reason: error.message)
+        case .ready(let served, let multiplexOptions):
+            let result = await runner.run(
+                argv(for: commandLine, options: multiplexOptions + options), timeout: timeout)
+            let outcome = Self.classify(result, host: host)
+            return await connection.settle(generation: served, result: result,
+                                           outcome: outcome, fenced: true).outcome
+        }
     }
 
     /// One bounded ssh invocation, returned *before* the answered/unverifiable
@@ -124,6 +192,10 @@ public struct SSHRunner: Sendable {
     /// failed. But that fold erases the one detail the planner turns on: "that port is
     /// taken, try the next" is not "the host is gone", and treating it as the latter
     /// would abandon a perfectly reachable host after one busy port.
+    ///
+    /// It is also deliberately *not* multiplexed. A `-R` requested over a shared master
+    /// belongs to the master's lifetime rather than to the client that asked for it, so
+    /// probing a port that way would tell us about a forward the pane will never own.
     public func runRaw(_ commandLine: String, options: [String] = []) async -> HostCommandResult {
         await runner.run(argv(for: commandLine, options: options), timeout: timeout)
     }

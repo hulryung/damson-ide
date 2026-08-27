@@ -51,14 +51,29 @@ public enum RemotePaneRestoration {
     public static let reconnectActionTitle = "Reconnect"
 
     /// What a reconnect just did, in one sentence.
+    ///
+    /// Since T89 it also names the two generations. That is not decoration: the far side
+    /// now holds this pane's identity under the new label, so a question asked about the
+    /// old one is refused *there* as well as here — and a reader who has both labels can
+    /// see that the two spans are different rather than inferring it from the word
+    /// "new".
     public static func describeReconnected(host: ExecutionHostId, incarnation: Int,
-                                           tunnelled: Bool) -> String {
+                                           tunnelled: Bool,
+                                           previousGeneration: String? = nil,
+                                           generation: String? = nil) -> String {
         let channel = tunnelled
             ? "Its hook channel was reopened with it."
             : "It has no hook channel, so its status comes from screen fingerprints only."
-        return "Opened a new connection to \(host.name) (incarnation \(incarnation)). "
-            + "\(channel) Any work the previous connection left behind is untouched and "
-            + "unverified."
+        var sentence = "Opened a new connection to \(host.name) (incarnation \(incarnation))"
+        if let generation {
+            sentence += " as generation \(generation)"
+            if let previousGeneration {
+                sentence += "; \(previousGeneration) has ended and is no longer answerable"
+            }
+        }
+        sentence += ". \(channel) Any work the previous connection left behind is untouched "
+            + "and unverified."
+        return sentence
     }
 }
 
@@ -117,7 +132,9 @@ public struct RemotePaneReconnectHandler: CommandHandler, @unchecked Sendable {
         // rule 3); what it does not keep is permission to dial out to that name again.
         if let hosts { _ = try hosts.require(host: host) }
 
+        let previousGeneration = await service.remoteFacts(paneKey: summary.paneKey)?.generation
         let reconnected = try await service.reconnectRemote(paneKey: summary.paneKey)
+        let generation = await service.remoteFacts(paneKey: summary.paneKey)?.generation
         let tunnelled = reconnected.statusDetection?.mode == .hooks
         return try .object([
             "terminal": encodeReconnectJSON(reconnected),
@@ -125,9 +142,14 @@ public struct RemotePaneReconnectHandler: CommandHandler, @unchecked Sendable {
                 "host": .string(host.rawValue),
                 "incarnation": .number(Double(reconnected.incarnation)),
                 "tunnelled": .bool(tunnelled),
+                // Both labels, always — the pair is the evidence that this is a second
+                // span of contact and not a resumption of the first.
+                "previousGeneration": previousGeneration.map { JSONValue.string($0) } ?? .null,
+                "generation": generation.map { JSONValue.string($0) } ?? .null,
                 "note": .string(RemotePaneRestoration.describeReconnected(
                     host: host, incarnation: reconnected.incarnation,
-                    tunnelled: tunnelled)),
+                    tunnelled: tunnelled, previousGeneration: previousGeneration,
+                    generation: generation)),
             ]),
         ])
     }

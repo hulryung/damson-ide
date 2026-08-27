@@ -37,6 +37,10 @@ public final class OrchardRuntimeHost {
     public nonisolated let portService: PortService
     /// T29: the registered remote hosts behind `ssh:<name>` execution host ids.
     public nonisolated let hostRegistry: HostRegistry
+    /// T89: one durable, generation-counted, multiplexed connection per host. Remote
+    /// git reads and remote pane questions share it; the reachability probe and a
+    /// pane's own `ssh` deliberately do not (design §3.1).
+    public nonisolated let remoteConnections: RemoteConnectionPool
     /// T45: periodic bounded host-reachability producer. Idle unless a remote repo
     /// or remote pane exists; publishes presentation-only status through the registry.
     public nonisolated let hostLiveness: HostLivenessService
@@ -73,6 +77,11 @@ public final class OrchardRuntimeHost {
         self.terminalService = terminalService
         self.workspaceService = WorkspaceService(store: dataStore)
         self.hostRegistry = HostRegistry(store: dataStore)
+        let remoteConnections = RemoteConnectionPool(
+            controlDirectory: RemoteConnectionPool.defaultControlDirectory(
+                runDirectory: paths.run))
+        self.remoteConnections = remoteConnections
+        self.workspaceService.remoteConnections = remoteConnections
         // The channel a remote agent pane's hooks come home through (T39). Handed to
         // the terminal service so a pane created with `statusDetection: .hooks`
         // subscribes its token, and to the terminal handler so the launch path can read
@@ -131,6 +140,7 @@ public final class OrchardRuntimeHost {
                                                       terminals: terminalService,
                                                       hosts: hostRegistry,
                                                       hookChannel: hookChannel,
+                                                      connections: remoteConnections,
                                                       dataPath: paths.data.path,
                                                       runtimeId: runtimeId)
         self.workerRuntime = workerRuntime
@@ -238,7 +248,13 @@ public final class OrchardRuntimeHost {
                                                  hosts: hostRegistry,
                                                  hookChannel: hookChannel))
         registry.register(HostCommandHandler(registry: hostRegistry,
-                                             liveness: hostLiveness))
+                                             liveness: hostLiveness,
+                                             connections: remoteConnections))
+        // T89: asking a remote pane's own host whether its process is running — the
+        // only path entitled to answer `live`.
+        registry.register(RemotePaneLivenessHandler(service: terminalService,
+                                                    hosts: hostRegistry,
+                                                    connections: remoteConnections))
         // T43: reopening a remote pane's connection is a host-layer decision (typed
         // refusals for local panes, live panes, and hosts that left the registry), so
         // it registers its own verb rather than widening the terminal handler.
@@ -310,6 +326,11 @@ public final class OrchardRuntimeHost {
         automationScheduler.stop()
         portService.stop()
         hostLiveness.stop()
+        // Close the masters we opened. A quit that left them behind would leave `ssh`
+        // processes holding connections nothing will ever ask about again — and their
+        // sockets sitting in a run directory the next runtime will not recognise.
+        let connections = remoteConnections
+        Task { await connections.closeAll() }
         socketServer?.stop(fileManager: fileManager)
         socketServer = nil
     }

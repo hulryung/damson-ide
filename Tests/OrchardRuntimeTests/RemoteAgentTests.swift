@@ -111,6 +111,9 @@ final class RemoteAgentTests: XCTestCase {
         registry.register(TerminalCommandHandler(service: terminals, workspaces: service,
                                                  hosts: hosts, hookChannel: hookChannel,
                                                  hostRunner: runner))
+        // T89: asking the far side about the pane's own process.
+        registry.register(RemotePaneLivenessHandler(service: terminals, hosts: hosts,
+                                                    runner: runner, timeout: 1))
         server = InMemoryRuntimeServer(registry: registry, runtimeId: "rt_remote_agent")
     }
 
@@ -570,7 +573,21 @@ final class RemoteAgentTests: XCTestCase {
         let second = try XCTUnwrap(terminalSpecs.last)
         // Dropping either would reopen the pane as something else: a local shell (argv)
         // or a statusless agent whose config on the far side names a token nobody holds.
-        XCTAssertEqual(second.launchArgv, first.launchArgv)
+        //
+        // T89 adds the one thing a respawn MUST change: its generation. A respawn opens
+        // a new connection, so the far-side identity record it rewrites has to be
+        // stamped with a new span of contact — otherwise a liveness question about the
+        // process that just ended would be answered with the pid of the one that
+        // replaced it. Everything else, including the identity token naming the record,
+        // is byte-identical.
+        let firstGeneration = try XCTUnwrap(first.remoteGeneration)
+        let secondGeneration = try XCTUnwrap(second.remoteGeneration)
+        XCTAssertNotEqual(secondGeneration, firstGeneration)
+        XCTAssertTrue(secondGeneration.hasPrefix("build#2."), secondGeneration)
+        XCTAssertEqual(second.remoteIdentityToken, first.remoteIdentityToken)
+        XCTAssertEqual(
+            second.launchArgv,
+            first.launchArgv.map { RemotePaneGeneration.rewrite(argv: $0, to: secondGeneration) })
         XCTAssertEqual(second.hookToken, first.hookToken)
         XCTAssertEqual(second.statusDetection, first.statusDetection)
         // And the token re-subscribes: the far side's config still names it, but the
@@ -580,6 +597,109 @@ final class RemoteAgentTests: XCTestCase {
         hookChannel.deliver(token: try XCTUnwrap(second.hookToken), event: "PreToolUse")
         try await Task.sleep(nanoseconds: 80_000_000)
         XCTAssertEqual(try terminals.summary(handle: handle).agentState, .working)
+    }
+
+    // MARK: - T89: asking the host about the pane's process
+
+    func testTheLaunchRecordsAnIdentityTheHostCanLaterBeAskedAbout() async throws {
+        let worktreeID = try await seedRemoteWorktree()
+        scriptTunnel()
+        _ = await call("terminal-create", ["worktree": .string(worktreeID),
+                                           "engine": .string("claude-code")])
+        let spec = try XCTUnwrap(terminalSpecs.last)
+        let token = try XCTUnwrap(spec.remoteIdentityToken)
+        let generation = try XCTUnwrap(spec.remoteGeneration)
+        let remoteCommand = try XCTUnwrap(spec.launchArgv?.last)
+        // The record is written before the `cd`, in the shell whose pid the two `exec`s
+        // preserve — so what lands on the far side is the pid the *agent* runs under.
+        XCTAssertTrue(remoteCommand.contains("\(token).pane"), remoteCommand)
+        XCTAssertEqual(RemotePaneGeneration.label(in: remoteCommand), generation)
+        XCTAssertLessThan(remoteCommand.range(of: "__opg=")!.lowerBound,
+                          remoteCommand.range(of: "cd /home/ci")!.lowerBound)
+        // And it is the last thing before the agent: the launch never depends on it.
+        XCTAssertTrue(remoteCommand.contains(">/dev/null 2>&1 || true; cd "), remoteCommand)
+    }
+
+    func testTheHostConfirmingTheProcessIsWhatProducesLive() async throws {
+        let worktreeID = try await seedRemoteWorktree()
+        scriptTunnel()
+        let created = await call("terminal-create", ["worktree": .string(worktreeID),
+                                                     "engine": .string("claude-code")])
+        let pane = try XCTUnwrap(created.result?.objectValue?["paneKey"]?.stringValue)
+        let generation = try XCTUnwrap(terminalSpecs.last?.remoteGeneration)
+        runner.on("ORCHARD-PANE/1",
+                  stdout("ORCHARD-PANE/1 live \(generation) 41207\n"))
+
+        let response = await call("terminal-liveness", ["pane": .string(pane)])
+        let result = try XCTUnwrap(response.result?.objectValue)
+        XCTAssertEqual(result["status"]?.stringValue, "live")
+        XCTAssertEqual(result["answer"]?.stringValue, "live")
+        XCTAssertEqual(result["pid"]?.numberValue, 41207)
+        XCTAssertEqual(result["generation"]?.stringValue, generation)
+        XCTAssertEqual(result["executionHostId"]?.stringValue, "ssh:build")
+    }
+
+    func testAQuestionAboutAnEndedGenerationIsRefusedNotAnsweredAboutTheNewProcess() async throws {
+        let worktreeID = try await seedRemoteWorktree()
+        scriptTunnel()
+        let created = await call("terminal-create", ["worktree": .string(worktreeID),
+                                                     "engine": .string("claude-code")])
+        let pane = try XCTUnwrap(created.result?.objectValue?["paneKey"]?.stringValue)
+        let generation = try XCTUnwrap(terminalSpecs.last?.remoteGeneration)
+        // The far side holds the CURRENT generation; the caller asks about an older one.
+        runner.on("ORCHARD-PANE/1", stdout("ORCHARD-PANE/1 live \(generation) 41207\n"))
+
+        let response = await call("terminal-liveness", [
+            "pane": .string(pane), "generation": .string("build#1.deadbeef")])
+        let result = try XCTUnwrap(response.result?.objectValue)
+        XCTAssertEqual(result["status"]?.stringValue, "unverifiable")
+        XCTAssertEqual(result["answer"]?.stringValue, "superseded")
+        // The pid is withheld on purpose: it belongs to a process the asker never saw.
+        XCTAssertEqual(result["pid"], JSONValue.null)
+        XCTAssertEqual(result["askedGeneration"]?.stringValue, "build#1.deadbeef")
+        XCTAssertTrue(try XCTUnwrap(result["note"]?.stringValue)
+            .contains(HostLiveness.generationRefusalReminder))
+    }
+
+    func testARespawnMovesTheHostsRecordToTheNewGeneration() async throws {
+        let worktreeID = try await seedRemoteWorktree()
+        scriptTunnel()
+        _ = await call("terminal-create", ["worktree": .string(worktreeID),
+                                           "engine": .string("claude-code")])
+        let first = try XCTUnwrap(terminalSpecs.last)
+        _ = try terminals.respawn(paneKey: first.paneKey)
+        let second = try XCTUnwrap(terminalSpecs.last)
+        // Same file on the far side, new generation written into it: the pane is still
+        // the same pane, and the span of contact is provably not the same one.
+        XCTAssertEqual(second.remoteIdentityToken, first.remoteIdentityToken)
+        XCTAssertEqual(RemotePaneGeneration.label(in: try XCTUnwrap(second.launchArgv?.last)),
+                       second.remoteGeneration)
+        XCTAssertNotEqual(second.remoteGeneration, first.remoteGeneration)
+    }
+
+    func testARemotePanesTranscriptIsNoLongerRefusedForBeingRemote() async throws {
+        // T39 answered `remote_provider_transcript_unsupported` for every remote pane.
+        // T89 replaced that with the pane's *real* reason: before any hook has named a
+        // provider session there is nothing to resolve, and that is a different fact
+        // from "this pane is on another machine".
+        let worktreeID = try await seedRemoteWorktree()
+        scriptTunnel()
+        let created = await call("terminal-create", ["worktree": .string(worktreeID),
+                                                     "engine": .string("claude-code")])
+        let handle = try XCTUnwrap(created.result?.objectValue?["handle"]?.stringValue)
+        XCTAssertEqual(WorkerRuntimeContext.transcriptPlacement(terminals, handle: handle),
+                       .unavailable(reason: "provider_session_unavailable"))
+
+        // Once the agent's own hook names its session, the transcript is a file on the
+        // far side, in the far-side worktree — never the local cwd, which is only where
+        // `ssh` was launched from.
+        hookChannel.deliver(token: try XCTUnwrap(terminalSpecs.last?.hookToken),
+                            event: "PreToolUse",
+                            body: Data("{\"session_id\":\"abc-123\"}".utf8))
+        try await Task.sleep(nanoseconds: 80_000_000)
+        XCTAssertEqual(WorkerRuntimeContext.transcriptPlacement(terminals, handle: handle),
+                       .remote(hostId: "ssh:build", remoteCwd: worktreePath,
+                               sessionID: "abc-123"))
     }
 
     func testAnEngineOrchardCannotLaunchRemotelyIsRefusedWithNothingSpawned() async throws {

@@ -1,4 +1,5 @@
 import Foundation
+import OrchardTerminals
 
 /// Builds the `ssh` invocations Orchard runs: the bounded connectivity probe and the
 /// remote-shell PTY command.
@@ -108,8 +109,24 @@ public enum SSHCommand {
     ///
     /// `exec` rather than a nested shell so the pane's PTY child *is* the login shell:
     /// an extra wrapper layer would swallow the exit status the liveness verdict reads.
-    public static func cdAndLoginShellCommand(directory: String) -> String {
-        "cd \(shellQuote(directory)) && exec \(loginShell) -l"
+    public static func cdAndLoginShellCommand(directory: String,
+                                              identityToken: String? = nil,
+                                              generation: String? = nil) -> String {
+        prelude(identityToken, generation)
+            + "cd \(shellQuote(directory)) && exec \(loginShell) -l"
+    }
+
+    /// The far-side identity record a remote pane writes before it `exec`s (T89), or
+    /// nothing when the pane has no token.
+    ///
+    /// It is prepended rather than chained with `&&` on purpose: the launch must not
+    /// depend on it. A host where `$HOME` is read-only, or where `ps` is missing, opens
+    /// its pane exactly as before and simply has nothing to answer liveness questions
+    /// with — which reads `unverifiable`, the correct answer.
+    public static func prelude(_ identityToken: String?, _ generation: String?) -> String {
+        guard let identityToken, RemotePaneIdentity.isValidToken(identityToken),
+              let generation, RemotePaneGeneration.isValidLabel(generation) else { return "" }
+        return RemotePaneIdentity.recordPrelude(token: identityToken, generation: generation)
     }
 
     /// The remote-shell argv as one shell command line, for the launch paths that take
@@ -118,6 +135,59 @@ public enum SSHCommand {
                                               options: [String] = []) -> String {
         remoteShellArgv(for: host, command: command, options: options)
             .map(shellQuote).joined(separator: " ")
+    }
+
+    // MARK: - Connection multiplexing (T89)
+
+    /// `ssh … -o ControlMaster=yes -o ControlPath=<p> -o ControlPersist=<n> -N -f <dest>`
+    /// — the background master a durable connection is made of.
+    ///
+    /// `-N` because the master runs no command of its own, `-f` so it backgrounds once
+    /// authentication has succeeded (which makes the exit status of *this* invocation a
+    /// real answer about whether contact was made). `BatchMode` and `ConnectTimeout` are
+    /// the same two bounds every other Orchard `ssh` carries, for the same reason: a
+    /// master that parks on a passphrase prompt would hang every command behind it.
+    ///
+    /// `ControlPersist` is a backstop, not the lifetime: the runtime closes its masters
+    /// explicitly. It exists so a runtime that dies without closing them does not leave
+    /// `ssh` processes holding connections nothing will ever use.
+    public static func controlMasterArgv(for host: HostRecord, controlPath: String,
+                                         connectTimeoutSeconds: Int = 5,
+                                         persistSeconds: Int = 120) -> [String] {
+        [binary,
+         "-o", "BatchMode=yes",
+         "-o", "ConnectTimeout=\(connectTimeoutSeconds)",
+         "-o", "ControlMaster=yes",
+         "-o", "ControlPath=\(controlPath)",
+         "-o", "ControlPersist=\(persistSeconds)",
+         "-N", "-f"]
+            + portArguments(for: host)
+            + [destination(for: host)]
+    }
+
+    /// What a command adds to ride an existing master.
+    ///
+    /// `ControlMaster=no` so a command can never *become* the master: creating one here
+    /// would mint a transport nothing counted, which is exactly the continuity the
+    /// generation counter exists to make impossible. When the socket is missing OpenSSH
+    /// still connects directly and says so on stderr — `RemoteConnection.settle` reads
+    /// that admission and refuses the answer rather than accepting one from a connection
+    /// nobody asked for.
+    public static func controlClientArguments(controlPath: String) -> [String] {
+        ["-o", "ControlMaster=no", "-o", "ControlPath=\(controlPath)"]
+    }
+
+    /// `ssh -O check` — ask the local master whether it is still there.
+    public static func controlCheckArgv(for host: HostRecord, controlPath: String) -> [String] {
+        [binary, "-O", "check", "-o", "ControlPath=\(controlPath)"]
+            + portArguments(for: host) + [destination(for: host)]
+    }
+
+    /// `ssh -O exit` — tell the master to go away. Deliberate closure, never a stop:
+    /// it ends a connection and says nothing about what was running on the far side.
+    public static func controlExitArgv(for host: HostRecord, controlPath: String) -> [String] {
+        [binary, "-O", "exit", "-o", "ControlPath=\(controlPath)"]
+            + portArguments(for: host) + [destination(for: host)]
     }
 
     public static func shellQuote(_ value: String) -> String {

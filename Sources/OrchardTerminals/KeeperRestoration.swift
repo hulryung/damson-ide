@@ -57,17 +57,31 @@ public struct KeeperRemotePaneRecord: Codable, Equatable, Sendable {
     /// (the tunnel's local port may not be rebindable), but a pane that was already
     /// fingerprint-only keeps the limitation it was created with.
     public var statusDetection: TerminalStatusDetection?
+    /// The far-side identity this pane's process was recorded under at launch (T89).
+    ///
+    /// It is the one thing that lets a restored pane whose connection did not survive
+    /// ask its host what happened, instead of being stuck at `unverifiable` forever.
+    /// Optional so a state file written before T89 still decodes.
+    public var identityToken: String?
+    /// The connection generation label the pane was launched under. Carried so a
+    /// reconnect can name the span of contact that ended rather than implying the new
+    /// one continues it.
+    public var generation: String?
 
     public init(executionHostId: String, remoteCwd: String? = nil,
                 launchArgv: [String]? = nil, launchPrompt: String? = nil,
                 tunnel: KeeperTunnelRecord? = nil,
-                statusDetection: TerminalStatusDetection? = nil) {
+                statusDetection: TerminalStatusDetection? = nil,
+                identityToken: String? = nil,
+                generation: String? = nil) {
         self.executionHostId = executionHostId
         self.remoteCwd = remoteCwd
         self.launchArgv = launchArgv
         self.launchPrompt = launchPrompt
         self.tunnel = tunnel
         self.statusDetection = statusDetection
+        self.identityToken = identityToken
+        self.generation = generation
     }
 }
 

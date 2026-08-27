@@ -120,6 +120,16 @@ func formatHuman(method: String, result: JSONValue?, verbose: Bool = false) -> S
         return formatHostAdd(result)
     case "host-check":
         return formatHostCheck(result)
+    case "host-connect", "host-disconnect":
+        return formatHostConnection(result)
+    case "host-connection":
+        if let rows = result?.objectValue?["connections"]?.arrayValue {
+            if rows.isEmpty { return "No host connections have been opened." }
+            return rows.map { formatHostConnection($0) }.joined(separator: "\n")
+        }
+        return formatHostConnection(result)
+    case "terminal-liveness":
+        return formatTerminalLiveness(result)
     case "worktree-list":
         return OrchardHumanFormatter.worktreeList(result)
     case "worktree-show", "worktree-current", "worktree-set":
@@ -221,6 +231,43 @@ func formatHostCheck(_ result: JSONValue?) -> String {
         lines.append("  latency: \(Int(latency.rounded()))ms")
     }
     if let command = object["command"]?.stringValue { lines.append("  probe: \(command)") }
+    if let note = object["note"]?.stringValue, !note.isEmpty { lines.append("  \(note)") }
+    return lines.joined(separator: "\n")
+}
+
+/// One durable connection, in three lines at most. The generation label is on the
+/// first line because it is the fact that distinguishes two connections to the same
+/// host, and the note carries the rule-2 / fence wording verbatim.
+func formatHostConnection(_ result: JSONValue?) -> String {
+    let object = result?.objectValue ?? [:]
+    let host = object["host"]?.stringValue ?? "?"
+    let state = object["state"]?.stringValue ?? "never"
+    let generation = object["generation"]?.stringValue
+    var head = "\(host): \(state)"
+    if let generation { head += " · \(generation)" }
+    if object["multiplexed"]?.boolValue == false { head += " · not multiplexed" }
+    var lines = [head]
+    if let reason = object["reason"]?.stringValue, !reason.isEmpty {
+        lines.append("  reason: \(reason)")
+    }
+    if let note = object["note"]?.stringValue, !note.isEmpty { lines.append("  \(note)") }
+    return lines.joined(separator: "\n")
+}
+
+/// A remote pane's liveness as its own host reported it.
+func formatTerminalLiveness(_ result: JSONValue?) -> String {
+    let object = result?.objectValue ?? [:]
+    let pane = object["paneKey"]?.stringValue ?? "?"
+    let status = object["status"]?.stringValue ?? "unverifiable"
+    let answer = object["answer"]?.stringValue ?? status
+    var head = "\(pane): \(status)"
+    if answer != status { head += " (\(answer))" }
+    if let pid = object["pid"]?.numberValue { head += " · pid \(Int(pid))" }
+    var lines = [head]
+    if let host = object["executionHostId"]?.stringValue { lines.append("  host: \(host)") }
+    if let generation = object["generation"]?.stringValue {
+        lines.append("  generation: \(generation)")
+    }
     if let note = object["note"]?.stringValue, !note.isEmpty { lines.append("  \(note)") }
     return lines.joined(separator: "\n")
 }
@@ -388,11 +435,11 @@ do {
                     params["_args"] = .array(rest)
                 }
             } else if method.hasPrefix("terminal-") {
-                guard rest.isEmpty else { throw CLIError.usage("usage: orchard terminal list|create|read|send|wait|split|close|rename|reconnect [options]") }
+                guard rest.isEmpty else { throw CLIError.usage("usage: orchard terminal list|create|read|send|wait|split|close|rename|reconnect|liveness [options]") }
                 let verb = String(method.dropFirst("terminal-".count))
                 let known = ["list", "create", "read", "send", "wait", "split", "close",
-                             "rename", "reconnect"]
-                guard known.contains(verb) else { throw CLIError.usage("usage: orchard terminal list|create|read|send|wait|split|close|rename|reconnect [options]") }
+                             "rename", "reconnect", "liveness"]
+                guard known.contains(verb) else { throw CLIError.usage("usage: orchard terminal list|create|read|send|wait|split|close|rename|reconnect|liveness [options]") }
                 if ["read", "send", "wait", "split", "close", "rename"].contains(verb), params["terminal"] == nil {
                     throw CLIError.usage("terminal \(verb) requires --terminal <handle>")
                 }
@@ -403,6 +450,12 @@ do {
                 if verb == "reconnect", params["terminal"] == nil, params["pane"] == nil {
                     throw CLIError.usage(
                         "terminal reconnect requires --terminal <handle> or --pane <paneKey>")
+                }
+                // T89: same two identities, for the same reason — after a restart the
+                // handle a caller remembers belongs to a previous app run.
+                if verb == "liveness", params["terminal"] == nil, params["pane"] == nil {
+                    throw CLIError.usage(
+                        "terminal liveness requires --terminal <handle> or --pane <paneKey>")
                 }
                 if let timeout = params.removeValue(forKey: "timeout-ms") { params["timeoutMs"] = timeout }
                 if (verb == "list" || verb == "create"), params["cwd"] == nil {
@@ -416,9 +469,9 @@ do {
         } else if method == "project" {
             throw CLIError.usage("usage: orchard project list|show|current [options]")
         } else if method == "terminal" {
-            throw CLIError.usage("usage: orchard terminal list|create|read|send|wait|split|close|rename|reconnect [options]")
+            throw CLIError.usage("usage: orchard terminal list|create|read|send|wait|split|close|rename|reconnect|liveness [options]")
         } else if method == "host" {
-            throw CLIError.usage("usage: orchard host list | orchard host add <name> [--hostname <h>] [--user <u>] [--port <n>] | orchard host add --import [<name>] | orchard host check <name>")
+            throw CLIError.usage("usage: orchard host list | orchard host add <name> [--hostname <h>] [--user <u>] [--port <n>] | orchard host add --import [<name>] | orchard host check <name> | orchard host connect|disconnect|connection [<name>]")
         }
         if method == "file" {
             guard case let .array(values)? = params.removeValue(forKey: "_args"), let subcommand = values.first?.stringValue else {

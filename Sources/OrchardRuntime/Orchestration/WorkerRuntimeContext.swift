@@ -126,6 +126,7 @@ public struct WorkerRuntimeContext: Sendable {
                             hosts: HostRegistry? = nil,
                             hookChannel: AgentHookChannel? = nil,
                             hostRunner: HostCommandRunner = ProcessHostCommandRunner(),
+                            connections: RemoteConnectionPool? = nil,
                             dataPath: String = "",
                             runtimeId: String = "") -> WorkerRuntimeContext {
         let remotePanes = hosts.map {
@@ -205,9 +206,33 @@ public struct WorkerRuntimeContext: Sendable {
                 try await terminals.read(handle: handle, cursor: cursor, limit: limit)
             },
             resolveProviderTranscript: { handle, maximumBytes in
-                await MainActor.run {
-                    Self.resolveClaudeTranscript(terminals, handle: handle,
-                                                 maximumBytes: maximumBytes)
+                // A remote pane's transcript is a file on the far side. Deciding *which*
+                // pane it is has to happen on the main actor (the registry lives there);
+                // reading it must not, because it is an `ssh` round trip.
+                let placement = await MainActor.run {
+                    Self.transcriptPlacement(terminals, handle: handle)
+                }
+                switch placement {
+                case .local:
+                    return await MainActor.run {
+                        Self.resolveClaudeTranscript(terminals, handle: handle,
+                                                     maximumBytes: maximumBytes)
+                    }
+                case .unavailable(let reason):
+                    return .unavailable(reason: reason)
+                case .remote(let hostId, let remoteCwd, let sessionID):
+                    guard let hosts, let id = ExecutionHostId(rawValue: hostId),
+                          let record = try? hosts.require(host: id) else {
+                        // The pane names a host this runtime cannot resolve. Refusing is
+                        // the only honest answer: there is nobody to ask.
+                        return .unavailable(reason: "remote_provider_transcript_unsupported")
+                    }
+                    let reader = RemoteProviderTranscript(
+                        host: record, runner: hostRunner,
+                        connection: connections?.connection(for: record))
+                    return await reader.resolve(RemoteTranscriptRequest(
+                        hostName: record.name, remoteCwd: remoteCwd,
+                        sessionID: sessionID, maximumBytes: maximumBytes))
                 }
             },
             closeTerminal: { handle in
@@ -243,6 +268,55 @@ public struct WorkerRuntimeContext: Sendable {
             })
     }
 
+    /// Which machine a pane's provider transcript lives on, and what is needed to read
+    /// it there.
+    ///
+    /// Split out of `resolveClaudeTranscript` so the main-actor part (identity) and the
+    /// off-actor part (an `ssh` round trip) are separable. The typed reasons are the
+    /// same vocabulary the local resolver uses, so a caller reading a pin cannot tell
+    /// from the reason alone which machine failed to produce it — only *what* was
+    /// missing, which is the fact that matters.
+    enum TranscriptPlacement: Sendable, Equatable {
+        case local
+        case remote(hostId: String, remoteCwd: String, sessionID: String)
+        case unavailable(reason: String)
+    }
+
+    @MainActor
+    static func transcriptPlacement(_ terminals: TerminalService,
+                                    handle: String) -> TranscriptPlacement {
+        let resolvedHandle: String
+        let summary: TerminalSummary
+        do {
+            summary = try terminals.summary(handle: handle)
+            resolvedHandle = handle
+        } catch TerminalServiceError.handleStale(_, let replacement) {
+            guard let replacement, let followed = try? terminals.summary(handle: replacement) else {
+                return .unavailable(reason: "terminal_identity_unavailable")
+            }
+            summary = followed
+            resolvedHandle = replacement
+        } catch {
+            return .unavailable(reason: "terminal_identity_unavailable")
+        }
+        guard RemoteWorkspacePolicy.isRemote(hostId: summary.executionHostId) else {
+            return .local
+        }
+        guard let facts = terminals.remoteFacts(handle: resolvedHandle),
+              let remoteCwd = facts.remoteCwd, !remoteCwd.isEmpty else {
+            // A remote pane with no recorded far-side directory cannot be resolved
+            // without guessing one, and the local cwd is only where `ssh` was launched
+            // from — the guess T80 refused to make.
+            return .unavailable(reason: "remote_working_directory_unavailable")
+        }
+        guard let sessionID = try? terminals.agentStatus(handle: resolvedHandle).providerSessionID,
+              !sessionID.isEmpty else {
+            return .unavailable(reason: "provider_session_unavailable")
+        }
+        return .remote(hostId: summary.executionHostId, remoteCwd: remoteCwd,
+                       sessionID: sessionID)
+    }
+
     @MainActor
     static func resolveClaudeTranscript(
         _ terminals: TerminalService, handle: String, maximumBytes: Int,
@@ -262,13 +336,15 @@ public struct WorkerRuntimeContext: Sendable {
         } catch {
             return .unavailable(reason: "terminal_identity_unavailable")
         }
-        // T80: a remote pane's provider transcript lives on the far side. Everything
-        // below reads `~/.claude/projects` on *this* machine, and the pane's local
-        // working directory is only where `ssh` was launched from — so resolving it
-        // would either find nothing or, worse, pin some unrelated local session's
-        // transcript and label it this worker's evidence. Refuse it typed instead;
-        // `worker-release` falls back to the terminal tail, which is real output that
-        // really crossed the tunnel.
+        // Everything below reads `~/.claude/projects` on *this* machine, and a remote
+        // pane's local working directory is only where `ssh` was launched from — so
+        // resolving one here would either find nothing or, worse, pin some unrelated
+        // local session's transcript and label it this worker's evidence.
+        //
+        // T89 gave remote panes a real answer (`RemoteProviderTranscript`), and
+        // `transcriptPlacement` routes them there before this is ever called. This guard
+        // is the backstop for a direct caller: the local resolver must never be the one
+        // that answers for another machine.
         if RemoteWorkspacePolicy.isRemote(hostId: summary.executionHostId) {
             return .unavailable(reason: "remote_provider_transcript_unsupported")
         }

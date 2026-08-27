@@ -281,6 +281,16 @@ final class RemotePaneReconnectTests: XCTestCase {
         XCTAssertTrue(note.contains("new connection"), note)
         XCTAssertTrue(note.contains("unverified"), note)
 
+        // T89: both generations are named, and they are different. That pair is the
+        // evidence a reader needs — "new connection" is a word, and the labels are the
+        // fact behind it.
+        let previousGeneration = try XCTUnwrap(reconnect["previousGeneration"]?.stringValue)
+        let generation = try XCTUnwrap(reconnect["generation"]?.stringValue)
+        XCTAssertNotEqual(generation, previousGeneration)
+        XCTAssertTrue(note.contains(generation), note)
+        XCTAssertTrue(note.contains(previousGeneration), note)
+        XCTAssertTrue(note.contains("no longer answerable"), note)
+
         // Spec fidelity: same host, same remote directory, same agent, same token —
         // with only the forward's LOCAL end moved to the port this instance holds.
         let spec = try XCTUnwrap(specs.last)
@@ -289,7 +299,14 @@ final class RemotePaneReconnectTests: XCTestCase {
         let argv = try XCTUnwrap(spec.launchArgv)
         XCTAssertTrue(argv.contains("47110:127.0.0.1:55055"), argv.joined(separator: " "))
         XCTAssertFalse(argv.contains("47110:127.0.0.1:9091"))
-        XCTAssertEqual(argv.last, pane.remote?.launchArgv?.last, "the far side is untouched")
+        // The remote command is untouched apart from its generation stamp: the reconnect
+        // runs the recorded launch in the recorded directory, and the only thing it
+        // re-writes there is which span of contact the far-side identity record names.
+        let previousRemoteCommand = try XCTUnwrap(pane.remote?.launchArgv?.last)
+        XCTAssertEqual(argv.last,
+                       RemotePaneGeneration.rewrite(previousRemoteCommand, to: generation),
+                       "the far side is untouched apart from the generation stamp")
+        XCTAssertEqual(RemotePaneGeneration.label(in: try XCTUnwrap(argv.last)), generation)
         XCTAssertEqual(next.registered, [pane.hookToken].compactMap { $0 })
     }
 

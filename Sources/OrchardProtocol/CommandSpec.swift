@@ -394,8 +394,17 @@ public enum OrchardCommands {
                 // T43: `reconnect` addresses a pane whose connection ended, and after a
                 // restart the handle a caller remembers belongs to a previous app run —
                 // the paneKey is the identity that survived.
-                flag("pane", "Durable pane key (terminal reconnect)", "paneKey"),
-            ], positionals: ["list|create|read|send|wait|split|close|rename|reconnect"]),
+                flag("pane", "Durable pane key (terminal reconnect|liveness)", "paneKey"),
+                // T89: pin a liveness question to one span of contact. Asking about a
+                // generation the host no longer holds is refused, never answered from
+                // the process a later connection started.
+                flag("generation", "Pane connection generation to ask about (terminal liveness)", "label"),
+            ], positionals: ["list|create|read|send|wait|split|close|rename|reconnect|liveness"],
+            notes: [
+                "terminal liveness asks a REMOTE pane's own host whether its process is running: live (the host confirmed it), exited (the host confirmed it is gone, including a reused pid), or unverifiable (nobody who can answer was reachable).",
+                "It is the only path entitled to answer live. Loss of contact is unverifiable, never exited.",
+                "A reconnect or respawn mints a new pane generation and re-stamps the host's record; a liveness question naming the old one is refused (superseded) rather than answered about the new process.",
+            ]),
             // T10 embedded browser. Refs (@eN) come from the latest `snapshot` of a
             // page and are invalidated by any navigation (top-level or subframe) —
             // re-snapshot, don't guess. T21 session profiles: `tab profile
@@ -431,10 +440,13 @@ public enum OrchardCommands {
                 flag("user", "Login user", "user"),
                 flag("port", "Port (default 22)", "n"),
                 flag("import", "With no name, list importable ~/.ssh/config hosts; with a name, import it"),
-            ], positionals: ["list|add|check", "name"],
+            ], positionals: ["list|add|check|connect|disconnect|connection", "name"],
                notes: [
                    "host list shows live status (reachable|auth-required|unreachable) and how long ago it was checked, when a remote repo or remote pane exists.",
                    "Unreachable is loss of contact, never evidence that anything on the host stopped. A status change updates host presentation only.",
+                   "host connect opens the durable multiplexed connection and mints a generation (host#sequence.epoch); host disconnect closes it; host connection reports one host's or every host's.",
+                   "A generation names one continuous span of contact. Reopening always mints a new one, and a question asked about an earlier generation is refused (connection_generation_ended) rather than answered from the current connection.",
+                   "host check is deliberately NOT multiplexed: a reachability probe has to be its own connection, or it would only be reporting that the master is still there.",
                ]),
             command("reset", "Reset orchestration state", [flag("all", "Reset all"), flag("tasks", "Reset tasks"), flag("messages", "Reset messages")]),
         ]

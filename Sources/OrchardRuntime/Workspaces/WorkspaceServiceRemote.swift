@@ -50,9 +50,10 @@ public extension WorkspaceService {
     }
 
     func remoteService(for repo: RepoRecord) throws -> RemoteWorktreeService {
-        RemoteWorktreeService(runner: SSHRunner(host: try remoteHost(for: repo),
-                                                runner: hostCommandRunner,
-                                                timeout: remoteCommandTimeout))
+        let record = try remoteHost(for: repo)
+        return RemoteWorktreeService(runner: SSHRunner(
+            host: record, runner: hostCommandRunner, timeout: remoteCommandTimeout,
+            connection: remoteConnections?.connection(for: record)))
     }
 
     // MARK: - Registration
@@ -83,9 +84,9 @@ public extension WorkspaceService {
         }) {
             return existing
         }
-        let service = RemoteWorktreeService(runner: SSHRunner(host: record,
-                                                              runner: hostCommandRunner,
-                                                              timeout: remoteCommandTimeout))
+        let service = RemoteWorktreeService(runner: SSHRunner(
+            host: record, runner: hostCommandRunner, timeout: remoteCommandTimeout,
+            connection: remoteConnections?.connection(for: record)))
         try await mapRemote { try await service.probeRepository(path: normalized) }
         let resolvedBase: String
         if let baseRef, !baseRef.isEmpty {
