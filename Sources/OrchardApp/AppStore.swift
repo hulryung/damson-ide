@@ -78,6 +78,23 @@ final class AppStore: ObservableObject {
 
     /// Currently focused tab group, so split/new-tab commands have a target.
     @Published var focusedGroupID: UUID?
+    /// One line of feedback for an action that refused rather than acted — a split that
+    /// would leave an unusable sliver, say. Shown in the status bar and cleared on its
+    /// own, because an action that silently does nothing reads as a broken button.
+    @Published var transientNotice: String?
+
+    private var noticeClearTask: Task<Void, Never>?
+
+    @MainActor
+    func showNotice(_ text: String, seconds: Double = 6) {
+        transientNotice = text
+        noticeClearTask?.cancel()
+        noticeClearTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            self?.transientNotice = nil
+        }
+    }
 
     /// T23: standardized repo path → hook-server port persisted at keeper handoff.
     /// Filled by `KeeperRestart.prepareBoot` before `restore()` opens projects, so
@@ -1693,9 +1710,100 @@ final class AppStore: ObservableObject {
         focusedGroupID = groupID
     }
 
+    /// ⌘T — a new tab in the group the user is working in. Window tabbing is disabled
+    /// (macOS would otherwise add its own tab bar on top of the workbench's), so this
+    /// is what ⌘T means here: another tab in the tab strip, not another window.
+    func addTabToFocusedGroup(_ kind: TabKind = .terminal) {
+        guard let key = selection,
+              let groupID = focusedGroupID ?? ensureLayout(for: key).firstGroupID() else { return }
+        addTab(kind, to: groupID, key: key)
+    }
+
+    /// Measured size of each rendered pane, reported by the view. The layout model
+    /// carries no geometry, so this is the only place that knows whether a pane has
+    /// room to be halved.
+    private var paneSizes: [UUID: CGSize] = [:]
+
+    func notePaneSize(_ groupID: UUID, _ size: CGSize) {
+        paneSizes[groupID] = size
+    }
+
+    /// Why a split cannot happen, or nil when it can. Refusing beats splitting into
+    /// slivers: nested `HSplitView`s do not honour the per-child minimum, so the panes
+    /// end up narrower than a terminal can render and the text wraps into itself.
+    func splitRefusal(axis: SplitAxis) -> String? {
+        guard let key = selection,
+              let groupID = focusedGroupID ?? layouts[key]?.firstGroupID() else {
+            return "Open a workspace first."
+        }
+        guard let size = paneSizes[groupID] else { return nil }
+        if axis == .horizontal, size.width < Tokens.paneMinWidth * 2 {
+            return "This pane is too narrow to split — close a pane or widen the window."
+        }
+        if axis == .vertical, size.height < Tokens.paneMinHeight * 2 {
+            return "This pane is too short to split — close a pane or make the window taller."
+        }
+        return nil
+    }
+
+    /// ⌘W — close the tab the user is in, the way a terminal app does. Closing the
+    /// window instead is what made ⌘W look like it "jumped to another screen": with
+    /// T51 the app stays alive, so the workbench simply vanished and whatever was
+    /// behind it came forward.
+    func closeFocusedTab() {
+        guard let key = selection, let node = layouts[key] else { return }
+        guard let groupID = focusedGroupID ?? node.firstGroupID(),
+              let tab = node.selectedTab(in: groupID) else {
+            showNotice("Nothing to close here.")
+            return
+        }
+        // More than one tab here: close the tab. The last tab in a split pane means
+        // "close the pane" — that is what ⌘W does in a terminal, and `closeTab` on
+        // its own would have done nothing at all. The last tab of the only pane has
+        // nothing left to close; say so rather than emptying the workbench.
+        if node.selectedTab(in: groupID) != nil, tabCount(in: node, groupID: groupID) > 1 {
+            closeTab(tab.id, in: groupID, key: key)
+            return
+        }
+        guard let replaced = node.removingGroup(groupID), let next = replaced else {
+            showNotice("This is the last pane — ⇧⌘W closes the window.")
+            return
+        }
+        // Release every session in the pane before the group disappears — `closeTab`
+        // already knows how (chat, editor buffer, PTY, remote notes, floating binding),
+        // so reuse it rather than re-deriving the teardown here. It leaves the last tab
+        // in place, which is fine: the group is about to be removed wholesale.
+        if case .group(let doomed)? = findGroup(groupID, in: node) {
+            for tab in doomed.tabs { closeTab(tab.id, in: groupID, key: key) }
+        }
+        layouts[key] = next
+        focusedGroupID = next.firstGroupID()
+    }
+
+    private func tabCount(in node: SplitNode, groupID: UUID) -> Int {
+        switch node {
+        case .group(let g): return g.id == groupID ? g.tabs.count : 0
+        case .split(_, _, let first, let second):
+            return max(tabCount(in: first, groupID: groupID),
+                       tabCount(in: second, groupID: groupID))
+        }
+    }
+
+    private func findGroup(_ groupID: UUID, in node: SplitNode) -> SplitNode? {
+        switch node {
+        case .group(let g): return g.id == groupID ? node : nil
+        case .split(_, _, let first, let second):
+            return findGroup(groupID, in: first) ?? findGroup(groupID, in: second)
+        }
+    }
+
     func splitFocused(axis: SplitAxis) {
         guard let key = selection,
               let groupID = focusedGroupID ?? ensureLayout(for: key).firstGroupID() else { return }
+        if let refusal = splitRefusal(axis: axis) {
+            showNotice(refusal)
+            return
+        }
         updateLayout(key) { node in
             _ = node.splitGroup(groupID, axis: axis)
         }

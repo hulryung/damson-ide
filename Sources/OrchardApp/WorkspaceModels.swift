@@ -203,6 +203,27 @@ indirect enum SplitNode: Identifiable, Hashable {
         }
     }
 
+    /// Remove one group from the tree, collapsing the split that held it so its
+    /// sibling takes the whole space. Returns nil when `groupID` is this whole tree —
+    /// the caller decides what closing the last pane means, because dropping the
+    /// layout entirely is not something this type should choose.
+    func removingGroup(_ groupID: UUID) -> SplitNode?? {
+        switch self {
+        case .group(let g):
+            return g.id == groupID ? .some(nil) : nil
+        case .split(let id, let axis, let first, let second):
+            if let replaced = first.removingGroup(groupID) {
+                return .some(replaced.map { .split(id: id, axis: axis, first: $0, second: second) }
+                             ?? second)
+            }
+            if let replaced = second.removingGroup(groupID) {
+                return .some(replaced.map { .split(id: id, axis: axis, first: first, second: $0) }
+                             ?? first)
+            }
+            return nil
+        }
+    }
+
     func selectedTab(in groupID: UUID) -> WorkbenchTab? {
         switch self {
         case .group(let g) where g.id == groupID:

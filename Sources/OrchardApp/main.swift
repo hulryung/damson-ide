@@ -145,6 +145,8 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     @MainActor @objc func newWorkspace(_ sender: Any?) { store.addProjectViaPanel() }
     @MainActor @objc func openRemote(_ sender: Any?) { store.presentOpenRemote() }
+    @MainActor @objc func newWorkbenchTab(_ sender: Any?) { store.addTabToFocusedGroup() }
+    @MainActor @objc func closeFocusedTab(_ sender: Any?) { store.closeFocusedTab() }
     @MainActor @objc func newWorktree(_ sender: Any?) { store.requestNewWorktree() }
     @MainActor @objc func openJumpPalette(_ sender: Any?) { store.isJumpPaletteOpen = true }
     @MainActor @objc func showTerminalTab(_ sender: Any?) { store.selectKind(.terminal) }
@@ -249,6 +251,9 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         win.tabbingMode = .disallowed
         win.appearance = NSAppearance(named: .darkAqua)
         win.titlebarAppearsTransparent = false
+        // The toolbar's New Worktree "+" was forcing the full-height unified titlebar.
+        // Compact keeps the control and gives back the vertical space it was taking.
+        win.toolbarStyle = .unifiedCompact
         win.isReleasedWhenClosed = false
         persistFrame(win, role: .main)
         self.window = win
@@ -409,6 +414,9 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         mainMenu.addItem(fileItem)
         let fileMenu = NSMenu(title: "File")
         fileItem.submenu = fileMenu
+        let newTab = NSMenuItem(title: "New Tab", action: #selector(newWorkbenchTab(_:)), keyEquivalent: "t")
+        newTab.target = self
+        fileMenu.addItem(newTab)
         let nwt = NSMenuItem(title: "New Worktree…", action: #selector(newWorktree(_:)), keyEquivalent: "n")
         nwt.target = self
         fileMenu.addItem(nwt)
@@ -424,7 +432,15 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         save.target = self
         fileMenu.addItem(save)
         fileMenu.addItem(.separator())
-        fileMenu.addItem(withTitle: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        // ⌘W closes the tab, ⇧⌘W the window — the terminal-app pairing. Closing the
+        // window on ⌘W read as "the app jumped somewhere else": since T51 the process
+        // survives a closed window, so the workbench just disappeared.
+        let closeTab = NSMenuItem(title: "Close Tab", action: #selector(closeFocusedTab(_:)), keyEquivalent: "w")
+        closeTab.target = self
+        fileMenu.addItem(closeTab)
+        let closeWindow = NSMenuItem(title: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        closeWindow.keyEquivalentModifierMask = [.command, .shift]
+        fileMenu.addItem(closeWindow)
 
         let editItem = NSMenuItem()
         mainMenu.addItem(editItem)
@@ -479,10 +495,12 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         viewMenu.addItem(withTitle: "Zoom Out", action: #selector(DamsonSurfaceView.zoomOut(_:)), keyEquivalent: "-")
         viewMenu.addItem(withTitle: "Actual Size", action: #selector(DamsonSurfaceView.resetZoom(_:)), keyEquivalent: "0")
         viewMenu.addItem(.separator())
-        let splitR = NSMenuItem(title: "Split Right", action: #selector(splitRight(_:)), keyEquivalent: "\\")
+        // ⌘D splits side by side and ⇧⌘D splits below — the pairing iTerm2 and Warp
+        // use, so the shortcut a terminal user already has in their fingers works here.
+        let splitR = NSMenuItem(title: "Split Right", action: #selector(splitRight(_:)), keyEquivalent: "d")
         splitR.target = self
         viewMenu.addItem(splitR)
-        let splitD = NSMenuItem(title: "Split Down", action: #selector(splitDown(_:)), keyEquivalent: "\\")
+        let splitD = NSMenuItem(title: "Split Down", action: #selector(splitDown(_:)), keyEquivalent: "d")
         splitD.keyEquivalentModifierMask = [.command, .shift]
         splitD.target = self
         viewMenu.addItem(splitD)

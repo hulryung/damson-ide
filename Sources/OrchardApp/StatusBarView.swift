@@ -16,6 +16,16 @@ struct StatusBarView: View {
             AgentBucketStatusChip(summary: bucketSummary, counts: bucketCounts) {
                 store.showDashboard?()
             }
+            if let notice = store.transientNotice {
+                // An action that refuses says why here rather than doing nothing.
+                Text(notice)
+                    .font(Tokens.fontMeta)
+                    .foregroundStyle(Tokens.textSecondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .help(notice)
+                    .transition(.opacity)
+            }
             Spacer(minLength: 8)
             RuntimeStatusChip(presence: store.runtimePresence)
             PortsStatusChip(ports: store.portSnapshot.ports, isPresented: $showingPorts)

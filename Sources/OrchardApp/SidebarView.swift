@@ -136,7 +136,9 @@ struct SidebarView: View {
         .foregroundStyle(Tokens.textSecondary)
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
-        .background(RoundedRectangle(cornerRadius: 4).fill(Tokens.rowHover))
+        // Flat like the rows below it: the pill read as a separate control layer on
+        // top of a list that has none.
+        .background(Tokens.rowHover)
     }
 
     private var cardList: some View {

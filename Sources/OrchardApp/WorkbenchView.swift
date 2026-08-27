@@ -192,6 +192,15 @@ struct TabGroupPane: View {
             tabBody
         }
         .contentShape(Rectangle())
+        // A split halves whichever pane has focus, so `splitFocused` needs to know how
+        // big that pane actually is — the model has no geometry. Reporting it here is
+        // what lets a split that would leave an unusable sliver be refused instead.
+        .background(
+            GeometryReader { proxy in
+                Color.clear
+                    .onAppear { store.notePaneSize(group.id, proxy.size) }
+                    .onChange(of: proxy.size) { store.notePaneSize(group.id, $0) }
+            })
         .onTapGesture { store.focusedGroupID = group.id }
     }
 
@@ -331,7 +340,7 @@ struct TabChip: View {
                             .monospacedDigit()
                             .padding(.horizontal, 4)
                             .padding(.vertical, 1)
-                            .background(Capsule().fill(Tokens.rowHover))
+                            .background(RoundedRectangle(cornerRadius: 2).fill(Tokens.rowHover))
                     }
                 }
             }

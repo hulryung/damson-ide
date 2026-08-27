@@ -27,7 +27,7 @@ struct HostChip: View {
                     .font(Tokens.fontPill)
                     .padding(.horizontal, compact ? 4 : 5)
                     .padding(.vertical, 1)
-                    .background(Capsule().fill(Tokens.rowHover))
+                    .background(RoundedRectangle(cornerRadius: 2).fill(Tokens.rowHover))
                 if let liveness {
                     Text(compact
                          ? HostLivenessPresentation.chipStatusLine(liveness)
