@@ -204,14 +204,18 @@ struct TabGroupPane: View {
         .onTapGesture { store.focusedGroupID = group.id }
     }
 
+    /// Tabs are cells in a rail, not chips on a bar: no gap between them, no
+    /// rounding, and a hairline where one ends and the next begins. The strip is
+    /// a fixed height so it does not breathe when a tab picks up a badge.
     private var tabStrip: some View {
-        HStack(spacing: 2) {
-            ForEach(group.tabs) { tab in
+        HStack(spacing: 0) {
+            ForEach(Array(group.tabs.enumerated()), id: \.element.id) { index, tab in
                 let reason = store.unsupportedReason(tab.kind, for: key)
                 TabChip(
                     tab: tab,
                     isSelected: tab.id == group.selectedID,
                     badge: badge(for: tab),
+                    hasTabToRight: index < group.tabs.count - 1,
                     onToggleViewMode: tab.isAgentTab
                         ? { store.toggleViewMode(tab.id, in: group.id, key: key) }
                         : nil
@@ -237,7 +241,11 @@ struct TabGroupPane: View {
                     Button("Close Tab") { store.closeTab(tab.id, in: group.id, key: key) }
                 }
             }
-            Spacer(minLength: 4)
+            // Closes the run of cells. The last tab drops its own divider so the
+            // strip and the tab do not stack two hairlines into one heavy edge.
+            Rectangle()
+                .fill(group.tabs.isEmpty ? .clear : Tokens.border)
+                .frame(width: group.tabs.isEmpty ? 0 : 1)
             Menu {
                 ForEach(TabKind.allCases) { kind in
                     let reason = store.unsupportedReason(kind, for: key)
@@ -261,13 +269,17 @@ struct TabGroupPane: View {
                 Button("Split Down") { store.split(group.id, key: key, axis: .vertical) }
             } label: {
                 Image(systemName: "plus")
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
             }
             .menuStyle(.borderlessButton)
             .frame(width: 22)
+            .padding(.leading, 8)
+            // The "+" follows the tabs rather than hiding at the far right: it
+            // adds to that run, so it belongs next to its end.
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
+        .padding(.trailing, 8)
+        .frame(height: Tokens.tabStripHeight)
         .background(Tokens.surface)
     }
 
@@ -314,8 +326,12 @@ struct TabChip: View {
     let tab: WorkbenchTab
     let isSelected: Bool
     let badge: String?
+    /// Whether to draw the divider that separates this cell from the next. The
+    /// last tab leaves it to the strip so the run ends on a single hairline.
+    var hasTabToRight: Bool = false
     let onToggleViewMode: (() -> Void)?
     let select: () -> Void
+    @State private var isHovering = false
 
     var body: some View {
         HStack(spacing: 2) {
@@ -324,7 +340,9 @@ struct TabChip: View {
                     Image(systemName: tab.kind.symbol)
                         .font(.system(size: 10))
                     Text(tab.title)
-                        .font(Tokens.fontRow)
+                        .font(Tokens.fontTab)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                     if tab.isDirty {
                         Circle()
                             .fill(Color.accentColor)
@@ -343,6 +361,11 @@ struct TabChip: View {
                             .background(RoundedRectangle(cornerRadius: 2).fill(Tokens.rowHover))
                     }
                 }
+                // The cell is the target, not the label inside it: a 32pt-tall
+                // tab whose only hit area is its 17pt of text is a miss waiting
+                // to happen.
+                .frame(maxHeight: .infinity)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             if let onToggleViewMode {
@@ -359,17 +382,29 @@ struct TabChip: View {
                       : "Show chat (⌘⇧J)")
             }
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 4)
-        .background(
-            RoundedRectangle(cornerRadius: Tokens.radius)
-                .fill(isSelected ? Tokens.background : .clear)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: Tokens.radius)
-                .strokeBorder(isSelected ? Tokens.border : .clear, lineWidth: 1)
-        )
-        .foregroundStyle(isSelected ? Tokens.text : Tokens.textSecondary)
+        .padding(.horizontal, 8)
+        .frame(maxHeight: .infinity)
+        // A neutral lift, not an accent one. The tab already carries a kind
+        // glyph, a host chip and a count; tinting the whole cell blue would put
+        // a colour under all three that means nothing.
+        .background(isSelected ? Tokens.tabActiveFill : Color.clear)
+        // The marker is a bar on the edge facing the pane the tab owns. The
+        // fill alone is too soft to find at a glance in a saturated strip.
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(isSelected ? Tokens.selectionEdge : .clear)
+                .frame(height: Tokens.selectionBarWidth)
+        }
+        .overlay(alignment: .trailing) {
+            Rectangle()
+                .fill(hasTabToRight ? Tokens.border : .clear)
+                .frame(width: 1)
+        }
+        // Hover moves the title only. A hover fill on a cell that already has a
+        // selected fill gives the strip two competing "this one" signals.
+        .foregroundStyle(isSelected || isHovering ? Tokens.text : Tokens.textSecondary)
+        .contentShape(Rectangle())
+        .onHover { isHovering = $0 }
     }
 }
 

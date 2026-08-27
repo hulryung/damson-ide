@@ -220,21 +220,27 @@ struct WorkspaceStatusAppearance: Identifiable, Hashable {
 }
 
 /// Status slot on a workspace card: the user-set `workspaceStatus`, not live agent state.
+///
+/// The glyph is the leftmost thing on a card and the only one carrying colour by
+/// default, so it is sized to be readable rather than to disappear: 11pt in a
+/// 14pt lane. The lane width is load-bearing — the card's meta row indents by
+/// 20 (lane + 6pt gap) to sit under the title — so growing the glyph must not
+/// grow the frame.
 struct WorkspaceStatusSlot: View {
     let appearance: WorkspaceStatusAppearance
-    var size: CGFloat = 9
+    var size: CGFloat = 11
 
-    init(appearance: WorkspaceStatusAppearance, size: CGFloat = 9) {
+    init(appearance: WorkspaceStatusAppearance, size: CGFloat = 11) {
         self.appearance = appearance
         self.size = size
     }
 
-    init(status: WorkspaceStatus, size: CGFloat = 9) {
+    init(status: WorkspaceStatus, size: CGFloat = 11) {
         self.appearance = WorkspaceStatusAppearance(status: status)
         self.size = size
     }
 
-    init(definition: WorkspaceStatusDefinition, size: CGFloat = 9) {
+    init(definition: WorkspaceStatusDefinition, size: CGFloat = 11) {
         self.appearance = WorkspaceStatusAppearance(definition: definition)
         self.size = size
     }

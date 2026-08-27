@@ -50,8 +50,8 @@ struct SidebarView: View {
             .controlSize(.small)
             .help("Open a project or a remote repo")
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 8)
+        .frame(height: 32)
     }
 
     private var filterBar: some View {
@@ -83,46 +83,77 @@ struct SidebarView: View {
             }
             .menuStyle(.borderlessButton)
 
-            Button {
-                store.showArchived.toggle()
-            } label: {
-                Image(systemName: store.showArchived ? "archivebox.fill" : "archivebox")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(store.showArchived ? Color.accentColor : Tokens.textSecondary)
-            }
-            .buttonStyle(.borderless)
-            .help(store.showArchived
-                  ? "Showing archived workspaces. Click to hide them."
-                  : "Archived workspaces are hidden. Click to show them.")
+            toggleGlyph(
+                isOn: store.showArchived,
+                symbol: store.showArchived ? "archivebox.fill" : "archivebox",
+                help: store.showArchived
+                    ? "Showing archived workspaces. Click to hide them."
+                    : "Archived workspaces are hidden. Click to show them."
+            ) { store.showArchived.toggle() }
 
-            Button {
-                store.groupByStatus.toggle()
-            } label: {
-                Image(systemName: store.groupByStatus
-                      ? "square.grid.3x1.fill"
-                      : "square.grid.3x1")
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(store.groupByStatus ? Color.accentColor : Tokens.textSecondary)
-            }
-            .buttonStyle(.borderless)
-            .help(store.groupByStatus
-                  ? "Grouped by board status. Click to group by repo."
-                  : "Group cards by board status")
+            toggleGlyph(
+                isOn: store.groupByStatus,
+                symbol: store.groupByStatus ? "square.grid.3x1.fill" : "square.grid.3x1",
+                help: store.groupByStatus
+                    ? "Grouped by board status. Click to group by repo."
+                    : "Group cards by board status"
+            ) { store.groupByStatus.toggle() }
 
             Spacer(minLength: 2)
 
-            Picker("", selection: $store.ordering) {
-                ForEach(CardOrdering.allCases) { order in
-                    Text(order.label).tag(order)
-                }
-            }
-            .pickerStyle(.segmented)
-            .controlSize(.mini)
-            .frame(maxWidth: 132)
-            .help("Card order: manual (sortOrder) or recent (lastActivityAt)")
+            orderingToggle
         }
         .padding(.horizontal, 8)
         .padding(.bottom, 6)
+    }
+
+    /// An on/off glyph in the filter bar. "On" is the same neutral wash a
+    /// selected row gets, not an accent tint: these toggles say what the list is
+    /// showing, and the accent in this column is reserved for live agent state.
+    private func toggleGlyph(
+        isOn: Bool, symbol: String, help: String, action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(isOn ? Tokens.text : Tokens.textSecondary)
+                .frame(width: 20, height: 18)
+                .background(isOn ? Tokens.selectionFill : .clear)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(help)
+    }
+
+    /// A flat two-cell strip rather than an AppKit segmented control. The stock
+    /// control draws a capsule with a floating knob — the one shape this column
+    /// does not otherwise contain, which made it read as a control layer sitting
+    /// on top of a list that has none.
+    private var orderingToggle: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(CardOrdering.allCases.enumerated()), id: \.element) { index, order in
+                let isOn = store.ordering == order
+                Button { store.ordering = order } label: {
+                    Text(order.label)
+                        .font(.system(size: 10, weight: isOn ? .semibold : .regular))
+                        .foregroundStyle(isOn ? Tokens.text : Tokens.textSecondary)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 18)
+                        .background(isOn ? Tokens.selectionFill : .clear)
+                        .overlay(alignment: .leading) {
+                            Rectangle()
+                                .fill(index > 0 ? Tokens.border : .clear)
+                                .frame(width: 1)
+                        }
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .frame(width: 112)
+        .overlay(Rectangle().strokeBorder(Tokens.border, lineWidth: 1))
+        .help("Card order: manual (sortOrder) or recent (lastActivityAt)")
     }
 
     private func filterChip(_ title: String) -> some View {
@@ -143,7 +174,10 @@ struct SidebarView: View {
 
     private var cardList: some View {
         ScrollView {
-            LazyVStack(alignment: .leading, spacing: 2, pinnedViews: [.sectionHeaders]) {
+            // No gap between cards and no rules between them: each row's own
+            // padding is the whole rhythm, so a run of cards reads as one list
+            // rather than a stack of tiles.
+            LazyVStack(alignment: .leading, spacing: 0, pinnedViews: [.sectionHeaders]) {
                 if store.projects.isEmpty {
                     emptyState
                 } else if store.groupByStatus {
@@ -178,7 +212,7 @@ struct SidebarView: View {
                     }
                 }
             }
-            .padding(.vertical, 6)
+            .padding(.bottom, 6)
         }
         .frame(maxHeight: .infinity)
     }
@@ -257,6 +291,57 @@ struct SidebarView: View {
     }
 }
 
+/// A selected row in the workspace list. The wash is neutral — the accent is
+/// spoken for by live agent state, and a blue field under a status glyph and a
+/// git count makes the row argue with its own contents — so the marker is a bar
+/// on the leading edge, the same device the workbench puts on the bottom edge of
+/// an active tab. A full-bleed row has no outline to brighten the way a floating
+/// card does, and the bar reads at a glance where a wash alone does not.
+fileprivate struct WorkspaceRowSurface: ViewModifier {
+    var isSelected: Bool
+    var isHovering: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .background(isSelected
+                        ? Tokens.selectionFill
+                        : (isHovering ? Tokens.rowHover : Color.clear))
+            .overlay(alignment: .leading) {
+                Rectangle()
+                    .fill(isSelected ? Tokens.selectionEdge : .clear)
+                    .frame(width: Tokens.selectionBarWidth)
+            }
+    }
+}
+
+extension View {
+    fileprivate func workspaceRowSurface(isSelected: Bool, isHovering: Bool) -> some View {
+        modifier(WorkspaceRowSurface(isSelected: isSelected, isHovering: isHovering))
+    }
+}
+
+/// Section headers are titles, not captions: same size as the card titles under
+/// them, told apart by weight. Sized down and greyed out — the usual sidebar
+/// caption move — the only label saying which repo a run of cards belongs to
+/// becomes the hardest thing in the column to read.
+fileprivate struct SectionHeaderChrome: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .padding(.leading, 10)
+            .padding(.trailing, 8)
+            .frame(height: Tokens.sectionHeaderHeight)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // Opaque: these pin, and cards scroll underneath them.
+            .background(Tokens.sidebar)
+            .padding(.top, 4)
+            .background(Tokens.sidebar)
+    }
+}
+
+extension View {
+    fileprivate func sectionHeaderChrome() -> some View { modifier(SectionHeaderChrome()) }
+}
+
 struct RepoHeader: View {
     @EnvironmentObject var store: AppStore
     @ObservedObject var project: ProjectSession
@@ -264,11 +349,12 @@ struct RepoHeader: View {
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "shippingbox.fill")
-                .font(.system(size: 10))
+                .font(.system(size: 11))
                 .foregroundStyle(Tokens.textTertiary)
+                .frame(width: 16)
             Text(project.name)
-                .font(Tokens.fontHeader)
-                .foregroundStyle(Tokens.textSecondary)
+                .font(Tokens.fontSection)
+                .foregroundStyle(Tokens.text)
                 .lineLimit(1)
             HostChip(hostId: project.hostId)
             Spacer(minLength: 4)
@@ -277,10 +363,7 @@ struct RepoHeader: View {
                 .foregroundStyle(Tokens.textTertiary)
                 .monospacedDigit()
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 5)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Tokens.sidebar)
+        .sectionHeaderChrome()
         .contentShape(Rectangle())
         .onTapGesture { store.selectedProjectID = project.id }
         .help(project.repo.path)
@@ -317,9 +400,10 @@ struct StatusGroupHeader: View {
     var body: some View {
         HStack(spacing: 6) {
             WorkspaceStatusSlot(definition: definition)
+                .frame(width: 16)
             Text(definition.label)
-                .font(Tokens.fontHeader)
-                .foregroundStyle(Tokens.textSecondary)
+                .font(Tokens.fontSection)
+                .foregroundStyle(Tokens.text)
                 .lineLimit(1)
             Spacer(minLength: 4)
             Text("\(count)")
@@ -327,10 +411,7 @@ struct StatusGroupHeader: View {
                 .foregroundStyle(Tokens.textTertiary)
                 .monospacedDigit()
         }
-        .padding(.horizontal, 6)
-        .padding(.vertical, 5)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Tokens.sidebar)
+        .sectionHeaderChrome()
     }
 }
 
@@ -364,7 +445,7 @@ struct ProjectRootRow: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(isSelected ? Tokens.rowSelected : (isHovering ? Tokens.rowHover : .clear))
+        .workspaceRowSurface(isSelected: isSelected, isHovering: isHovering)
         .contentShape(Rectangle())
         .onTapGesture { store.selectProjectRoot(project) }
         .onHover { isHovering = $0 }
@@ -421,7 +502,7 @@ struct WorkspaceCard: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(isSelected ? Tokens.rowSelected : (isHovering ? Tokens.rowHover : .clear))
+        .workspaceRowSurface(isSelected: isSelected, isHovering: isHovering)
         .contentShape(Rectangle())
         .onTapGesture { store.select(record, in: project) }
         .onHover { isHovering = $0 }
