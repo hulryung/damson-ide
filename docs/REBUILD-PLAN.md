@@ -1396,6 +1396,52 @@ OrchardCore/Worktrees, Sources/OrchardApp (AppStore, ProjectSession, FileExplore
 matching tests, docs/reports/t87-switch-cache.md. Does not touch remote transports,
 Automations, or Conflicts/** beyond what the summary path needs.
 
+### Wave 26 (T88–T90) — close the Orca gap
+
+After wave 25 the switch is fast and the parity checklist (inventory §8) is done. What
+Orca still has that Orchard does not falls into three dispatchable pieces. The fourth —
+a human driving four GUI surfaces — cannot be dispatched and stays with the user.
+
+**T88 — Checks: CI and pull-request state on the card and in the sidebar.** Inventory §6
+lists `pr-checks` and `checks` as right-sidebar sections and check-details as a center
+tab; §2 gives cards typed `issue`, `linear-issue`, `jira-issue`, `pr` and `ci` properties.
+Orchard stores `linkedIssue`/`linkedPR` as bare strings and shows no CI state at all.
+Build it against GitHub first (the forge this repo uses), via the `gh` CLI when it is
+present and authenticated: typed link fields on worktree meta, a checks section listing
+the PR's checks with their conclusions, and a check-details tab for one run's output.
+Every unavailable path must be typed and visible — no `gh`, not authenticated, no
+remote, no PR for this branch, API error — never a blank panel and never a guessed
+status. Nothing may block the main thread or a workspace switch (wave 25's rules hold:
+no network or subprocess in a view body, results cached with honest invalidation).
+Owns: OrchardCore/Worktrees meta link fields, a new OrchardRuntime/Checks service +
+verbs, Sources/OrchardApp/Checks/**, sidebar section wiring, tests,
+docs/reports/t88-checks.md. Does not touch Git*/GitFactsCache internals, Automations,
+Conflicts/**, or remote transports.
+
+**T89 — Finish the remote transport.** Four leftovers, all named in
+docs/design/remote-hosts.md: a durable connection with a **generation counter** so a
+reconnect can never be mistaken for continuity; connection multiplexing (today every
+command is its own `ssh`); a producer for `HostLiveness.live` (presentation-only today,
+with no path that ever sets it); and remote provider transcripts, which stay refused
+typed even where the file is local — T85's transport is the way to close that. Keep the
+verdict discipline: loss of contact is `unverifiable`, never `exited`, and a
+generation-fenced reconnect must refuse to answer for the old generation rather than
+guess. Verify live against the coordinator's loopback host. Owns:
+OrchardRuntime/Hosts/**, OrchardTerminals remote paths, docs/design/remote-hosts.md,
+tests, docs/reports/t89-remote-durability.md. Does not touch Checks/**, Files/**, or
+OrchardApp.
+
+**T90 — What `activity`, `tasks` and `space` actually are.** Inventory §6 names three
+Orca top-level views we never specified and never built. `~/dev/orca` is on this machine,
+read-only. Read it, write what each view *is* — its data, its actions, what it is for
+that the workbench and the orchestration view do not already cover — into
+docs/research/orca-views.md, then implement the one with the highest value for this app
+and say plainly why the other two were left (including "this is redundant with what we
+have", if that is the honest answer). Do not build all three on speculation. Owns:
+docs/research/orca-views.md, whichever view you build under Sources/OrchardApp/**, its
+runtime projection if it needs one, tests, docs/reports/t90-views.md. Does not touch
+Checks/**, Hosts/**, Git*, or Automations.
+
 ### Standing backlog (reconciled 2026-08-26)
 
 Everything the old wave-13+ list carried has since been closed and is recorded in its
