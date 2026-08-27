@@ -18,6 +18,10 @@ struct RootView: View {
             } detail: {
                 WorkbenchView()
                     .rightSidebar()
+                    // Same reason the sidebar carries this: a bottom safe-area inset
+                    // does not reach an AppKit-backed split column, so the terminal
+                    // surface drew its last rows underneath the status bar.
+                    .padding(.bottom, Tokens.statusBarHeight)
                     .toolbar {
                         // NavigationSplitView supplies its own sidebar toggle on
                         // macOS 13+; a custom one shows as a duplicate icon.
