@@ -41,36 +41,84 @@ ORCHARD_BENCH_REPO=~/dev/CAN-debugger-hw swift test --filter FileWatcherBaseline
 
 ### Against the live app
 
-**Pending.** These rows need a human to click six workspace selections in the running app
-with `ORCHARD_TRACE_SWITCH=1`; accessibility is refused machine-wide on this box, so neither
-the coordinator nor I can drive the UI, and synthetic clicks do not reach SwiftUI's gesture
-handlers in any case. The coordinator has the build and the ask is out. They are left blank
-rather than guessed.
+Measured by the coordinator on the running app, bundle binary launched directly with
+`ORCHARD_TRACE_SWITCH=1 ORCHARD_GIT_TRACE=1` (the trampoline relaunches through
+`/usr/bin/open`, which drops env and stdio).
 
-| Phase (live app, cc-rate-widget → CAN-debugger-hw) | Before T87 | First visit | Revisit |
+**Launch path**, three registered repos, verbatim from the log for `d41f12e`:
+
+| Phase | Before T87 | After |
+|---|---|---|
+| `explorer.reload` | 0.3 ms | **0.4 ms**, reads=0 |
+| `explorer.watch` | *never measured — 229 ms of main-actor walk* | **0.5 ms**, reads=0 |
+| `materializeDamsonSession` | 0.0 ms | **0.0 ms**, reads=0 |
+| `refreshCheckout` ×3 | 209 ms | **87.9 / 88.1 / 88.1 ms** |
+| `refreshConflicts` | 445 ms | **420.8 ms** ← see below |
+
+**Switch path — PENDING.** The revisit rows are the acceptance case and they are blank
+because nobody could click. The display was locked for this session: `screencapture` returns
+black, System Events cannot enumerate Orchard's windows, and accessibility is refused
+machine-wide (Finder too), so neither the coordinator nor I could drive the UI — and
+synthetic clicks do not reach SwiftUI's gesture handlers in this app in any case. The
+instrumentation is in `main` and env-gated, so these fill themselves the next time a person
+switches workspaces:
+
+```
+ORCHARD_TRACE_SWITCH=1 ~/Library/Caches/orchard/Orchard.app/Contents/MacOS/Orchard 2>trace.log
+```
+then: select cc-rate-widget, wait ~2 s (cold) · select CAN-debugger-hw, wait ~2 s (cold) ·
+alternate between the two four more times, ~1 s each (the revisit rows).
+
+| Phase (cc-rate-widget → CAN-debugger-hw) | Before T87 | First visit | Revisit |
 |---|---|---|---|
-| `select(sync)` | — | | |
+| `select(sync)` | — | | **expect 0.0 ms, reads=0** |
 | `materializeDamsonSession` | 0.0 ms | | |
 | `explorer.reload` | 0.3 ms | | |
-| `explorer.watch` | *never measured* | | |
-| `refreshCheckout` | 209 ms | | |
-| `refreshConflicts` | 445 ms | | |
-| readings caused by the switch | 2 (5 processes) | | |
+| `explorer.watch` | 229 ms (unmeasured) | | |
+| `refreshCheckout` | 209 ms | | **expect reads=0** |
+| `refreshConflicts` | 445 ms | | **expect reads=0** |
 
 One trace line, one env var:
 
 ```
-ORCHARD_TRACE_SWITCH=1 ~/Library/Caches/orchard/Orchard.app/Contents/MacOS/Orchard 2>trace.log
-…
 ORCHARD_TRACE refreshConflicts 0.1 ms, reads=0, git=0 (process-wide)
 ```
 
-`reads=` is the number the acceptance turns on and the only one that is *attributable*: it
-counts fresh readings **this phase caused**, from the cache that owns them, and one reading
-is exactly three git processes. `git=` is process-wide and therefore noisy — the first live
-trace showed a launch-path `refreshConflicts` at 33 spawns while running none of its own,
-because the startup fan-out over every worktree in every repo landed inside its window.
-That reading was the counter, not the phase.
+`reads=` is the number the acceptance turns on, and it is bound as a **task local around the
+phase body**, so it counts only the readings that phase's own calls waited on. One reading is
+exactly three git processes. `git=` is process-wide and therefore noisy — at launch the
+fan-out over every worktree in every repo lands inside whatever phase window happens to be
+open.
+
+#### The launch-path `refreshConflicts`, which the first trace got wrong twice
+
+The first live trace read `refreshConflicts 413 ms, 33 git`, and the second `420.8 ms,
+reads=4, git=33`. The coordinator was right to refuse both as a baseline. Two separate
+things were wrong, and both are fixed:
+
+1. **`reads=4` was the counter, not the phase.** The first version of `reads=` sampled the
+   cache's process-wide compute count either side of the phase, so the three `refreshCheckout`
+   readings the launch fires concurrently were attributed to whichever window was open.
+   `refreshConflicts` runs **one** reading. It is now counted with a task local bound around
+   the phase body, which only that phase's own calls can reach —
+   `testTheReadTallyCountsOnlyItsOwnCallsReadings` runs two concurrent readings from a
+   `Task.detached` (which does not inherit task locals, which is what makes them somebody
+   else's) and asserts the phase still reports 1 while the cache really did three.
+
+2. **The 420 ms was one reading queued at the wrong priority.** `refreshConflicts` asks for
+   the selected workspace — which at launch is the same worktree `refreshCheckout` already
+   asked for, in the background, a moment earlier. Coalescing onto that reading is right; the
+   bug was inheriting its *queue position*, so the workspace the user is looking at waited
+   behind the whole fan-out it happened to be part of. A foreground request now **promotes**
+   the queued reading (`ReadScheduler.Ticket`), and promotion is a no-op once the work has
+   started — a git process is not interruptible, and pretending otherwise would just
+   double-run it. With a synthetic 20-deep background fan-out at concurrency 1, the promoted
+   selection finishes in 719 ms while the rest of the fan-out takes another 4276 ms
+   (`testASelectionPromotesAReadingAlreadyQueuedInTheBackground`).
+
+The `87.9 / 88.1 / 88.1 ms` `refreshCheckout` rows are the three background readings racing
+each other at launch, down from 172 ms before the priority change and 209 ms before T87. They
+are launch-path, not switch-path: nothing is on screen waiting for them.
 
 ## What changed
 
@@ -186,6 +234,13 @@ so the wait is bounded by one reading rather than by the backlog. Measured with 
 533 ms behind the backlog instead of scaling with it
 (`testAForegroundReadingOvertakesABacklogOfBackgroundOnes`).
 
+Priority alone was not enough, and the second live trace is what showed it. A reading the
+background fan-out has **already started asking for** is coalesced onto rather than
+duplicated — which is right — but it was also inheriting that reading's queue position. So
+the selected workspace could still wait behind the fan-out, by being part of it. A foreground
+request now promotes the queued ticket out of the background queue. That is the whole of the
+launch-path `refreshConflicts` 420 ms.
+
 ### 5. The explorer's watcher was walking the whole workspace on the main actor
 
 Not in anyone's trace, and the largest single number in this task.
@@ -297,7 +352,10 @@ past the budget is flagged rather than called empty.
 git at all while still reporting both branches and the conflict summary; a first visit has
 nothing cached to serve.
 
-`GitFactsUrgencyTests` (1) — a selection does not wait behind a 24-deep background backlog.
+`GitFactsUrgencyTests` (3) — a selection does not wait behind a 24-deep background backlog;
+a reading already queued in the background is promoted when a selection asks for it; the
+trace's read tally counts only the readings its own phase waited on, with two other readings
+running concurrently.
 
 `GitStatusPorcelainParseTests` (+2) — unmerged records carry path (spaces included) and code;
 a malformed one is skipped rather than turned into a conflict on a path nobody named.
@@ -305,8 +363,8 @@ a malformed one is skipped rather than turned into a conflict on a path nobody n
 `FileWatcherTests` (+2) — `start` does not walk on the caller's thread; the first reconcile
 does not report the existing workspace as freshly created.
 
-`swift build && swift test` (1323 tests, 4 skipped, 0 failures) and `scripts/e2e-headless.sh`
-both pass. The three skips are the env-gated benches.
+`swift build && swift test` (1325 tests, 4 skipped, 0 failures) and `scripts/e2e-headless.sh`
+both pass. Three of the four skips are the env-gated benches.
 
 ## Known limits, stated rather than hidden
 

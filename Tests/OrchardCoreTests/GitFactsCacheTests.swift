@@ -695,6 +695,89 @@ final class GitFactsUrgencyTests: XCTestCase {
         try? FileManager.default.removeItem(at: tmp)
     }
 
+    /// A reading the sidebar's background fan-out already started, then asked for by a
+    /// selection, has to change queues. Otherwise the workspace the user just picked waits
+    /// behind the fan-out it happened to be part of — which is what a 420 ms launch-path
+    /// `refreshConflicts` was: one reading, queued behind everything, at background
+    /// priority, because `refreshCheckout` had asked for the same worktree first.
+    func testASelectionPromotesAReadingAlreadyQueuedInTheBackground() async throws {
+        let slowGit = tmp.appendingPathComponent("slow-git")
+        try "#!/bin/sh\nsleep 0.05\nexit 0\n".write(to: slowGit, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                              ofItemAtPath: slowGit.path)
+        let cache = GitFactsCache(service: GitService(git: GitRunner(gitPath: slowGit.path)),
+                                  concurrency: 1)
+        defer { cache.reset() }
+
+        var roots: [URL] = []
+        for index in 0..<20 {
+            let dir = tmp.appendingPathComponent("q-\(index)")
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            roots.append(dir)
+        }
+        // Every worktree asks in the background, exactly as a restore does.
+        let fanOut = Task {
+            await withTaskGroup(of: Void.self) { group in
+                for root in roots {
+                    group.addTask { _ = await cache.facts(worktree: root, baseRef: "HEAD") }
+                }
+            }
+        }
+        try? await Task.sleep(nanoseconds: 60_000_000)
+
+        // …and then the user selects the last one, whose reading is already queued.
+        let start = DispatchTime.now().uptimeNanoseconds
+        _ = await cache.facts(worktree: roots[19], baseRef: "HEAD", urgency: .foreground)
+        let promoted = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000
+        let whole = DispatchTime.now().uptimeNanoseconds
+        await fanOut.value
+        let remainder = Double(DispatchTime.now().uptimeNanoseconds - whole) / 1_000_000
+
+        print("ORCHARD_BENCH promotion: selected \(String(format: "%.0f", promoted)) ms, "
+              + "rest of the fan-out \(String(format: "%.0f", remainder)) ms")
+        XCTAssertLessThan(promoted, remainder,
+                          "the selected workspace finished after the fan-out it was queued in")
+    }
+
+    /// The trace's `reads=` has to be the readings *this phase* waited on. A process-wide
+    /// counter reported four for a `refreshConflicts` running one, because the launch
+    /// fan-out landed inside its window.
+    func testTheReadTallyCountsOnlyItsOwnCallsReadings() async throws {
+        let slowGit = tmp.appendingPathComponent("slow-git-tally")
+        try "#!/bin/sh\nsleep 0.05\nexit 0\n".write(to: slowGit, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755],
+                                              ofItemAtPath: slowGit.path)
+        let cache = GitFactsCache(service: GitService(git: GitRunner(gitPath: slowGit.path)),
+                                  concurrency: 4)
+        defer { cache.reset() }
+        for name in ["mine", "theirs-a", "theirs-b"] {
+            try FileManager.default.createDirectory(at: tmp.appendingPathComponent(name),
+                                                    withIntermediateDirectories: true)
+        }
+
+        // Somebody else's readings, running concurrently and outside the binding —
+        // `Task.detached` does not inherit task locals, which is what makes them somebody
+        // else's.
+        let elsewhere = Task.detached {
+            await withTaskGroup(of: Void.self) { group in
+                for name in ["theirs-a", "theirs-b"] {
+                    group.addTask {
+                        _ = await cache.facts(worktree: self.tmp.appendingPathComponent(name),
+                                              baseRef: "HEAD")
+                    }
+                }
+            }
+        }
+        let tally = GitFactsCache.ReadTally()
+        await GitFactsCache.$tally.withValue(tally) {
+            _ = await cache.facts(worktree: tmp.appendingPathComponent("mine"), baseRef: "HEAD")
+        }
+        await elsewhere.value
+
+        XCTAssertEqual(tally.count, 1, "the phase caused one reading, whatever else was running")
+        XCTAssertEqual(cache.snapshotStats().computes, 3, "three readings really did happen")
+    }
+
     func testAForegroundReadingOvertakesABacklogOfBackgroundOnes() async throws {
         // A stand-in for git that costs a fixed 60 ms, so the ordering is what is measured
         // rather than how big each repo happens to be.

@@ -211,10 +211,10 @@ final class ProjectSession: ObservableObject, Identifiable {
     /// whatever status is already published; this replaces it when the answer lands.
     func refreshCheckout(urgency: GitFactsCache.Urgency = .background) async {
         guard !isRemote else { return }
-        let mark = AppStore.traceBegin()
-        defer { AppStore.traceEnd("refreshCheckout", mark) }
-        if applyCachedCheckout() { return }
-        apply(await worktrees.primaryCheckoutFacts(urgency: urgency))
+        await AppStore.traceAsync("refreshCheckout") {
+            if applyCachedCheckout() { return }
+            apply(await worktrees.primaryCheckoutFacts(urgency: urgency))
+        }
     }
 
     /// Publish the primary checkout's cached reading without running git or suspending.

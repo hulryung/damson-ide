@@ -351,14 +351,14 @@ private final class FileExplorerModel: ObservableObject {
         self.root = root
         self.files = files
         reload()
-        let mark = AppStore.traceBegin()
-        startWatching()
-        AppStore.traceEnd("explorer.watch", mark)
+        AppStore.trace("explorer.watch") { startWatching() }
     }
 
     func reload() {
-        let mark = AppStore.traceBegin()
-        defer { AppStore.traceEnd("explorer.reload", mark) }
+        AppStore.trace("explorer.reload") { reloadBody() }
+    }
+
+    private func reloadBody() {
         children = [:]
         expanded = []
         error = nil
