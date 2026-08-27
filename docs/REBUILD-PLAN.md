@@ -1427,7 +1427,41 @@ OrchardCore/Worktrees, Sources/OrchardApp (AppStore, ProjectSession, FileExplore
 matching tests, docs/reports/t87-switch-cache.md. Does not touch remote transports,
 Automations, or Conflicts/** beyond what the summary path needs.
 
-### Wave 26 (T88–T90) — close the Orca gap
+### Wave 26 (T88–T91) — MERGED 2026-08-27, 1471 tests
+
+The last three dispatchable Orca gaps, plus a chrome pass the user asked for.
+
+- **T88 checks.** Typed issue/PR links on worktree meta, a checks sidebar section
+  and a check-details tab, over `gh` when it is present and authenticated. Every
+  unavailable path is typed and visible (no gh, not authenticated, no remote, no PR
+  for this branch, API error) — never a blank panel, never a guessed status. Reads
+  only: every `gh` call in the code, tests and report is `pr view` / `pr list` /
+  `auth status` / `run view --log`.
+- **T89 remote durability.** Durable connection with a generation counter (a
+  reconnect can no longer be mistaken for continuity), multiplexing, the first
+  producer for `HostLiveness.live`, and remote provider transcripts on T85's
+  transport.
+- **T90 the three named views.** Read Orca, wrote `docs/research/orca-views.md`, and
+  built **one**: Space (workspace disk usage and reclaimable storage — nothing else
+  in Orchard shows bytes). `activity` is redundant with the Agent Dashboard and is a
+  default-off prototype in Orca itself; `tasks` is a hosted issue board, a different
+  noun from an orchestration Task. Both left unbuilt, with reasons.
+- **T91 chrome.** Orca's rules, found by reading it: selection is neutral (a wash of
+  the foreground plus a bright edge, never the accent), hover changes fill only, the
+  list has no dividers, and group headers are the same size as card titles with
+  weight doing the hierarchy. Adopted. **Refused**: the inset rounded card tile —
+  the single most recognisable "looks like Orca" move, and the one thing the user
+  had already complained about — plus fixed-width tabs, which need a scrolling strip
+  first.
+
+Coordinator, same day, from the user's own use: ⌘T / ⌘D / ⇧⌘D / ⌘W / ⇧⌘W bound the
+way a terminal app binds them (⌘W closing the window is what read as "the app jumped
+to another screen"), a split that would leave an unusable sliver now refuses with the
+reason in the status bar, the workbench no longer draws under the status bar, the
+workspace column is an opaque square-edged pane, and a new workspace opens with a
+terminal instead of a terminal plus a Diff tab nobody asked for.
+
+### Wave 26 source (T88–T90) — close the Orca gap
 
 After wave 25 the switch is fast and the parity checklist (inventory §8) is done. What
 Orca still has that Orchard does not falls into three dispatchable pieces. The fourth —
