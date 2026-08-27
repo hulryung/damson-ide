@@ -34,6 +34,10 @@ struct RootView: View {
                         }
                     }
             }
+        // T88: the checks sidebar section and the check-details tab both read this.
+        // Injected here rather than in AppStore's own graph so a checks read is
+        // scoped to the window that actually shows one.
+        .environmentObject(store.checks)
         .safeAreaInset(edge: .bottom, spacing: 0) { StatusBarView() }
         .sheet(isPresented: composerPresented) {
             if let project = store.projects.first(where: { $0.id == store.composerProjectID }) {

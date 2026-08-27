@@ -890,7 +890,10 @@ public final class WorkspaceService {
         if let v = request.displayName { meta.displayName = v }
         if let v = request.comment { meta.comment = v }
         if let v = request.workspaceStatus { meta.workspaceStatus = v }
-        if let v = request.linkedIssue { meta.linkedIssue = v.isEmpty ? nil : v }
+        // `--link-kind` types the issue slot; the PR slot is already unambiguous.
+        if let v = request.linkedIssue {
+            meta.setSlot(.issue, to: v.isEmpty ? nil : v, explicitKind: request.linkKind)
+        }
         if let v = request.linkedPR { meta.linkedPR = v.isEmpty ? nil : v }
         if let v = request.isPinned { meta.isPinned = v }
         if let v = request.isUnread { meta.isUnread = v }
@@ -903,8 +906,28 @@ public final class WorkspaceService {
         if let v = request.displayName { folder.name = v }
         if let v = request.comment { folder.comment = v }
         if let v = request.workspaceStatus { folder.workspaceStatus = v }
-        if let v = request.linkedIssue { folder.linkedIssue = v.isEmpty ? nil : v }
-        if let v = request.linkedPR { folder.linkedPR = v.isEmpty ? nil : v }
+        // Folder workspaces keep the same typed links as worktrees, so `--link-kind`
+        // means the same thing on both.
+        if request.linkedIssue != nil || request.linkedPR != nil {
+            var links = folder.links ?? WorkspaceLinks.typed(issue: folder.linkedIssue,
+                                                             pr: folder.linkedPR)
+            if let v = request.linkedIssue {
+                folder.linkedIssue = v.isEmpty ? nil : v
+                links.removeAll { !$0.kind.isPullRequest }
+                if let link = WorktreeLinkInference.link(from: v, slot: .issue,
+                                                         explicitKind: request.linkKind) {
+                    links.append(link)
+                }
+            }
+            if let v = request.linkedPR {
+                folder.linkedPR = v.isEmpty ? nil : v
+                links.removeAll { $0.kind.isPullRequest }
+                if let link = WorktreeLinkInference.link(from: v, slot: .pullRequest) {
+                    links.append(link)
+                }
+            }
+            folder.links = links
+        }
         if let v = request.isPinned { folder.isPinned = v }
         if let v = request.isUnread { folder.isUnread = v }
         if let v = request.isArchived { folder.isArchived = v }

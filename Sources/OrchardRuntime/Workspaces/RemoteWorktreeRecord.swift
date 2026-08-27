@@ -84,6 +84,7 @@ public extension Workspace {
             createdAt: meta.createdAt ?? record.createdAt,
             linkedIssue: meta.linkedIssue,
             linkedPR: meta.linkedPR,
+            links: meta.links,
             branch: record.branch,
             head: record.head,
             baseRef: record.baseRef,

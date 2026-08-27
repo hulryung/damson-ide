@@ -35,6 +35,9 @@ public final class OrchardRuntimeHost {
     public nonisolated let automationScheduler: AutomationScheduler
     /// T20: debounced listening-port sweep, attributed by process cwd containment.
     public nonisolated let portService: PortService
+    /// T88: pull-request + CI state for a workspace, read through `gh`. Every
+    /// unavailable path is typed; nothing here runs on the main thread.
+    public nonisolated let checksService: ChecksService
     /// T29: the registered remote hosts behind `ssh:<name>` execution host ids.
     public nonisolated let hostRegistry: HostRegistry
     /// T45: periodic bounded host-reachability producer. Idle unless a remote repo
@@ -209,6 +212,12 @@ public final class OrchardRuntimeHost {
             interval: PortService.intervalFromEnvironment())
         self.portService = portService
 
+        // No timer: checks are read when a surface asks and cached per commit.
+        // A background sweep would spend a network round trip per workspace per
+        // tick for a panel nobody has open.
+        let checksService = ChecksService()
+        self.checksService = checksService
+
         let hostRegistryForLiveness = self.hostRegistry
         let workspaceServiceForLiveness = self.workspaceService
         let terminalServiceForLiveness = terminalService
@@ -253,6 +262,8 @@ public final class OrchardRuntimeHost {
         registry.register(ConflictsCommandHandler(workspaces: workspaceService))
         registry.register(BrowserCommandHandler(service: browserService))
         registry.register(AutomationCommandHandler(service: automationService))
+        registry.register(ChecksCommandHandler(checks: checksService,
+                                              workspaces: workspaceService))
         registry.register(PortCommandHandler(
             ports: portService, workspaces: workspaceService, terminals: terminalService))
         self.registry = registry

@@ -31,7 +31,7 @@ enum TabViewMode: String, Hashable, Codable {
 }
 
 enum TabKind: String, CaseIterable, Hashable, Identifiable {
-    case terminal, diff, editor, browser, conflicts
+    case terminal, diff, editor, browser, conflicts, checkDetails
     var id: String { rawValue }
 
     var label: String {
@@ -41,6 +41,7 @@ enum TabKind: String, CaseIterable, Hashable, Identifiable {
         case .editor: return "Editor"
         case .browser: return "Browser"
         case .conflicts: return "Conflicts"
+        case .checkDetails: return "Check"
         }
     }
 
@@ -51,6 +52,7 @@ enum TabKind: String, CaseIterable, Hashable, Identifiable {
         case .editor: return "doc.text"
         case .browser: return "globe"
         case .conflicts: return "arrow.triangle.merge"
+        case .checkDetails: return "checkmark.seal"
         }
     }
 
@@ -66,6 +68,11 @@ enum TabKind: String, CaseIterable, Hashable, Identifiable {
         // pane does, so it is gated by — and explained by — the same affordance rather
         // than inventing a second word for one unavailability.
         case .conflicts: return .diff
+        // T88: checks read GitHub about a *branch*, and a remote workspace's
+        // branch lives on the far side. The snapshot refuses `remote_unsupported`
+        // in its own vocabulary, which says more than the generic diff wording, so
+        // the tab stays open and the pane explains itself.
+        case .checkDetails: return nil
         }
     }
 }
@@ -326,6 +333,13 @@ final class WorkspaceMetaStore: ObservableObject {
             }
         }
         objectWillChange.send()
+    }
+
+    /// T88: the workspace's typed links (`issue` / `linear-issue` / `jira-issue` /
+    /// `pr`). Empty when nothing is linked — the card then draws no link badges
+    /// rather than an empty slot.
+    func links(for id: UUID) -> [WorktreeLink] {
+        meta(for: id)?.links ?? []
     }
 
     /// Board-column id as stored. Unknown or missing ids fall back to `todo`

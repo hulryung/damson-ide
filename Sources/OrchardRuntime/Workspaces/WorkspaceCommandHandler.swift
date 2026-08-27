@@ -146,6 +146,7 @@ public final class WorkspaceCommandHandler: CommandHandler, @unchecked Sendable 
             workspaceStatus: params.string("workspaceStatus", "workspace-status", "status"),
             linkedIssue: params.string("linkedIssue", "issue"),
             linkedPR: params.string("linkedPR", "pr"),
+            linkKind: try linkKind(params),
             isPinned: params.bool("isPinned", "pinned"),
             isUnread: params.bool("isUnread", "unread"),
             isArchived: params.bool("isArchived", "archived"),
@@ -156,6 +157,20 @@ public final class WorkspaceCommandHandler: CommandHandler, @unchecked Sendable 
                                                  cwd: params.string("cwd"),
                                                  update)
         return try JSONBridge.value(ShowResult(worktree: workspace))
+    }
+
+    /// `--link-kind issue|linear-issue|jira-issue|pr`. An unknown word is refused
+    /// rather than ignored: silently dropping it would store an untyped link while
+    /// the caller believed it had typed one.
+    private func linkKind(_ params: JSONValue) throws -> WorktreeLinkKind? {
+        guard let raw = params.string("linkKind", "link-kind"), !raw.isEmpty else { return nil }
+        guard let kind = WorktreeLinkKind(rawValue: raw),
+              WorktreeLinkKind.selectable.contains(kind) else {
+            throw WorkspaceError("invalid_argument",
+                "unknown --link-kind '\(raw)'. Use "
+                    + WorktreeLinkKind.selectable.map(\.rawValue).joined(separator: ", "))
+        }
+        return kind
     }
 
     private func rm(_ params: JSONValue) async throws -> JSONValue {

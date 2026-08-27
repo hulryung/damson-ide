@@ -5,6 +5,9 @@ import SwiftUI
 enum RightSidebarSection: String, CaseIterable, Identifiable {
     case files
     case sourceControl
+    /// T88: the workspace's pull request and its CI checks (inventory §6 lists
+    /// `pr-checks` and `checks`; both are the same reading, so this is one section).
+    case checks
 
     var id: String { rawValue }
 
@@ -12,6 +15,7 @@ enum RightSidebarSection: String, CaseIterable, Identifiable {
         switch self {
         case .files: return "Files"
         case .sourceControl: return "Source Control"
+        case .checks: return "Checks"
         }
     }
 
@@ -19,6 +23,7 @@ enum RightSidebarSection: String, CaseIterable, Identifiable {
         switch self {
         case .files: return "folder"
         case .sourceControl: return "arrow.triangle.branch"
+        case .checks: return "checkmark.seal"
         }
     }
 }
@@ -42,6 +47,11 @@ struct RightSidebar: View {
                 if store.rightSidebarSection == .sourceControl {
                     SourceControlSidebar()
                 }
+                // Mounted only while showing: its `.task` is what reads GitHub, and
+                // a hidden panel must not spend a network round trip per switch.
+                if store.rightSidebarSection == .checks {
+                    ChecksSidebar()
+                }
             }
         }
         .background(Tokens.sidebar)
@@ -54,7 +64,9 @@ struct RightSidebar: View {
                     store.rightSidebarSection = section
                 } label: {
                     Label(section.title, systemImage: section.symbol)
-                        .labelStyle(.titleAndIcon)
+                        // Three sections no longer fit as text in a 180pt sidebar;
+                        // the icon carries it and `help` keeps the name reachable.
+                        .labelStyle(.iconOnly)
                         .font(Tokens.fontMeta)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
@@ -77,7 +89,7 @@ struct RightSidebar: View {
 }
 
 extension View {
-    /// T70 chrome hook: workbench + right sidebar (files / source-control).
+    /// T70 chrome hook: workbench + right sidebar (files / source-control / checks).
     func rightSidebar() -> some View {
         HSplitView {
             self

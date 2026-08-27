@@ -282,6 +282,104 @@ public enum OrchardHumanFormatter {
         return "\(hours / 24)d ago"
     }
 
+    // MARK: - checks (T88)
+
+    /// How old a reading is, in words. Printed on every checks line: the contract
+    /// is that a cached answer is never shown as if it had just been taken.
+    public static func checksAge(_ seconds: Double?) -> String {
+        guard let seconds, seconds.isFinite, seconds >= 0 else { return "age unknown" }
+        if seconds < 2 { return "just now" }
+        if seconds < 90 { return "\(Int(seconds))s ago" }
+        if seconds < 5400 { return "\(Int(seconds / 60))m ago" }
+        return "\(Int(seconds / 3600))h ago"
+    }
+
+    public static func checksList(_ result: JSONValue?) -> String {
+        let object = result?.objectValue ?? [:]
+        let age = checksAge(object["ageSeconds"]?.numberValue)
+        let branch = object["branch"]?.stringValue ?? "(no branch)"
+        var lines: [String] = []
+
+        if object["status"]?.stringValue != "available" {
+            let reason = object["unavailable"]?.objectValue ?? [:]
+            let code = reason["code"]?.stringValue ?? "unknown"
+            lines.append("\(reason["headline"]?.stringValue ?? "Checks unavailable") "
+                + "[\(code)]  \(branch) · checked \(age)")
+            if let detail = reason["detail"]?.stringValue, !detail.isEmpty {
+                lines.append("  \(detail)")
+            }
+            if let remedy = reason["remedy"]?.stringValue, !remedy.isEmpty {
+                lines.append("  \(remedy)")
+            }
+            return lines.joined(separator: "\n")
+        }
+
+        let pr = object["pullRequest"]?.objectValue ?? [:]
+        let number = pr["number"]?.numberValue.map(Int.init) ?? 0
+        let draft = pr["isDraft"]?.boolValue == true ? " (draft)" : ""
+        lines.append("#\(number) \(pr["title"]?.stringValue ?? "")\(draft)")
+        lines.append("  \(pr["state"]?.stringValue ?? "?") · \(branch) · "
+            + "\(object["rollupLabel"]?.stringValue ?? "") · checked \(age)")
+        if let url = pr["url"]?.stringValue, !url.isEmpty { lines.append("  \(url)") }
+
+        let checks = object["checks"]?.arrayValue ?? []
+        if checks.isEmpty {
+            lines.append("  (no checks reported on this pull request)")
+        }
+        for check in checks {
+            let row = check.objectValue ?? [:]
+            let bucket = (row["bucket"]?.stringValue ?? "unknown")
+                .padding(toLength: 9, withPad: " ", startingAt: 0)
+            let name = row["name"]?.stringValue ?? "?"
+            let workflow = row["workflow"]?.stringValue
+            let suffix = (workflow?.isEmpty == false) ? "  (\(workflow!))" : ""
+            lines.append("  \(bucket) \(name)\(suffix)")
+        }
+        let links = object["links"]?.arrayValue ?? []
+        if !links.isEmpty {
+            let rendered = links.map { link -> String in
+                let row = link.objectValue ?? [:]
+                return "\(row["kind"]?.stringValue ?? "?"):\(row["raw"]?.stringValue ?? "")"
+            }
+            lines.append("  links: " + rendered.joined(separator: ", "))
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    public static func checksShow(_ result: JSONValue?) -> String {
+        let object = result?.objectValue ?? [:]
+        let check = object["check"]?.objectValue ?? [:]
+        let name = check["name"]?.stringValue ?? "?"
+        let bucket = check["bucketLabel"]?.stringValue ?? check["bucket"]?.stringValue ?? "?"
+        var lines = ["\(name) — \(bucket)"]
+        if let conclusion = check["conclusion"]?.stringValue, !conclusion.isEmpty {
+            let status = check["status"]?.stringValue ?? ""
+            lines.append("  github: \(status.isEmpty ? conclusion : "\(status)/\(conclusion)")")
+        }
+        if let url = check["detailsUrl"]?.stringValue, !url.isEmpty { lines.append("  \(url)") }
+
+        if object["status"]?.stringValue != "available" {
+            lines.append("  \(object["headline"]?.stringValue ?? "No log") "
+                + "[\(object["reason"]?.stringValue ?? "unknown")]")
+            if let detail = object["detail"]?.stringValue, !detail.isEmpty {
+                lines.append("  \(detail)")
+            }
+            if let remedy = object["remedy"]?.stringValue, !remedy.isEmpty {
+                lines.append("  \(remedy)")
+            }
+            return lines.joined(separator: "\n")
+        }
+        if object["truncated"]?.boolValue == true {
+            lines.append("  log: last \(object["returnedLines"]?.numberValue.map(Int.init) ?? 0) of "
+                + "\(object["totalLines"]?.numberValue.map(Int.init) ?? 0) lines")
+        } else {
+            lines.append("  log: \(object["totalLines"]?.numberValue.map(Int.init) ?? 0) lines")
+        }
+        lines.append("")
+        lines.append(object["log"]?.stringValue ?? "")
+        return lines.joined(separator: "\n")
+    }
+
     public static func conflictsList(_ result: JSONValue?) -> String {
         let object = result?.objectValue ?? [:]
         let headline = object["headline"]?.stringValue ?? "No conflicts"

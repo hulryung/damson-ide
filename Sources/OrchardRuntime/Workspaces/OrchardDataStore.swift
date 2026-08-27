@@ -140,6 +140,10 @@ public struct FolderWorkspaceRecord: Codable, Equatable, Sendable, Identifiable 
     public var createdAt: Date
     public var linkedIssue: String?
     public var linkedPR: String?
+    /// T88 typed links. Optional so a file written before T88 still decodes; nil
+    /// means "never typed", and the projection falls back to inferring from the
+    /// two strings above rather than showing nothing.
+    public var links: [WorktreeLink]?
 
     public init(id: String,
                 repoId: String,
@@ -155,7 +159,8 @@ public struct FolderWorkspaceRecord: Codable, Equatable, Sendable, Identifiable 
                 lastActivityAt: Date = Date(),
                 createdAt: Date = Date(),
                 linkedIssue: String? = nil,
-                linkedPR: String? = nil) {
+                linkedPR: String? = nil,
+                links: [WorktreeLink]? = nil) {
         self.id = id
         self.repoId = repoId
         self.instanceId = instanceId
@@ -171,6 +176,7 @@ public struct FolderWorkspaceRecord: Codable, Equatable, Sendable, Identifiable 
         self.createdAt = createdAt
         self.linkedIssue = linkedIssue
         self.linkedPR = linkedPR
+        self.links = links ?? WorkspaceLinks.typed(issue: linkedIssue, pr: linkedPR)
     }
 }
 

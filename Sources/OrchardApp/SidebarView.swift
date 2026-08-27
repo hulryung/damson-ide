@@ -382,6 +382,10 @@ struct ProjectRootRow: View {
 
 struct WorkspaceCard: View {
     @EnvironmentObject var store: AppStore
+    /// T88's `ci` card property. Only ever drawn from a reading Orchard actually
+    /// took for this workspace — there is no background sweep, so a card that has
+    /// never been visited shows no chip rather than a guessed one.
+    @EnvironmentObject var checks: ChecksModel
     @ObservedObject var project: ProjectSession
     @ObservedObject var record: WorktreeRecord
     var isSelected: Bool
@@ -486,7 +490,9 @@ struct WorkspaceCard: View {
                 .truncationMode(.middle)
             HostChip(hostId: project.hostId)
             Spacer(minLength: 4)
+            WorktreeLinkBadges(links: store.meta.links(for: record.id))
             WorkspacePortsChip(ports: store.ports(for: record, in: project))
+            ChecksCardChip(snapshot: checks.snapshot(for: .worktree(record.id)))
             if !project.isRemote {
                 DiffStatBadge(stat: record.status.stat)
             }
