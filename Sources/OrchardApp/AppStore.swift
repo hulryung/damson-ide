@@ -1806,6 +1806,22 @@ final class AppStore: ObservableObject {
         }
     }
 
+    /// Move the selection within the focused group. `delta` wraps.
+    func cycleFocusedTab(by delta: Int) {
+        guard let key = selection, let node = layouts[key],
+              let groupID = focusedGroupID ?? node.firstGroupID() else { return }
+        updateLayout(key) { root in
+            _ = root.mutateGroup(groupID) { group in
+                let current = group.selectedID
+                guard group.tabs.count > 1,
+                      let index = group.tabs.firstIndex(where: { $0.id == current })
+                else { return }
+                let next = (index + delta + group.tabs.count) % group.tabs.count
+                group.selectedID = group.tabs[next].id
+            }
+        }
+    }
+
     func splitFocused(axis: SplitAxis) {
         guard let key = selection,
               let groupID = focusedGroupID ?? ensureLayout(for: key).firstGroupID() else { return }

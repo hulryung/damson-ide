@@ -151,6 +151,16 @@ final class OrchardAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     @MainActor @objc func openRemote(_ sender: Any?) { store.presentOpenRemote() }
     @MainActor @objc func newWorkbenchTab(_ sender: Any?) { store.addTabToFocusedGroup() }
     @MainActor @objc func closeFocusedTab(_ sender: Any?) { store.closeFocusedTab() }
+
+    // DamsonSurfaceView claims ⌘W, ⌘⇧[ / ⌘⇧] and ⌘←/→ in performKeyEquivalent before
+    // the main menu ever sees them, forwards them as these selectors through the
+    // responder chain, and — for ⌘W — falls back to closing the WINDOW when nobody
+    // answers. That fallback is what made ⌘W take the whole workbench away. The app
+    // delegate is the last link in that chain, so answering here is what makes the
+    // menu's Close Tab and the key that reaches the terminal agree.
+    @MainActor @objc func performCloseTab(_ sender: Any?) { store.closeFocusedTab() }
+    @MainActor @objc func selectNextTab(_ sender: Any?) { store.cycleFocusedTab(by: 1) }
+    @MainActor @objc func selectPreviousTab(_ sender: Any?) { store.cycleFocusedTab(by: -1) }
     @MainActor @objc func newWorktree(_ sender: Any?) { store.requestNewWorktree() }
     @MainActor @objc func openJumpPalette(_ sender: Any?) { store.isJumpPaletteOpen = true }
     @MainActor @objc func showTerminalTab(_ sender: Any?) { store.selectKind(.terminal) }
