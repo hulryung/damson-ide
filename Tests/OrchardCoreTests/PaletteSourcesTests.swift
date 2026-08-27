@@ -40,7 +40,7 @@ final class PaletteSourcesTests: XCTestCase {
     func testGoMenuSurfaceIsCoveredAndRankable() {
         let commands = PaletteSources.commands()
         let ids = Set(commands.map(\.id))
-        XCTAssertEqual(PaletteCommand.goMenuSurface.count, 9)
+        XCTAssertEqual(PaletteCommand.goMenuSurface.count, 10)
         for command in PaletteCommand.goMenuSurface {
             XCTAssertTrue(ids.contains(command.id), "missing Go-menu command \(command.rawValue)")
             XCTAssertTrue(command.isGoMenu)
@@ -56,6 +56,8 @@ final class PaletteSourcesTests: XCTestCase {
         XCTAssertEqual(orch.first?.id, PaletteCommand.openOrchestration.id)
         let vault = PaletteSources.rank(query: "vault", candidates: commands)
         XCTAssertEqual(vault.first?.id, PaletteCommand.openVault.id)
+        let space = PaletteSources.rank(query: "disk", candidates: commands)
+        XCTAssertEqual(space.first?.id, PaletteCommand.openSpace.id)
         let editor = PaletteSources.rank(query: "editor", candidates: commands)
         XCTAssertEqual(editor.first?.id, PaletteCommand.showEditor.id)
         let refresh = PaletteSources.rank(query: "refresh diff", candidates: commands)

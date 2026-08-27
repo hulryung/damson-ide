@@ -16,6 +16,7 @@ public enum WindowFrameAutosave {
         case orchestration
         case automations
         case vault
+        case space
         case floatingTerminal
     }
 
@@ -29,6 +30,7 @@ public enum WindowFrameAutosave {
         case .orchestration: return "OrchardOrchestrationWindow"
         case .automations: return "OrchardAutomationsWindow"
         case .vault: return "OrchardVaultWindow"
+        case .space: return "OrchardSpaceWindow"
         case .floatingTerminal: return "OrchardFloatingTerminalWindow"
         }
     }
@@ -53,6 +55,7 @@ public enum WindowFrameAutosave {
         case .orchestration: return Size(width: 1040, height: 620)
         case .automations: return Size(width: 1040, height: 620)
         case .vault: return Size(width: 1080, height: 640)
+        case .space: return Size(width: 1040, height: 620)
         case .floatingTerminal: return Size(width: 560, height: 320)
         }
     }

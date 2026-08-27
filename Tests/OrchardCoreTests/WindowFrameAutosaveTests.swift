@@ -13,6 +13,7 @@ final class WindowFrameAutosaveTests: XCTestCase {
             "OrchardOrchestrationWindow",
             "OrchardAutomationsWindow",
             "OrchardVaultWindow",
+            "OrchardSpaceWindow",
             "OrchardFloatingTerminalWindow",
         ])
         XCTAssertEqual(Set(names).count, names.count, "autosave names must stay unique")
@@ -38,6 +39,9 @@ final class WindowFrameAutosaveTests: XCTestCase {
         XCTAssertEqual(
             WindowFrameAutosave.defaultContentSize(for: .vault),
             WindowFrameAutosave.Size(width: 1080, height: 640))
+        XCTAssertEqual(
+            WindowFrameAutosave.defaultContentSize(for: .space),
+            WindowFrameAutosave.Size(width: 1040, height: 620))
         XCTAssertEqual(
             WindowFrameAutosave.defaultContentSize(for: .floatingTerminal),
             WindowFrameAutosave.Size(width: 560, height: 320),
