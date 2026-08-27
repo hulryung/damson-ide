@@ -29,6 +29,11 @@ public struct Workspace: Codable, Equatable, Sendable, Identifiable {
     public var createdAt: Date
     public var linkedIssue: String?
     public var linkedPR: String?
+    /// T88: the same two links, typed (`issue`/`linear-issue`/`jira-issue`/`pr`),
+    /// with the raw strings above kept so nothing that reads them has to change.
+    /// Text that types to nothing stays `untyped` rather than being guessed into
+    /// a tracker.
+    public var links: [WorktreeLink]
     public var branch: String
     public var head: String
     public var baseRef: String
@@ -52,6 +57,7 @@ public struct Workspace: Codable, Equatable, Sendable, Identifiable {
                 createdAt: Date = Date(),
                 linkedIssue: String? = nil,
                 linkedPR: String? = nil,
+                links: [WorktreeLink]? = nil,
                 branch: String = "",
                 head: String = "",
                 baseRef: String = "",
@@ -74,6 +80,9 @@ public struct Workspace: Codable, Equatable, Sendable, Identifiable {
         self.createdAt = createdAt
         self.linkedIssue = linkedIssue
         self.linkedPR = linkedPR
+        // Callers that hand over raw strings (the folder path, the remote record)
+        // get them typed here, so `links` is never out of step with the two fields.
+        self.links = links ?? WorkspaceLinks.typed(issue: linkedIssue, pr: linkedPR)
         self.branch = branch
         self.head = head
         self.baseRef = baseRef
@@ -102,6 +111,7 @@ public struct Workspace: Codable, Equatable, Sendable, Identifiable {
             createdAt: meta.createdAt ?? worktree.createdAt,
             linkedIssue: meta.linkedIssue,
             linkedPR: meta.linkedPR,
+            links: meta.links,
             branch: worktree.branch,
             head: head,
             baseRef: worktree.baseRef,
@@ -129,6 +139,7 @@ public struct Workspace: Codable, Equatable, Sendable, Identifiable {
             createdAt: folder.createdAt,
             linkedIssue: folder.linkedIssue,
             linkedPR: folder.linkedPR,
+            links: folder.links,
             branch: "",
             head: "",
             baseRef: "",
@@ -161,6 +172,7 @@ public struct Workspace: Codable, Equatable, Sendable, Identifiable {
             createdAt: meta.createdAt ?? repo.addedAt,
             linkedIssue: meta.linkedIssue,
             linkedPR: meta.linkedPR,
+            links: meta.links,
             branch: branch,
             head: head,
             baseRef: repo.baseRef,
@@ -244,6 +256,10 @@ public struct WorkspaceUpdateRequest: Sendable {
     public var workspaceStatus: String?
     public var linkedIssue: String?
     public var linkedPR: String?
+    /// T88: names which tracker `linkedIssue` is on when the text alone cannot say.
+    /// `ENG-412` is a Linear key and a Jira key; without this it stays `untyped`
+    /// rather than being guessed into one of them.
+    public var linkKind: WorktreeLinkKind?
     public var isPinned: Bool?
     public var isUnread: Bool?
     public var isArchived: Bool?
@@ -256,6 +272,7 @@ public struct WorkspaceUpdateRequest: Sendable {
                 workspaceStatus: String? = nil,
                 linkedIssue: String? = nil,
                 linkedPR: String? = nil,
+                linkKind: WorktreeLinkKind? = nil,
                 isPinned: Bool? = nil,
                 isUnread: Bool? = nil,
                 isArchived: Bool? = nil,
@@ -267,6 +284,7 @@ public struct WorkspaceUpdateRequest: Sendable {
         self.workspaceStatus = workspaceStatus
         self.linkedIssue = linkedIssue
         self.linkedPR = linkedPR
+        self.linkKind = linkKind
         self.isPinned = isPinned
         self.isUnread = isUnread
         self.isArchived = isArchived
@@ -283,4 +301,20 @@ public struct WorkspaceRemoveResult: Sendable {
     public var branch: String? = nil
     public var branchMerged: Bool? = nil
     public var branchDeleted: Bool? = nil
+}
+
+
+/// Typing for the two legacy link strings on records that still store them
+/// (folder workspaces, the remote worktree record). `WorktreeMeta` types its own.
+public enum WorkspaceLinks {
+    public static func typed(issue: String?, pr: String?) -> [WorktreeLink] {
+        var links: [WorktreeLink] = []
+        if let issue, let link = WorktreeLinkInference.link(from: issue, slot: .issue) {
+            links.append(link)
+        }
+        if let pr, let link = WorktreeLinkInference.link(from: pr, slot: .pullRequest) {
+            links.append(link)
+        }
+        return links
+    }
 }

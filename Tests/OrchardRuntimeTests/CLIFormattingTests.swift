@@ -1,5 +1,13 @@
 import XCTest
+import OrchardCore
 import OrchardProtocol
+@testable import OrchardRuntime
+
+/// The typed reasons `checks` publishes. Spelled once here so the help-text test
+/// and the reason enum cannot drift apart silently.
+enum ChecksReasonCodes {
+    static let all = ChecksUnavailableReason.allCases.map(\.rawValue)
+}
 
 final class CLIFormattingTests: XCTestCase {
     func testLeafHelpRendersUsageValueHintsAndRequiredMarkers() throws {
@@ -17,6 +25,106 @@ final class CLIFormattingTests: XCTestCase {
         XCTAssertTrue(help.contains("Positionals:"), help)
         XCTAssertTrue(help.contains("list|create|read|send|wait|split|close|rename"), help)
         XCTAssertTrue(help.contains("--terminal <handle>"), help)
+    }
+
+    // MARK: - checks (T88)
+
+    func testChecksCommandIsPublishedWithItsReasonVocabulary() throws {
+        let spec = try XCTUnwrap(OrchardCommands.all.first { $0.name == "checks" })
+        let help = CommandHelpRenderer.render(spec)
+        XCTAssertTrue(help.contains("orchard checks list|show"), help)
+        XCTAssertTrue(help.contains("--refresh"), help)
+        // The reasons are part of the published contract: an agent reading
+        // agent-context must be able to see every dead end without hitting one.
+        let notes = spec.notes.joined(separator: " ")
+        for reason in ChecksReasonCodes.all {
+            XCTAssertTrue(notes.contains(reason), "checks help never mentions \(reason)")
+        }
+        XCTAssertTrue(notes.contains("read-only"), notes)
+    }
+
+    func testChecksListRendersTheTypedReasonAndItsAge() {
+        let result = JSONValue.object([
+            "status": .string("unavailable"),
+            "branch": .string("feature/x"),
+            "ageSeconds": .number(12),
+            "unavailable": .object([
+                "code": .string("gh_not_authenticated"),
+                "headline": .string("GitHub CLI not authenticated"),
+                "detail": .string("To get started with GitHub CLI, please run:  gh auth login"),
+                "remedy": .string("Run gh auth login in a terminal, then refresh."),
+            ]),
+        ])
+        let text = OrchardHumanFormatter.checksList(result)
+        XCTAssertTrue(text.contains("[gh_not_authenticated]"), text)
+        XCTAssertTrue(text.contains("checked 12s ago"), text)
+        XCTAssertTrue(text.contains("gh auth login"), text)
+    }
+
+    func testChecksListRendersThePullRequestAndEachCheck() {
+        let result = JSONValue.object([
+            "status": .string("available"),
+            "branch": .string("feature/x"),
+            "ageSeconds": .number(0.4),
+            "rollupLabel": .string("Checks failed"),
+            "pullRequest": .object([
+                "number": .number(7), "title": .string("Add checks"),
+                "state": .string("OPEN"), "isDraft": .bool(true),
+                "url": .string("https://github.com/o/r/pull/7"),
+            ]),
+            "checks": .array([
+                .object(["name": .string("build"), "bucket": .string("fail"),
+                         "workflow": .string("CI")]),
+                .object(["name": .string("lint"), "bucket": .string("pass")]),
+            ]),
+        ])
+        let text = OrchardHumanFormatter.checksList(result)
+        XCTAssertTrue(text.contains("#7 Add checks (draft)"), text)
+        XCTAssertTrue(text.contains("Checks failed"), text)
+        XCTAssertTrue(text.contains("checked just now"), text)
+        XCTAssertTrue(text.contains("fail      build  (CI)"), text)
+        XCTAssertTrue(text.contains("pass      lint"), text)
+    }
+
+    func testChecksShowStatesTruncationAndTypedLogRefusals() {
+        let truncated = OrchardHumanFormatter.checksShow(.object([
+            "status": .string("available"),
+            "check": .object(["name": .string("build"), "bucketLabel": .string("Failed")]),
+            "log": .string("boom"), "truncated": .bool(true),
+            "returnedLines": .number(5), "totalLines": .number(500),
+        ]))
+        XCTAssertTrue(truncated.contains("last 5 of 500 lines"), truncated)
+
+        let refused = OrchardHumanFormatter.checksShow(.object([
+            "status": .string("unavailable"),
+            "check": .object(["name": .string("legacy/ci"),
+                              "bucketLabel": .string("Failed")]),
+            "reason": .string("not_an_actions_job"),
+            "headline": .string("No fetchable log"),
+            "detail": .string("This check reports at https://ci.example.com/build/9."),
+            "remedy": .string("Open its details URL to read it."),
+        ]))
+        XCTAssertTrue(refused.contains("[not_an_actions_job]"), refused)
+        XCTAssertTrue(refused.contains("ci.example.com"), refused)
+    }
+
+    func testChecksAgeWording() {
+        XCTAssertEqual(OrchardHumanFormatter.checksAge(0), "just now")
+        XCTAssertEqual(OrchardHumanFormatter.checksAge(45), "45s ago")
+        XCTAssertEqual(OrchardHumanFormatter.checksAge(600), "10m ago")
+        XCTAssertEqual(OrchardHumanFormatter.checksAge(7200), "2h ago")
+        XCTAssertEqual(OrchardHumanFormatter.checksAge(nil), "age unknown")
+    }
+
+    func testProtocolAndCoreAgreeOnTheLinkKindVocabulary() {
+        // OrchardProtocol has no dependencies by design, so it spells the list
+        // itself. This is the pin that keeps the two copies equal.
+        XCTAssertEqual(WorktreeLinkKinds.selectable,
+                       WorktreeLinkKind.selectable.map(\.rawValue))
+    }
+
+    func testChecksHelpQuotesTheServicesActualTTL() {
+        XCTAssertEqual(ChecksDefaults.ttlSeconds, ChecksService.defaultTTL)
     }
 
     func testBareGuideTopicListingFormat() {

@@ -281,6 +281,8 @@ struct TabGroupPane: View {
                     BrowserPane(key: key)
                 case .conflicts:
                     ConflictReviewHost(key: key)
+                case .checkDetails:
+                    CheckDetailsPane(key: key)
                 }
             }
         } else {

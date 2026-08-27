@@ -134,6 +134,10 @@ func formatHuman(method: String, result: JSONValue?, verbose: Bool = false) -> S
         return OrchardHumanFormatter.projectShow(result)
     case "repo-remove":
         return OrchardHumanFormatter.repoRemove(result)
+    case "checks-list":
+        return OrchardHumanFormatter.checksList(result)
+    case "checks-show":
+        return OrchardHumanFormatter.checksShow(result)
     case "conflicts-list":
         return OrchardHumanFormatter.conflictsList(result)
     case "conflicts-show":
@@ -431,6 +435,22 @@ do {
                 params["path"] = values[1]
             }
             if params["cwd"] == nil { params["cwd"] = .string(FileManager.default.currentDirectoryPath) }
+        }
+        if method == "checks" {
+            guard case let .array(values)? = params.removeValue(forKey: "_args"),
+                  let subcommand = values.first?.stringValue,
+                  ["list", "show"].contains(subcommand) else {
+                throw CLIError.usage("usage: orchard checks list|show [--worktree <selector>] [--check <name>] [--refresh]")
+            }
+            method = "checks-\(subcommand)"
+            if subcommand == "show", values.count > 1, params["check"] == nil {
+                params["check"] = values[1]
+            } else if subcommand == "list", values.count > 1, params["worktree"] == nil {
+                params["worktree"] = values[1]
+            }
+            if params["cwd"] == nil {
+                params["cwd"] = .string(FileManager.default.currentDirectoryPath)
+            }
         }
         if method == "conflicts" {
             guard case let .array(values)? = params.removeValue(forKey: "_args"),

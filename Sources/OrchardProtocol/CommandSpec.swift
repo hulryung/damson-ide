@@ -261,6 +261,12 @@ public enum OrchardCommands {
                     flag("comment", "Comment", "text"),
                     flag("issue", "Linked issue", "text"),
                     flag("pr", "Linked pull request", "text"),
+                    // T88: `#412` and a github.com/linear.app/atlassian.net URL type
+                    // themselves; `ENG-412` is a Linear key and a Jira key, so it
+                    // stays untyped unless this says which.
+                    enumerated("link-kind", "Tracker for --issue when the text cannot say",
+                               "issue|linear-issue|jira-issue|pr",
+                               WorktreeLinkKinds.selectable),
                     // T64: `worktree set --status` is the board column (cardStatus).
                     // `--workspace-status` is the Orca-shaped alias; both store as `status`.
                     flag("status",
@@ -298,6 +304,7 @@ public enum OrchardCommands {
                     "create infers --repo from the current worktree when omitted.",
                     "worktree set --status <id> writes the user-authored board column (todo, in-progress, in-review, completed, or a custom vocabulary id).",
                     "Board column is distinct from derived live status (active|working|permission|done|inactive).",
+                    "Links are typed: #412 and github.com/linear.app/atlassian.net URLs type themselves; ENG-412 stays untyped until --link-kind names the tracker. Nothing is guessed.",
                     "worktree rm rmdirs ~/Orchard/worktrees/<repo>/ when that container is empty; it never deletes recursively.",
                     "worktree ps is the compact process+ports listing; workspace-ports is the ports-only view.",
                 ]),
@@ -371,6 +378,36 @@ public enum OrchardCommands {
                     "On a rebase, ours is the upstream and theirs is the replayed commit.",
                     "Hunk indexes are 0-based as printed by conflicts show; after a partial resolve they are re-indexed from 0.",
                     "Binary files and kinds without inline markers have no hunks — use conflicts take.",
+                ]),
+            // T88. `checks` never fails because CI is unavailable: "no gh", "not
+            // authenticated", "no remote", "no PR for this branch" are *answers*,
+            // returned ok with a typed reason. An `ok: false` here means the request
+            // or the workspace was wrong.
+            CommandSpec(
+                name: "checks",
+                summary: "Show a workspace's pull request and its CI checks (GitHub, via gh)",
+                usage: "orchard checks list|show [options]",
+                flags: [
+                    flag("worktree", "Worktree selector", "selector"),
+                    flag("check", "Check name, details URL, or Actions job id", "name"),
+                    flag("refresh", "Ignore the cached reading and ask GitHub again"),
+                    flag("limit", "Maximum log lines returned by checks show", "n"),
+                    flag("cwd", "Working directory for worktree resolution", "path"),
+                    json,
+                ],
+                positionalArgs: ["list|show", "check"],
+                examples: [
+                    "orchard checks list",
+                    "orchard checks list --worktree <selector> --refresh",
+                    "orchard checks show --check build --limit 200",
+                ],
+                notes: [
+                    "Reads GitHub through the gh CLI, read-only. It never opens, comments on, or changes anything.",
+                    "status is available|unavailable. Unavailable reasons: gh_not_installed, gh_not_authenticated, no_git_remote, unsupported_forge, detached_head, no_pull_request, api_error, gh_timed_out, remote_unsupported, not_a_worktree, not_a_git_workspace — each with a headline, gh's own detail, and a remedy.",
+                    "A reading is cached per HEAD commit for \(Int(ChecksDefaults.ttlSeconds))s. Moving HEAD drops it; ageSeconds on every result says how old the answer is, so a cached reading is never presented as current.",
+                    "rollup is pass|fail|pending|neutral|none|unknown. `none` means the PR reports no checks; `unknown` means a check state we do not recognise — neither is ever shown as a pass.",
+                    "checks show fetches a GitHub Actions job log. A check that is not an Actions job answers not_an_actions_job with its details URL; an unfinished job answers log_pending.",
+                    "Typed errors: invalid_argument, check_not_found, plus the unavailable reason codes when checks show is asked for a snapshot that has no checks.",
                 ]),
             command("terminal", "List, create, inspect, and control runtime terminals", [
                 flag("worktree", "Worktree selector for list or create", "selector"),
@@ -458,8 +495,23 @@ public enum CommandGroup: String, Codable, CaseIterable, Sendable {
     case repo         // repo list/add/show/remove [--forget]
     case file         // file open/diff/open-changed/search
     case conflicts    // conflicts list/show/take/resolve/stage
+    case checks       // checks list/show (T88: PR + CI state via gh)
     case browser      // browser goto/…/tab (wave 2)
     case host         // host list/add/check (T29 remote hosts)
     case automations  // scheduled prompts
     case guide        // agent-context, guide get <topic>
+}
+
+
+/// The `--link-kind` vocabulary, spelled here so `OrchardProtocol` can publish the
+/// flag without depending on `OrchardCore` (this target has no dependencies by
+/// design). `WorktreeLinkKind.selectable` is the same list; a test pins them equal.
+public enum WorktreeLinkKinds {
+    public static let selectable = ["issue", "linear-issue", "jira-issue", "pr"]
+}
+
+/// Defaults the `checks` help text quotes. Same reason as above: the runtime owns
+/// the behaviour, the protocol target only needs the number to print.
+public enum ChecksDefaults {
+    public static let ttlSeconds: Double = 45
 }

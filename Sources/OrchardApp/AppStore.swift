@@ -28,6 +28,9 @@ final class AppStore: ObservableObject {
     let runtime: OrchardRuntimeHost?
     /// Same instance the CLI `repo-add` handler mutates when the host is live.
     let workspaceService: WorkspaceService
+    /// T88: pull-request + CI state for the selected workspace. Injected into the
+    /// view tree by `RootView`; the store only owns the reference.
+    let checks: ChecksModel
     /// T10: WKWebView host for the runtime's browser service (nil with no runtime).
     let browser: BrowserManager?
 
@@ -235,6 +238,9 @@ final class AppStore: ObservableObject {
         let runtime = try? OrchardRuntimeHost(terminalFactory: factory, cliCommand: cliCommand)
         self.runtime = runtime
         self.browser = runtime.map { BrowserManager(service: $0.browserService) }
+        // T88: the checks surfaces' own state. A nil service (no runtime) is a
+        // state the panels render as a typed reason, not as an empty panel.
+        self.checks = ChecksModel(service: runtime?.checksService)
         let dataStore = runtime?.dataStore
             ?? OrchardDataStore(url: dataDirectory.appendingPathComponent("orchard-data.json"))
         self.workspaceService = runtime?.workspaceService ?? WorkspaceService(store: dataStore)
