@@ -68,7 +68,7 @@ final class TerminalHandlerTests: XCTestCase {
     func testTerminalCommandSpecDocumentsCompleteCLISurface() throws {
         let spec = try XCTUnwrap(OrchardCommands.all.first { $0.name == "terminal" })
         XCTAssertEqual(spec.positionalArgs,
-                       ["list|create|read|send|wait|split|close|rename|reconnect"])
+                       ["list|create|read|send|wait|split|close|rename|reconnect|liveness"])
         let flags = Set(spec.flags.map(\.name))
         XCTAssertTrue(Set([
             "worktree", "terminal", "title", "engine", "prompt", "cwd", "cursor",
@@ -76,6 +76,8 @@ final class TerminalHandlerTests: XCTestCase {
             // T43: `reconnect` addresses a pane whose connection ended, and after a
             // restart only the durable pane key can name it.
             "pane",
+            // T89: `liveness` pins its question to one span of contact.
+            "generation",
         ]).isSubset(of: flags))
     }
 

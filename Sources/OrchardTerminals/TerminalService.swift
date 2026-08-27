@@ -54,7 +54,9 @@ public final class TerminalService {
                        initialCols: Int? = nil, initialRows: Int? = nil,
                        launchArgv: [String]? = nil, hookToken: String? = nil,
                        statusDetection: TerminalStatusDetection? = nil,
-                       remoteCwd: String? = nil) throws -> TerminalSummary {
+                       remoteCwd: String? = nil,
+                       remoteIdentityToken: String? = nil,
+                       remoteGeneration: String? = nil) throws -> TerminalSummary {
         guard let engine = AgentEngineRegistry.engine(id: engineID) else {
             throw TerminalServiceError.unknownEngine(engineID)
         }
@@ -74,7 +76,9 @@ public final class TerminalService {
             launchArgv: launchArgv,
             hookToken: hookToken,
             statusDetection: statusDetection,
-            remoteCwd: remoteCwd)
+            remoteCwd: remoteCwd,
+            remoteIdentityToken: remoteIdentityToken,
+            remoteGeneration: remoteGeneration)
         let record = try spawn(spec: spec, engine: engine)
         registry.register(record)
         record.tracker.lastPrompt = prompt
@@ -224,19 +228,39 @@ public final class TerminalService {
         // the `ssh` invocation, so dropping it would respawn the pane as a *local*
         // shell — silently relocating the work, the one failure the host rules forbid.
         let respawnPrompt = record.spec.isRemote ? record.spec.prompt : ""
+        // A respawn opens a NEW connection to the far side, so it gets a new generation
+        // and the recorded launch is re-stamped with it. Keeping the old label would
+        // leave the host's identity record claiming this pane is still the span of
+        // contact that just ended — a relaunch passing for continuity, which is exactly
+        // what the counter exists to make impossible.
+        let respawnGeneration = record.spec.isRemote
+            ? RemotePaneGeneration.mint(executionHostId: record.spec.executionHostId,
+                                        incarnation: record.incarnation + 1)
+            : nil
         let spec = TerminalCreateSpec(
             handle: TerminalRegistry.mintHandle(), paneKey: record.paneKey,
             worktreeId: record.worktreeId,
-            cwd: record.spec.cwd, engineID: record.engine.id, prompt: respawnPrompt,
+            cwd: record.spec.cwd, engineID: record.engine.id,
+            prompt: respawnGeneration.map { RemotePaneGeneration.rewrite(respawnPrompt, to: $0) }
+                ?? respawnPrompt,
             title: record.title, executionHostId: record.spec.executionHostId,
             initialCols: grid.cols, initialRows: grid.rows,
             // Same reason the prompt survives: a remote agent pane's argv IS the `ssh`
             // invocation (tunnel included), and its hook token is already written into
             // a config file on the far side. Reminting either would respawn the pane
             // as a different, statusless agent.
-            launchArgv: record.spec.launchArgv, hookToken: record.spec.hookToken,
+            launchArgv: record.spec.launchArgv.map { argv in
+                respawnGeneration.map { RemotePaneGeneration.rewrite(argv: argv, to: $0) } ?? argv
+            },
+            hookToken: record.spec.hookToken,
             statusDetection: record.spec.statusDetection,
-            remoteCwd: record.spec.remoteCwd)
+            remoteCwd: record.spec.remoteCwd,
+            // The far-side identity record was written by the previous launch and is
+            // still on the host under this token; a fresh token would leave that record
+            // orphaned and this pane unanswerable. The new process overwrites the file
+            // under the same name, which is exactly right: same pane, new pid.
+            remoteIdentityToken: record.spec.remoteIdentityToken,
+            remoteGeneration: respawnGeneration ?? record.spec.remoteGeneration)
         return try relaunch(record: record, spec: spec)
     }
 
@@ -329,7 +353,9 @@ public final class TerminalService {
             // command line is the only thing that reopens it as a remote shell.
             launchPrompt: record.spec.prompt.isEmpty ? nil : record.spec.prompt,
             tunnel: tunnelRecord(for: record),
-            statusDetection: record.spec.statusDetection)
+            statusDetection: record.spec.statusDetection,
+            identityToken: record.spec.remoteIdentityToken,
+            generation: record.spec.remoteGeneration)
     }
 
     /// The reverse tunnel this pane's hooks travel through, when it has one.
@@ -451,7 +477,15 @@ public final class TerminalService {
             launchArgv: remote.launchArgv,
             hookToken: pane.hookToken,
             statusDetection: resolution.detection,
-            remoteCwd: remote.remoteCwd)
+            remoteCwd: remote.remoteCwd,
+            // The far side still holds the identity record this pane's process was
+            // written under, and it outlives both the connection and this app instance —
+            // which is the whole reason a restored pane whose `ssh` did not survive can
+            // now ask its host what happened instead of being permanently unverifiable.
+            remoteIdentityToken: remote.identityToken,
+            // Recorded, not refreshed: this names the span of contact the pane was
+            // launched under, and that span is over. A reconnect replaces it.
+            remoteGeneration: remote.generation)
     }
 
     /// The hook port this app instance actually bound (0 when it never bound one).
@@ -534,6 +568,12 @@ public final class TerminalService {
     /// A live pane is refused rather than restarted, because reconnecting one would
     /// tear down a working connection to a machine we cannot see — the trade rule 2
     /// exists to prevent.
+    ///
+    /// The reopened connection gets a **new generation label**, and the recorded launch
+    /// is re-stamped with it before it runs. That is what makes the reconnect legible on
+    /// the far side too: the host's identity record for this pane is overwritten with
+    /// the new generation, so a question asked about the old one is refused there rather
+    /// than answered with a process the asker has never seen.
     @discardableResult
     public func reconnectRemote(paneKey: String) throws -> TerminalSummary {
         guard let record = registry.record(forPaneKey: paneKey) else {
@@ -550,22 +590,50 @@ public final class TerminalService {
         }
         let plan = KeeperRemoteRestoration.reconnectPlan(spec: record.spec,
                                                          boundLocalPort: boundHookPort())
+        let generation = RemotePaneGeneration.mint(
+            executionHostId: record.spec.executionHostId, incarnation: record.incarnation + 1)
         let spec = TerminalCreateSpec(
             handle: TerminalRegistry.mintHandle(), paneKey: record.paneKey,
             worktreeId: record.worktreeId,
             cwd: record.spec.cwd, engineID: record.engine.id,
-            prompt: plan.prompt, title: record.title,
+            prompt: RemotePaneGeneration.rewrite(plan.prompt, to: generation),
+            title: record.title,
             executionHostId: record.spec.executionHostId,
             initialCols: record.session.gridSnapshot().cols,
             initialRows: record.session.gridSnapshot().rows,
-            launchArgv: plan.launchArgv,
+            launchArgv: plan.launchArgv.map { RemotePaneGeneration.rewrite(argv: $0, to: generation) },
             // Never reminted: the token is already written into a config file on the
             // far side, and a fresh one would reopen the pane as a different,
             // statusless agent.
             hookToken: record.spec.hookToken,
             statusDetection: plan.detection,
-            remoteCwd: record.spec.remoteCwd)
+            remoteCwd: record.spec.remoteCwd,
+            // Same token, same file on the far side: the reopened connection runs the
+            // recorded launch, which rewrites that record with the new remote pid.
+            remoteIdentityToken: record.spec.remoteIdentityToken,
+            remoteGeneration: generation)
         return try relaunch(record: record, spec: spec)
+    }
+
+    /// The remote identity of one pane, for the host-layer surfaces that ask its host
+    /// about it. nil for a local pane — there is nothing there to ask.
+    public func remoteFacts(paneKey: String) -> RemotePaneFacts? {
+        registry.record(forPaneKey: paneKey).flatMap(Self.facts(for:))
+    }
+
+    public func remoteFacts(handle: String) -> RemotePaneFacts? {
+        (try? registry.resolve(handle)).flatMap(Self.facts(for:))
+    }
+
+    private static func facts(for record: TerminalRecord) -> RemotePaneFacts? {
+        guard record.spec.isRemote else { return nil }
+        return RemotePaneFacts(
+            paneKey: record.paneKey, handle: record.handle, incarnation: record.incarnation,
+            executionHostId: record.spec.executionHostId,
+            remoteCwd: record.spec.remoteCwd,
+            identityToken: record.spec.remoteIdentityToken,
+            generation: record.spec.remoteGeneration,
+            connected: record.connected)
     }
 
     // MARK: - Read

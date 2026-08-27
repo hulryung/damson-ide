@@ -48,6 +48,20 @@ public struct TerminalCreateSpec: Sendable {
     /// same-named local directory. Recorded so a restored or reconnected pane can say
     /// which directory on which machine it belongs to without re-parsing its argv.
     public let remoteCwd: String?
+    /// The name this pane's process answers to *on the far side* (T89).
+    ///
+    /// A remote pane's PTY child is `ssh`, so nothing local can say whether the remote
+    /// process is running. The launch writes a small identity record on the host under
+    /// this token; asking the host about that token is the only thing that has ever
+    /// been entitled to answer `live`. nil — a pane opened before this existed, or on a
+    /// host where the record could not be written — means its liveness stays
+    /// `unverifiable`, which is the correct answer and not a failure.
+    public let remoteIdentityToken: String?
+    /// The durable-connection generation this pane was launched under, as its label
+    /// (`build#3.7a1c9f02`). Recorded so a reconnect can say *which* span of contact
+    /// ended rather than implying the new one continues it. nil when the pane's host
+    /// had no durable connection.
+    public let remoteGeneration: String?
 
     public init(handle: String, paneKey: String, worktreeId: String?, cwd: String?,
                 engineID: String, prompt: String, title: String?,
@@ -55,7 +69,9 @@ public struct TerminalCreateSpec: Sendable {
                 initialCols: Int? = nil, initialRows: Int? = nil,
                 launchArgv: [String]? = nil, hookToken: String? = nil,
                 statusDetection: TerminalStatusDetection? = nil,
-                remoteCwd: String? = nil) {
+                remoteCwd: String? = nil,
+                remoteIdentityToken: String? = nil,
+                remoteGeneration: String? = nil) {
         self.handle = handle
         self.paneKey = paneKey
         self.worktreeId = worktreeId
@@ -70,6 +86,8 @@ public struct TerminalCreateSpec: Sendable {
         self.hookToken = hookToken
         self.statusDetection = statusDetection
         self.remoteCwd = remoteCwd
+        self.remoteIdentityToken = remoteIdentityToken
+        self.remoteGeneration = remoteGeneration
     }
 
     /// Whether this pane's work runs on another machine. The raw id is compared
@@ -77,6 +95,37 @@ public struct TerminalCreateSpec: Sendable {
     /// about the host registry, and every id that is not the literal `local` names a
     /// host — including one this build cannot parse, which must never read as local.
     public var isRemote: Bool { executionHostId != "local" }
+}
+
+/// What a runtime surface needs in order to ask a host about one remote pane.
+///
+/// Read off the pane's recorded spec rather than re-derived from its argv: a pane that
+/// was restored or reconnected still carries the identity it was launched with, and
+/// re-parsing a command line is how the wrong machine gets asked.
+public struct RemotePaneFacts: Sendable, Equatable {
+    public let paneKey: String
+    public let handle: String
+    public let incarnation: Int
+    /// `ssh:<name>`; never `local` (a local pane has no facts here).
+    public let executionHostId: String
+    public let remoteCwd: String?
+    public let identityToken: String?
+    /// The connection generation recorded at launch, as its label.
+    public let generation: String?
+    public let connected: Bool
+
+    public init(paneKey: String, handle: String, incarnation: Int, executionHostId: String,
+                remoteCwd: String?, identityToken: String?, generation: String?,
+                connected: Bool) {
+        self.paneKey = paneKey
+        self.handle = handle
+        self.incarnation = incarnation
+        self.executionHostId = executionHostId
+        self.remoteCwd = remoteCwd
+        self.identityToken = identityToken
+        self.generation = generation
+        self.connected = connected
+    }
 }
 
 /// Where one pane's agent status comes from, and what it therefore cannot report.

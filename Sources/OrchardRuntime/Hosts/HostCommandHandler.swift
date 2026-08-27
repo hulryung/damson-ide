@@ -16,23 +16,32 @@ public struct HostCommandHandler: CommandHandler, @unchecked Sendable {
     private let runner: HostCommandRunner
     private let probeTimeout: TimeInterval
     private let liveness: HostLivenessService?
+    private let connections: RemoteConnectionPool?
 
     public init(registry: HostRegistry,
                 runner: HostCommandRunner = ProcessHostCommandRunner(),
                 probeTimeout: TimeInterval = HostProbe.defaultTimeout,
-                liveness: HostLivenessService? = nil) {
+                liveness: HostLivenessService? = nil,
+                connections: RemoteConnectionPool? = nil) {
         self.registry = registry
         self.runner = runner
         self.probeTimeout = probeTimeout
         self.liveness = liveness
+        self.connections = connections
     }
 
-    public var verbs: [String] { ["host-list", "host-add", "host-check"] }
+    public var verbs: [String] {
+        ["host-list", "host-add", "host-check",
+         "host-connect", "host-disconnect", "host-connection"]
+    }
 
     public func handle(_ request: RPCRequest) async -> RPCResponse {
         do {
             return .success(id: request.id, result: try await route(request))
         } catch let error as HostRegistryError {
+            return .failure(id: request.id,
+                            error: RPCError(code: error.code, message: error.message))
+        } catch let error as RemoteHostError {
             return .failure(id: request.id,
                             error: RPCError(code: error.code, message: error.message))
         } catch {
@@ -99,9 +108,64 @@ public struct HostCommandHandler: CommandHandler, @unchecked Sendable {
             liveness?.publish(result)
             return try JSONBridge.value(result)
 
+        // T89. `check` and `connect` answer different questions and must not be folded
+        // together: a probe is "can this host be reached *now*", which has to be a fresh
+        // connection or it is not a probe at all, while `connect` establishes the
+        // durable one and names the generation. Running `check` over an existing master
+        // would answer "the master is still there", which is a fact about this machine.
+        case "host-connect":
+            let record = try registry.require(name: try requireName(params, verb: "host connect"))
+            guard let connections else { throw Self.noConnectionsWired }
+            let connection = connections.connection(for: record)
+            switch await connection.open() {
+            case .refused(let error):
+                throw error
+            case .ready:
+                return try JSONBridge.value(await connection.status())
+            }
+
+        case "host-disconnect":
+            let record = try registry.require(name: try requireName(params, verb: "host disconnect"))
+            guard let connections else { throw Self.noConnectionsWired }
+            return try JSONBridge.value(await connections.connection(for: record).close())
+
+        case "host-connection":
+            guard let connections else { throw Self.noConnectionsWired }
+            if let name = params["name"]?.stringValue, !name.isEmpty {
+                let record = try registry.require(name: name)
+                return try JSONBridge.value(await connections.connection(for: record).status())
+            }
+            var statuses: [JSONValue] = []
+            for connection in connections.all() {
+                statuses.append(try JSONBridge.value(await connection.status()))
+            }
+            return .object([
+                "connections": .array(statuses),
+                "totalCount": .number(Double(statuses.count)),
+                "note": .string(
+                    "A generation names one continuous span of contact. Reopening always "
+                        + "mints a new one; a question asked about an earlier generation is "
+                        + "refused rather than answered from the current connection."),
+            ])
+
         default:
             throw HostRegistryError.invalidArgument("unrouted verb '\(request.method)'")
         }
+    }
+
+    /// A runtime with no connection pool cannot answer connection questions, and must
+    /// say so rather than reporting "no connections" — which would read as "there are
+    /// none open", a different and possibly false claim.
+    private static let noConnectionsWired = RemoteHostError(
+        "not_wired",
+        "this runtime has no durable-connection pool, so it cannot open, close or "
+            + "report a connection")
+
+    private func requireName(_ params: [String: JSONValue], verb: String) throws -> String {
+        guard let name = params["name"]?.stringValue, !name.isEmpty else {
+            throw HostRegistryError.invalidArgument("\(verb) needs a host name")
+        }
+        return name
     }
 
     private func encodeHosts(_ hosts: [HostRecord]) throws -> JSONValue {

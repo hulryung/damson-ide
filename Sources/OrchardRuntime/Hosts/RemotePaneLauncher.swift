@@ -67,14 +67,24 @@ public struct RemotePaneLauncher: Sendable {
         let record = try hosts.require(host: host)
         let paneTitle = title
             ?? (path.split(separator: "/").last.map(String.init) ?? record.name)
+        // The pane's own identity on the far side, and the name of the connection it is
+        // about to open. Both are minted here, before anything runs, because both have
+        // to be inside the remote command line the pane launches with.
+        let identityToken = RemotePaneIdentity.mintToken()
+        let generation = RemotePaneGeneration.mint(executionHostId: host.rawValue,
+                                                   incarnation: 1)
         guard engineID == "shell" else {
             return try await createAgent(engineID: engineID, hostRecord: record,
                                          host: host, workspaceID: workspaceID,
-                                         path: path, title: paneTitle)
+                                         path: path, title: paneTitle,
+                                         identityToken: identityToken,
+                                         generation: generation)
         }
         let remoteCommand = prompt.isEmpty
-            ? SSHCommand.cdAndLoginShellCommand(directory: path)
-            : "cd \(SSHCommand.shellQuote(path)) && \(prompt)"
+            ? SSHCommand.cdAndLoginShellCommand(directory: path, identityToken: identityToken,
+                                                generation: generation)
+            : SSHCommand.prelude(identityToken, generation)
+                + "cd \(SSHCommand.shellQuote(path)) && \(prompt)"
         return try await service.create(
             worktreeId: workspaceID,
             cwd: nil,
@@ -85,7 +95,9 @@ public struct RemotePaneLauncher: Sendable {
             // Where the work is, recorded separately from the local `cwd` the pane
             // deliberately does not have: a restored or reconnected pane has to be able
             // to say which directory on which machine it is.
-            remoteCwd: path)
+            remoteCwd: path,
+            remoteIdentityToken: identityToken,
+            remoteGeneration: generation)
     }
 
     /// An agent pane whose agent runs on `hostRecord`, in the remote worktree at `path`
@@ -95,7 +107,9 @@ public struct RemotePaneLauncher: Sendable {
     /// has to carry it and Claude Code reads that config at startup.
     private func createAgent(engineID: String, hostRecord: HostRecord,
                              host: ExecutionHostId, workspaceID: String,
-                             path: String, title: String) async throws -> TerminalSummary {
+                             path: String, title: String,
+                             identityToken: String?,
+                             generation: String?) async throws -> TerminalSummary {
         guard let engine = AgentEngineRegistry.engine(id: engineID) else {
             throw TerminalServiceError.unknownEngine(engineID)
         }
@@ -103,7 +117,9 @@ public struct RemotePaneLauncher: Sendable {
         let token = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
         let plan = try await remote.plan(
             engine: engine, worktreePath: path, hookToken: token,
-            localHookPort: localHookPort())
+            localHookPort: localHookPort(),
+            identityToken: identityToken,
+            generation: generation)
         return try await service.create(
             worktreeId: workspaceID,
             cwd: nil,
@@ -118,7 +134,9 @@ public struct RemotePaneLauncher: Sendable {
             launchArgv: plan.argv,
             hookToken: plan.hookToken,
             statusDetection: plan.detection,
-            remoteCwd: path)
+            remoteCwd: path,
+            remoteIdentityToken: plan.identityToken,
+            remoteGeneration: generation)
     }
 }
 

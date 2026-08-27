@@ -48,6 +48,20 @@ public enum HostLiveness {
     /// back *through* a working connection and is the remote command's own.
     public static let sshTransportFailureExitCode: Int32 = 255
 
+    /// The sentence a fenced refusal ends with. It is one sentence and it is verbatim
+    /// everywhere, because the temptation it guards against is real: a caller that gets
+    /// "generation ended" back is one small edit away from retrying on the new
+    /// connection and reporting the result as though nothing had happened.
+    public static let generationRefusalReminder =
+        "A later connection cannot answer for an earlier one; reopening is a new "
+            + "generation, not a continuation."
+
+    /// The rule-2 reminder, parameterised by host. Reused wherever loss of contact has
+    /// to be stated without implying anything stopped.
+    public static func lossOfContactReminder(host: String) -> String {
+        "Loss of contact is not evidence that anything on \(host) stopped."
+    }
+
     /// What a PTY's ending proves about the work that was running in it.
     ///
     /// For a local pane the PTY *is* the process, so an exit status is proof of exit.
@@ -85,6 +99,37 @@ public enum HostLiveness {
                 + "running there is unverifiable — \(reason)."
         case .live:
             return "The connection to \(host.name) ended."
+        }
+    }
+
+    /// What a remote pane's own host said about the process that pane launched
+    /// (T89) — the first producer `live` has ever had.
+    ///
+    /// Every earlier surface could only observe *this* side: a PTY that ended, a probe
+    /// that timed out, hooks that stopped arriving. None of those is the owning host
+    /// confirming anything, so none of them was allowed to say `live`. This one asks the
+    /// host directly, about a process the host itself recorded, and reads its answer:
+    ///
+    /// - the process is there, and it is still the one we launched → `live`;
+    /// - the host looked and there is no such process, or the pid now belongs to
+    ///   something else → `exited`, which is the positive evidence of absence the word
+    ///   requires;
+    /// - the host did not answer, or never recorded an identity for this pane → 
+    ///   `unverifiable`. Never `exited`: "we could not look" and "we looked and it is
+    ///   gone" are the two facts this vocabulary exists to keep apart.
+    public static func verdict(forRemoteProcess answer: RemoteProcessAnswer) -> HostLivenessVerdict {
+        switch answer {
+        case .live:
+            return .live
+        case .exited, .pidReused:
+            return .exited
+        case .noRecord(let reason), .unverifiable(let reason):
+            return .unverifiable(reason: reason)
+        case .superseded(let asked, let found):
+            // A refusal, not a verdict about the process — and `unverifiable` is the
+            // only word that can carry "we will not answer this".
+            return .unverifiable(reason: "the host holds this pane under generation "
+                + "\(found), not \(asked), so nothing it says is about \(asked)")
         }
     }
 
