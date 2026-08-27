@@ -19,6 +19,18 @@ enum Tokens {
     static let rowHover = Color(nsColor: .quaternaryLabelColor).opacity(0.5)
     static let rowSelected = Color.accentColor.opacity(0.18)
 
+    /// Selection in the workspace list and the tab strip is *neutral*, never an
+    /// accent tint. Those surfaces already spend colour on things that mean
+    /// something — the status glyph, git counts, the unread dot, a host's
+    /// reachability — and a blue wash underneath makes a card argue with its own
+    /// contents. So the fill only lifts the surface, and a brighter neutral edge
+    /// does the actual "this one" work. (`docs/research/orca-chrome.md` §1.)
+    static let selectionFill = Color(nsColor: .labelColor).opacity(0.10)
+    static let selectionEdge = Color(nsColor: .labelColor).opacity(0.55)
+    /// A hair less lift than a selected row: a tab sits on `surface`, which is
+    /// already brighter than the sidebar.
+    static let tabActiveFill = Color(nsColor: .labelColor).opacity(0.06)
+
     static let text = Color(nsColor: .labelColor)
     static let textSecondary = Color(nsColor: .secondaryLabelColor)
     static let textTertiary = Color(nsColor: .tertiaryLabelColor)
@@ -28,11 +40,25 @@ enum Tokens {
     static let fontRow = Font.system(size: 13)
     static let fontHeader = Font.system(size: 11, weight: .semibold)
     static let fontMono = Font.system(size: 11.5, design: .monospaced)
+    /// A group header in the workspace list is a *title*, not a caption: same
+    /// size as the card titles under it, separated by weight alone. Sizing it
+    /// down and greying it out — the usual sidebar caption move — buries the
+    /// only label that says which repo a run of cards belongs to.
+    static let fontSection = Font.system(size: 13, weight: .semibold)
+    /// Tab titles sit one step below row text so a saturated strip stays quiet.
+    static let fontTab = Font.system(size: 12)
 
     /// Chrome rounding. Kept small on purpose: the sidebar rows and the workbench
     /// tabs read as one surface with edges, not as pills floating on a list.
     static let radius: CGFloat = 3
     static let radiusCard: CGFloat = 6
+    /// Fixed chrome heights, so the sidebar's group headers and the workbench's
+    /// tab strip share one rhythm instead of each falling out of their content.
+    static let tabStripHeight: CGFloat = 32
+    static let sectionHeaderHeight: CGFloat = 28
+    /// The selection marker: a bar on the edge that faces the content the
+    /// selection owns — bottom of an active tab, leading edge of a picked row.
+    static let selectionBarWidth: CGFloat = 2
     static let sidebarMinWidth: CGFloat = 220
     /// Fixed status-bar height: the bottom safe-area inset does not propagate
     /// into the split view's AppKit-backed columns, so panes that pin content
