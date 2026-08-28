@@ -76,6 +76,10 @@ struct SidebarView: View {
                     ?? "Repo")
             }
             .menuStyle(.borderlessButton)
+            // `filterChip` draws the chevron itself; without this SwiftUI adds a
+            // second one right beside it.
+            .menuIndicator(.hidden)
+            .fixedSize()
 
             Menu {
                 Button("All statuses") { store.filterStatusID = nil }
@@ -90,6 +94,8 @@ struct SidebarView: View {
                     } ?? "Status")
             }
             .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
 
             toggleGlyph(
                 isOn: store.showArchived,

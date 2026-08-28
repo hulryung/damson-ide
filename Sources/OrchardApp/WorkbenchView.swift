@@ -272,7 +272,11 @@ struct TabGroupPane: View {
                     .font(.system(size: 11))
             }
             .menuStyle(.borderlessButton)
-            .frame(width: 22)
+            // A borderless Menu draws its own disclosure chevron next to the label,
+            // which crowded the "+" into it inside a 22pt frame and read as one
+            // smudged glyph. The plus already says "add"; the chevron said nothing.
+            .menuIndicator(.hidden)
+            .fixedSize()
             .padding(.leading, 8)
             // The "+" follows the tabs rather than hiding at the far right: it
             // adds to that run, so it belongs next to its end.
