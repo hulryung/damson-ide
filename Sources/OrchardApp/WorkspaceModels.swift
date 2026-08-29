@@ -31,7 +31,7 @@ enum TabViewMode: String, Hashable, Codable {
 }
 
 enum TabKind: String, CaseIterable, Hashable, Identifiable {
-    case terminal, diff, editor, browser, conflicts, checkDetails
+    case terminal, diff, editor, browser, conflicts, checkDetails, pullRequest
     var id: String { rawValue }
 
     var label: String {
@@ -42,6 +42,7 @@ enum TabKind: String, CaseIterable, Hashable, Identifiable {
         case .browser: return "Browser"
         case .conflicts: return "Conflicts"
         case .checkDetails: return "Check"
+        case .pullRequest: return "Pull Request"
         }
     }
 
@@ -53,6 +54,7 @@ enum TabKind: String, CaseIterable, Hashable, Identifiable {
         case .browser: return "globe"
         case .conflicts: return "arrow.triangle.merge"
         case .checkDetails: return "checkmark.seal"
+        case .pullRequest: return "arrow.triangle.pull"
         }
     }
 
@@ -73,6 +75,10 @@ enum TabKind: String, CaseIterable, Hashable, Identifiable {
         // in its own vocabulary, which says more than the generic diff wording, so
         // the tab stays open and the pane explains itself.
         case .checkDetails: return nil
+        // T93: same reasoning as checks. A pull request is read about a
+        // *branch*, and the snapshot refuses `remote_unsupported` in its own
+        // vocabulary, which says more than the generic diff wording.
+        case .pullRequest: return nil
         }
     }
 }

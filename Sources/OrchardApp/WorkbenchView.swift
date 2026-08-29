@@ -308,6 +308,8 @@ struct TabGroupPane: View {
                     ConflictReviewHost(key: key)
                 case .checkDetails:
                     CheckDetailsPane(key: key)
+                case .pullRequest:
+                    PullRequestPane(key: key)
                 }
             }
         } else {

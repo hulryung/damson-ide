@@ -38,6 +38,7 @@ struct RootView: View {
         // Injected here rather than in AppStore's own graph so a checks read is
         // scoped to the window that actually shows one.
         .environmentObject(store.checks)
+        .environmentObject(store.pullRequests)
         .safeAreaInset(edge: .bottom, spacing: 0) { StatusBarView() }
         .sheet(isPresented: composerPresented) {
             if let project = store.projects.first(where: { $0.id == store.composerProjectID }) {
