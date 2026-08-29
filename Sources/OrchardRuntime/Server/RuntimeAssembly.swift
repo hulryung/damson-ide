@@ -280,6 +280,11 @@ public final class OrchardRuntimeHost {
         registry.register(AutomationCommandHandler(service: automationService))
         registry.register(ChecksCommandHandler(checks: checksService,
                                               workspaces: workspaceService))
+        // T94: the acting side of pull requests. Its own handler rather than a
+        // wider checks handler, because these verbs write and those verbs do not,
+        // and the two must never share an envelope convention: a checks reading
+        // that failed is `ok: true` with a reason, a merge that failed is not.
+        registry.register(PullRequestActionCommandHandler(workspaces: workspaceService))
         registry.register(PortCommandHandler(
             ports: portService, workspaces: workspaceService, terminals: terminalService))
         self.registry = registry

@@ -409,6 +409,50 @@ public enum OrchardCommands {
                     "checks show fetches a GitHub Actions job log. A check that is not an Actions job answers not_an_actions_job with its details URL; an unfinished job answers log_pending.",
                     "Typed errors: invalid_argument, check_not_found, plus the unavailable reason codes when checks show is asked for a snapshot that has no checks.",
                 ]),
+            // T94. Unlike `checks`, every one of these verbs *writes* to GitHub, so
+            // the envelope convention is the opposite: only a verb that actually
+            // landed exits 0. Anything else — refused, still computing, not
+            // confirmed — is a typed error, because a script that reads exit 0 from
+            // `pr merge` is entitled to believe the branch is in.
+            CommandSpec(
+                name: "pr",
+                summary: "Act on a pull request: review, comment, threads, merge, state (GitHub, via gh)",
+                usage: "orchard pr review|comment|reply|resolve|unresolve|merge|ready|close|reopen [options]",
+                flags: [
+                    flag("worktree", "Worktree selector", "selector"),
+                    enumerated("verdict", "Review verdict", "verdict",
+                               ["approve", "request-changes", "comment"]),
+                    flag("body", "Review, comment or reply text", "text"),
+                    flag("path", "File the line comment is anchored in", "file"),
+                    flag("line", "Line the comment is anchored to", "n"),
+                    flag("start-line", "First line of a multi-line anchor", "n"),
+                    enumerated("side", "Diff side the anchor is on", "side", ["LEFT", "RIGHT"]),
+                    flag("thread", "Review thread id (GraphQL node id)", "id"),
+                    enumerated("method", "Merge method (default merge)", "method",
+                               ["merge", "squash", "rebase"]),
+                    flag("delete-branch", "Delete the head branch after merging (off unless given)"),
+                    flag("draft", "With pr ready: convert back to a draft instead"),
+                    flag("yes", "Actually do it. Required by merge and close"),
+                    flag("cwd", "Working directory for worktree resolution", "path"),
+                    json,
+                ],
+                positionalArgs: ["review|comment|reply|resolve|unresolve|merge|ready|close|reopen"],
+                examples: [
+                    "orchard pr review --verdict request-changes --body \"needs a test\"",
+                    "orchard pr comment --path Sources/App/main.swift --line 42 --body \"why?\"",
+                    "orchard pr resolve --thread PRRT_kwDO...",
+                    "orchard pr merge --method squash            # prints what it would do, exits 1",
+                    "orchard pr merge --method squash --yes",
+                    "orchard pr close --yes",
+                ],
+                notes: [
+                    "Every verb here writes to GitHub. Only a verb that landed exits 0.",
+                    "merge and close require --yes. Without it the pull request is read, the plan is built, and the sentence naming what would happen is printed as confirmation_required — exit 1, nothing sent.",
+                    "--delete-branch is off unless you pass it. A branch is never deleted because a flag was forgotten.",
+                    "mergeability_unknown is not a refusal: GitHub had not finished computing whether the branches merge, so nothing was attempted. Ask again in a moment.",
+                    "Typed errors carry code, headline, gh's own detail, and a remedy: empty_review_body, cannot_review_own_pull_request, pull_request_not_open, not_mergeable, merge_method_unavailable, insufficient_permission, thread_not_found, line_not_in_diff, plus the shared gh_not_installed, gh_not_authenticated, no_git_remote, unsupported_forge, gh_timed_out, remote_unsupported, not_a_worktree, no_pull_request, api_error.",
+                    "A review verdict of request-changes or comment needs a --body; the refusal fires before gh is launched.",
+                ]),
             command("terminal", "List, create, inspect, and control runtime terminals", [
                 flag("worktree", "Worktree selector for list or create", "selector"),
                 flag("terminal", "Terminal handle", "handle"),
