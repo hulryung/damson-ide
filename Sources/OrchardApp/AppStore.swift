@@ -31,6 +31,7 @@ final class AppStore: ObservableObject {
     /// T88: pull-request + CI state for the selected workspace. Injected into the
     /// view tree by `RootView`; the store only owns the reference.
     let checks: ChecksModel
+    let pullRequests: PullRequestModel
     /// T10: WKWebView host for the runtime's browser service (nil with no runtime).
     let browser: BrowserManager?
 
@@ -252,6 +253,9 @@ final class AppStore: ObservableObject {
         // T88: the checks surfaces' own state. A nil service (no runtime) is a
         // state the panels render as a typed reason, not as an empty panel.
         self.checks = ChecksModel(service: runtime?.checksService)
+        // T93: the read service is a stateless struct over the gh probe, so it
+        // needs nothing from the runtime assembly and shares nothing with it.
+        self.pullRequests = PullRequestModel(service: PullRequestReadService())
         let dataStore = runtime?.dataStore
             ?? OrchardDataStore(url: dataDirectory.appendingPathComponent("orchard-data.json"))
         self.workspaceService = runtime?.workspaceService ?? WorkspaceService(store: dataStore)
