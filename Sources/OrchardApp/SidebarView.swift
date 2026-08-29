@@ -367,6 +367,16 @@ struct RepoHeader: View {
     @EnvironmentObject var store: AppStore
     @ObservedObject var project: ProjectSession
 
+    /// Close Project used to fire straight from the context menu, one click below
+    /// "Reveal in Finder", and take every worktree record, unread flag, pinned
+    /// flag, display name and lineage entry for the repo with it. Deleting a
+    /// single worktree has always shown you what it would discard before
+    /// offering the button; closing a project discards strictly more and asked
+    /// nothing. The CLI has refused this all along — `repo-remove` is a typed
+    /// refusal when worktrees still name the repo — so the GUI was also the only
+    /// door without a lock on it.
+    @State private var confirmingClose = false
+
     var body: some View {
         HStack(spacing: 6) {
             Image(systemName: "shippingbox.fill")
@@ -407,9 +417,38 @@ struct RepoHeader: View {
                   : "")
             Divider()
             Button("Close Project", role: .destructive) {
-                store.removeProject(project)
+                confirmingClose = true
             }
         }
+        .confirmationDialog(closeTitle, isPresented: $confirmingClose,
+                            titleVisibility: .visible) {
+            Button("Close Project", role: .destructive) {
+                store.removeProject(project)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text(closeConsequence)
+        }
+    }
+
+    private var closeTitle: String { "Close “\(project.name)”?" }
+
+    /// Names what is actually lost, and what is not. The distinction matters:
+    /// nothing on disk is touched, so the sentence that would frighten someone
+    /// into cancelling a harmless action would be a lie — but the Orchard-side
+    /// records really are gone, and re-adding the repo does not bring them back.
+    private var closeConsequence: String {
+        let count = project.records.count
+        let worktrees = count == 1
+            ? "its 1 worktree"
+            : "its \(count) worktrees"
+        let discarded = count == 0
+            ? "Orchard's record of this repository"
+            : "Orchard's record of this repository and \(worktrees)"
+        return "\(discarded) — unread and pinned flags, display names and lineage — "
+            + "is discarded. Nothing on disk is deleted: the checkout and every git "
+            + "worktree stay exactly where they are, and re-adding the repository "
+            + "finds them again. The flags and names do not come back."
     }
 }
 
