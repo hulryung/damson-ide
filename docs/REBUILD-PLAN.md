@@ -1473,6 +1473,45 @@ the worktree needs its ↻; and the auto-added Conflicts tab lingers after the m
 until an unrelated `refreshGit` retracts it. Every state was built in an Orchard-made
 worktree on a local-only branch and restored byte for byte.
 
+### Wave 27 (T92–T94) — GitHub pull requests: open, read, act
+
+Chosen over adding more agent engines. Measured against Orca on 2026-08-29, the
+honest gap is breadth, not spine: 5 engines against ~20, and **1 forge against
+7**. Of the two, the forge is the one that changes a working day. Orca's PR
+surface splits into create / fetch / list / update / merge / lookup / check —
+and `check` plus `lookup` are already ours from T88, so this wave is the other
+four.
+
+**The spine landed first (`6e3ea1f`), not as a task.** Three workers needed the
+same foundation and inventing it three times would have produced three stderr
+vocabularies. `GitHubPRGateway` is the only place pull-request code runs `gh`;
+`PullRequestRefusalReason` names twenty-six dead ends, sharing raw values with
+T88's `ChecksUnavailableReason` for the facts that are genuinely the same while
+keeping remedies apart ("then refresh" is right for a reading, wrong for a
+write). Verified against the real gh 2.98.0 field list and a live GraphQL
+`reviewThreads` shape rather than from memory — which is how we learned that
+line-anchored threads are simply absent from `gh pr view --json`.
+
+- **T92 create.** Eligibility as evidence, not a boolean: a ladder where every
+  rung is a named refusal, base resolved from the repo default rather than
+  guessed at `main`, template discovery, and — the rule Orca learned the hard
+  way — `existingLookup` keeping `.unavailable` apart from `.notFound`, because
+  conflating them is how a second pull request gets opened. Pushing is never
+  silent.
+- **T93 read.** One `gh pr view --json` for the detail; a paginated GraphQL
+  query for review threads, because a PR with 101 threads must not quietly show
+  100. Outdated threads are shown and marked, never hidden — a stale objection
+  is still an objection.
+- **T94 act.** Review verdicts, line-anchored comments, thread resolve/reply,
+  merge, draft/close/reopen. Mergeability `.unknown` is GitHub still computing:
+  not permission to merge, and not a refusal either. Nothing destructive fires
+  from a hover or a bare shortcut, and `--yes` is required at the CLI —
+  Orchard is driven by agents, and an accidental merge is unrecoverable in a
+  way an accidental commit is not.
+
+Deferred to a later wave, deliberately: diff-anchored comment rendering inside
+the diff pane (it needs T93's threads and T94's mutations to both exist first).
+
 ### Wave 26 source (T88–T90) — close the Orca gap
 
 After wave 25 the switch is fast and the parity checklist (inventory §8) is done. What
