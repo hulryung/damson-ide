@@ -148,6 +148,10 @@ func formatHuman(method: String, result: JSONValue?, verbose: Bool = false) -> S
         return OrchardHumanFormatter.checksList(result)
     case "checks-show":
         return OrchardHumanFormatter.checksShow(result)
+    case "pr-eligibility":
+        return OrchardHumanFormatter.pullRequestEligibility(result)
+    case "pr-create":
+        return OrchardHumanFormatter.pullRequestCreate(result)
     case "conflicts-list":
         return OrchardHumanFormatter.conflictsList(result)
     case "conflicts-show":
@@ -499,6 +503,22 @@ do {
             if subcommand == "show", values.count > 1, params["check"] == nil {
                 params["check"] = values[1]
             } else if subcommand == "list", values.count > 1, params["worktree"] == nil {
+                params["worktree"] = values[1]
+            }
+            if params["cwd"] == nil {
+                params["cwd"] = .string(FileManager.default.currentDirectoryPath)
+            }
+        }
+        if method == "pr" {
+            guard case let .array(values)? = params.removeValue(forKey: "_args"),
+                  let subcommand = values.first?.stringValue,
+                  ["eligibility", "create"].contains(subcommand) else {
+                throw CLIError.usage(
+                    "usage: orchard pr eligibility|create [--worktree <selector>] "
+                        + "[--base <ref>] [--title <text>] [--body <text>] [--draft]")
+            }
+            method = "pr-\(subcommand)"
+            if values.count > 1, params["worktree"] == nil {
                 params["worktree"] = values[1]
             }
             if params["cwd"] == nil {

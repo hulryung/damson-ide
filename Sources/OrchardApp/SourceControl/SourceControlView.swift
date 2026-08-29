@@ -120,6 +120,7 @@ private struct SourceControlPane: View {
     @StateObject private var model = SourceControlModel()
     @FocusState private var commitFocused: Bool
     @State private var showingCreateBranch = false
+    @State private var showingPullRequest = false   // T92
 
     var body: some View {
         VStack(spacing: 0) {
@@ -317,12 +318,23 @@ private struct SourceControlPane: View {
                     .controlSize(.small)
                     .disabled(model.isBusy)
                     .help("git push --set-upstream")
+                    // T92. Entry point only: everything about opening a pull
+                    // request — eligibility, the template, the push prompt — lives
+                    // in the sheet.
+                    Button("Pull Request…") { showingPullRequest = true }
+                        .controlSize(.small)
+                        .help("Open a pull request for this branch on GitHub")
                 }
             }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(Tokens.surface)
+        .sheet(isPresented: $showingPullRequest) {
+            CreatePullRequestSheet(worktree: root,
+                                   hostId: store.executionHostId(for: workspaceKey) ?? "local",
+                                   branch: model.snapshot.branch.isEmpty ? nil : model.snapshot.branch)
+        }
     }
 
     private func reload() async {

@@ -494,6 +494,82 @@ public enum OrchardHumanFormatter {
 /// Process exit for a runtime RPC envelope. Typed errors (`ok: false`) are a
 /// failed process even when `--json` printed the envelope — dogfood-3/4 found
 /// that path used to fall through to status 0.
+// MARK: - pull requests (T92)
+
+public extension OrchardHumanFormatter {
+
+    /// `orchard pr eligibility`. A refusal is printed the way `orchard checks`
+    /// prints an unavailable reading — headline, code, gh's own words, the one
+    /// thing to do — because it is the same kind of answer.
+    static func pullRequestEligibility(_ result: JSONValue?) -> String {
+        let object = result?.objectValue ?? [:]
+        let head = object["head"]?.stringValue ?? "(no branch)"
+        let base = object["base"]?.stringValue
+        var lines: [String] = []
+
+        if let refusal = object["refusal"]?.objectValue {
+            let code = refusal["code"]?.stringValue ?? "unknown"
+            let route = base.map { "\(head) → \($0)" } ?? head
+            lines.append("\(refusal["headline"]?.stringValue ?? "Cannot open a pull request") "
+                + "[\(code)]  \(route)")
+            if let detail = refusal["detail"]?.stringValue, !detail.isEmpty {
+                lines.append("  \(detail)")
+            }
+            if let remedy = refusal["remedy"]?.stringValue, !remedy.isEmpty {
+                lines.append("  \(remedy)")
+            }
+        } else {
+            lines.append("Ready to open a pull request")
+            lines.append("  \(head) → \(base ?? "?")\(commitsSuffix(object))")
+        }
+
+        if object["needsPush"]?.boolValue == true {
+            lines.append("  push required — nothing has been pushed for you")
+        }
+        lines.append("  " + existingLine(object))
+        if object["hasTemplate"]?.boolValue == true {
+            lines.append("  a pull-request template was found and is offered as the body")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    /// The lookup's three states, spelled out. `unavailable` is never printed as
+    /// "no pull request": the whole point of the third state is that it reads
+    /// differently from the second.
+    private static func existingLine(_ object: [String: JSONValue]) -> String {
+        switch object["existingLookup"]?.stringValue {
+        case "found":
+            guard let existing = object["existing"]?.objectValue else {
+                return "an existing pull request was found"
+            }
+            let number = existing["number"]?.numberValue.map { Int($0) } ?? 0
+            return "existing pull request #\(number) \(existing["url"]?.stringValue ?? "")"
+        case "notFound":
+            return "GitHub reports no pull request for this branch"
+        default:
+            return "existing pull request: could not ask — this is not the same as none"
+        }
+    }
+
+    private static func commitsSuffix(_ object: [String: JSONValue]) -> String {
+        guard let count = object["commitsAhead"]?.numberValue.map({ Int($0) }) else {
+            return " · commits not counted"
+        }
+        return " · \(count) commit\(count == 1 ? "" : "s") ahead"
+    }
+
+    static func pullRequestCreate(_ result: JSONValue?) -> String {
+        let object = result?.objectValue ?? [:]
+        let number = object["number"]?.numberValue.map { Int($0) } ?? 0
+        let draft = object["isDraft"]?.boolValue == true ? " (draft)" : ""
+        var lines = ["Opened #\(number)\(draft) \(object["title"]?.stringValue ?? "")"]
+        lines.append("  \(object["head"]?.stringValue ?? "?") → "
+            + "\(object["base"]?.stringValue ?? "?") on \(object["repository"]?.stringValue ?? "?")")
+        if let url = object["url"]?.stringValue, !url.isEmpty { lines.append("  \(url)") }
+        return lines.joined(separator: "\n")
+    }
+}
+
 public enum CLIEnvelopeExit {
     public static let success: Int32 = 0
     public static let typedError: Int32 = 1
