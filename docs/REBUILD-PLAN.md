@@ -1461,6 +1461,18 @@ reason in the status bar, the workbench no longer draws under the status bar, th
 workspace column is an opaque square-edged pane, and a new workspace opens with a
 terminal instead of a terminal plus a Diff tab nobody asked for.
 
+GUI verification, 2026-08-29 — the five surfaces that only a click could reach are
+checked off in [`docs/reports/wave26-gui-verification.md`](reports/wave26-gui-verification.md):
+the Checks sidebar renders the CLI's typed refusal with its provenance line, Source
+Control stages/refuses/commits end to end, the floating terminal round-trips with the
+session intact, the automation sheet's "Next 3 fires" is a real cron evaluation (it skips
+the weekend, and shows nothing rather than a guess for an unparseable field), and the
+conflict pane's per-hunk `Undecided | Ours | Theirs | Both` writes and stages the
+resolution. Two findings: the Source Control panel does not poll, so an external change to
+the worktree needs its ↻; and the auto-added Conflicts tab lingers after the merge ends
+until an unrelated `refreshGit` retracts it. Every state was built in an Orchard-made
+worktree on a local-only branch and restored byte for byte.
+
 ### Wave 26 source (T88–T90) — close the Orca gap
 
 After wave 25 the switch is fast and the parity checklist (inventory §8) is done. What
