@@ -280,10 +280,14 @@ public final class OrchardRuntimeHost {
         registry.register(AutomationCommandHandler(service: automationService))
         registry.register(ChecksCommandHandler(checks: checksService,
                                               workspaces: workspaceService))
-        // T92: the first GitHub write. Its own service rather than a widened
-        // ChecksService — a reading cache has no business in a create path.
+        // Wave 27: pull requests, split by what the verbs do rather than by the
+        // noun they share. Creation keeps its own service — a reading cache has
+        // no business in a create path — and the acting verbs keep theirs,
+        // because the two cannot share an envelope convention: a checks reading
+        // that failed is `ok: true` with a reason, a merge that failed is not.
         registry.register(PullRequestCommandHandler(creation: PullRequestCreationService(),
                                                     workspaces: workspaceService))
+        registry.register(PullRequestActionCommandHandler(workspaces: workspaceService))
         registry.register(PortCommandHandler(
             ports: portService, workspaces: workspaceService, terminals: terminalService))
         self.registry = registry

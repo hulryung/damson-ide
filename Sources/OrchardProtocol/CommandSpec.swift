@@ -409,36 +409,59 @@ public enum OrchardCommands {
                     "checks show fetches a GitHub Actions job log. A check that is not an Actions job answers not_an_actions_job with its details URL; an unfinished job answers log_pending.",
                     "Typed errors: invalid_argument, check_not_found, plus the unavailable reason codes when checks show is asked for a snapshot that has no checks.",
                 ]),
-            // T92. The first write to GitHub. `pr eligibility` is a reading and
-            // answers ok:true with a typed refusal; `pr create` is a write, so a
-            // refusal is ok:false and a nonzero exit — a script must not read "no
-            // pull request was opened" as success.
+            // Wave 27. One `pr` command over eleven verbs, and one rule that
+            // decides the envelope for each: `eligibility` is a *reading* and
+            // answers ok:true carrying a typed refusal, because "you cannot open
+            // one, and here is precisely why" is a successful answer to the
+            // question asked. Every other verb *writes* to GitHub, so only a verb
+            // that actually landed exits 0 — a script that reads exit 0 from
+            // `pr merge` is entitled to believe the branch is in.
             CommandSpec(
                 name: "pr",
-                summary: "Check whether a pull request can be opened from a worktree, and open it",
-                usage: "orchard pr eligibility|create [options]",
+                summary: "Open a pull request, read it, and act on it (GitHub, via gh)",
+                usage: "orchard pr eligibility|create|review|comment|reply|resolve|unresolve|merge|ready|close|reopen [options]",
                 flags: [
                     flag("worktree", "Worktree selector", "selector"),
                     flag("base", "Base branch (default: the repository's default branch)", "ref"),
                     flag("title", "Pull request title", "text"),
-                    flag("body", "Pull request body", "text"),
-                    flag("draft", "Open it as a draft"),
+                    flag("body", "Pull request body, review, comment or reply text", "text"),
+                    flag("draft", "Open it as a draft; with pr ready, convert back to one"),
+                    enumerated("verdict", "Review verdict", "verdict",
+                               ["approve", "request-changes", "comment"]),
+                    flag("path", "File the line comment is anchored in", "file"),
+                    flag("line", "Line the comment is anchored to", "n"),
+                    flag("start-line", "First line of a multi-line anchor", "n"),
+                    enumerated("side", "Diff side the anchor is on", "side", ["LEFT", "RIGHT"]),
+                    flag("thread", "Review thread id (GraphQL node id)", "id"),
+                    enumerated("method", "Merge method (default merge)", "method",
+                               ["merge", "squash", "rebase"]),
+                    flag("delete-branch", "Delete the head branch after merging (off unless given)"),
+                    flag("yes", "Actually do it. Required by merge and close"),
                     flag("cwd", "Working directory for worktree resolution", "path"),
                     json,
                 ],
-                positionalArgs: ["eligibility|create"],
+                positionalArgs: ["eligibility|create|review|comment|reply|resolve|unresolve|merge|ready|close|reopen"],
                 examples: [
                     "orchard pr eligibility",
                     "orchard pr eligibility --base release/2 --json",
                     "orchard pr create --title \"Open pull requests from Orchard\" --draft",
+                    "orchard pr review --verdict request-changes --body \"needs a test\"",
+                    "orchard pr comment --path Sources/App/main.swift --line 42 --body \"why?\"",
+                    "orchard pr resolve --thread PRRT_kwDO...",
+                    "orchard pr merge --method squash            # prints what it would do, exits 1",
+                    "orchard pr merge --method squash --yes",
+                    "orchard pr close --yes",
                 ],
                 notes: [
-                    "pr eligibility never fails because a pull request cannot be opened: every dead end is an ok:true answer with a typed refusal (code, headline, gh's own detail, remedy).",
-                    "Refusal codes: not_a_worktree, remote_unsupported, gh_not_installed, gh_not_authenticated, detached_head, no_git_remote, unsupported_forge, branch_not_pushed, unpushed_commits, base_equals_head, base_ref_missing, no_base_ref, nothing_to_propose, pull_request_exists, empty_title, api_error, gh_timed_out.",
-                    "existingLookup is found|notFound|unavailable. `unavailable` means the lookup itself failed and is never reported as notFound — a swallowed error read as 'no pull request exists' is how a second one gets opened.",
-                    "Orchard never pushes a branch for you: neither verb pushes, ever. When needsPush is set the branch is not on GitHub yet; push it yourself (git push -u) or use the Push button in the pull-request sheet.",
-                    "pr create sends the body exactly as given. The repository's template is reported by pr eligibility and never spliced in automatically — a body the caller has not read is not published under their name.",
-                    "pr create refuses with ok:false and the refusal's own code, so a failed create is a nonzero exit.",
+                    "pr eligibility is the one reading here and never fails because a pull request cannot be opened: every dead end is an ok:true answer with a typed refusal (code, headline, gh\'s own detail, remedy). Every other verb writes, and only a verb that landed exits 0.",
+                    "existingLookup is found|notFound|unavailable. `unavailable` means the lookup itself failed and is never reported as notFound — a swallowed error read as \'no pull request exists\' is how a second one gets opened.",
+                    "Orchard never pushes a branch for you. When needsPush is set the branch is not on GitHub yet; push it yourself (git push -u) or use the Push button in the pull-request sheet.",
+                    "pr create sends the body exactly as given. The repository\'s template is reported by pr eligibility and never spliced in automatically — a body the caller has not read is not published under their name.",
+                    "merge and close require --yes. Without it the pull request is read, the plan is built, and the sentence naming what would happen is printed as confirmation_required — exit 1, nothing sent.",
+                    "--delete-branch is off unless you pass it. A branch is never deleted because a flag was forgotten.",
+                    "mergeability_unknown is not a refusal: GitHub had not finished computing whether the branches merge, so nothing was attempted. Ask again in a moment.",
+                    "A review verdict of request-changes or comment needs a --body; the refusal fires before gh is launched.",
+                    "Refusal codes: not_a_worktree, remote_unsupported, gh_not_installed, gh_not_authenticated, detached_head, no_git_remote, unsupported_forge, branch_not_pushed, unpushed_commits, base_equals_head, base_ref_missing, no_base_ref, nothing_to_propose, pull_request_exists, empty_title, no_pull_request, empty_review_body, cannot_review_own_pull_request, pull_request_not_open, not_mergeable, merge_method_unavailable, insufficient_permission, thread_not_found, line_not_in_diff, api_error, gh_timed_out.",
                 ]),
             command("terminal", "List, create, inspect, and control runtime terminals", [
                 flag("worktree", "Worktree selector for list or create", "selector"),

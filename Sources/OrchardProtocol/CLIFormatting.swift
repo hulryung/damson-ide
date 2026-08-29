@@ -489,6 +489,26 @@ public enum OrchardHumanFormatter {
         }
         return "Repo '\(name)' was not removed."
     }
+
+    /// T94. What `orchard pr <verb>` prints when something actually landed.
+    ///
+    /// Only the success path reaches here: a refusal, a pending mergeability and
+    /// an unconfirmed destructive verb all come back `ok: false`, and the CLI
+    /// prints those on stderr with their code. So this formatter has exactly one
+    /// job — say what happened, past tense, naming the pull request — and it
+    /// never has to hedge.
+    public static func pullRequestAction(_ result: JSONValue?) -> String {
+        let object = result?.objectValue ?? [:]
+        var lines: [String] = []
+        lines.append(object["summary"]?.stringValue ?? "Done.")
+        if let detail = object["detail"]?.stringValue, !detail.isEmpty {
+            lines.append("  \(detail)")
+        }
+        if let url = object["url"]?.stringValue, !url.isEmpty {
+            lines.append("  \(url)")
+        }
+        return lines.joined(separator: "\n")
+    }
 }
 
 /// Process exit for a runtime RPC envelope. Typed errors (`ok: false`) are a

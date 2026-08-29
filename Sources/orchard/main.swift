@@ -152,6 +152,9 @@ func formatHuman(method: String, result: JSONValue?, verbose: Bool = false) -> S
         return OrchardHumanFormatter.pullRequestEligibility(result)
     case "pr-create":
         return OrchardHumanFormatter.pullRequestCreate(result)
+    case "pr-review", "pr-comment", "pr-reply", "pr-resolve", "pr-unresolve",
+         "pr-merge", "pr-ready", "pr-close", "pr-reopen":
+        return OrchardHumanFormatter.pullRequestAction(result)
     case "conflicts-list":
         return OrchardHumanFormatter.conflictsList(result)
     case "conflicts-show":
@@ -510,15 +513,24 @@ do {
             }
         }
         if method == "pr" {
+            let known = ["eligibility", "create",
+                         "review", "comment", "reply", "resolve", "unresolve",
+                         "merge", "ready", "close", "reopen"]
             guard case let .array(values)? = params.removeValue(forKey: "_args"),
                   let subcommand = values.first?.stringValue,
-                  ["eligibility", "create"].contains(subcommand) else {
+                  known.contains(subcommand) else {
                 throw CLIError.usage(
-                    "usage: orchard pr eligibility|create [--worktree <selector>] "
-                        + "[--base <ref>] [--title <text>] [--body <text>] [--draft]")
+                    "usage: orchard pr eligibility|create|review|comment|reply|resolve"
+                        + "|unresolve|merge|ready|close|reopen [options]")
             }
             method = "pr-\(subcommand)"
-            if values.count > 1, params["worktree"] == nil {
+            // A positional after a thread verb is the thread id; after anything
+            // else it is the worktree. Nothing positional ever becomes a body or
+            // a title: review text and titles are explicit or they are absent.
+            if ["resolve", "unresolve", "reply"].contains(subcommand),
+               values.count > 1, params["thread"] == nil {
+                params["thread"] = values[1]
+            } else if values.count > 1, params["worktree"] == nil {
                 params["worktree"] = values[1]
             }
             if params["cwd"] == nil {
