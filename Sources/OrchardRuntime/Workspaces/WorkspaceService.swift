@@ -30,6 +30,11 @@ public final class WorkspaceService {
     /// scripted-runner tests pin.
     public var remoteConnections: RemoteConnectionPool?
 
+    /// Append-only record of what cannot be undone. Beside the data file by
+    /// default; tests point it somewhere disposable. Writing to it never fails a
+    /// operation — see `DestructiveActionLog`.
+    public lazy var auditLog: DestructiveActionLog = .beside(store.url)
+
     private var gitServices: [String: WorktreeService] = [:]
     private var repoChangeContinuations: [UUID: AsyncStream<[RepoRecord]>.Continuation] = [:]
 
@@ -115,9 +120,23 @@ public final class WorkspaceService {
     /// owned by this repo id are removed so a later re-add starts clean.
     /// The empty per-repo worktree container (`~/Orchard/worktrees/<repo>/`,
     /// or the test override) is rmdir'd when empty; never recursively.
+    /// `origin` is required and has no default on purpose: this is the call that
+    /// lost three repositories' worth of metadata with nothing to say who asked
+    /// for it, and a caller that cannot name itself should not compile.
     @discardableResult
-    public func removeRepo(_ selector: String) throws -> RepoRecord {
+    public func removeRepo(_ selector: String, origin: ActionOrigin) throws -> RepoRecord {
         let record = try resolveRepo(selector)
+        let before = store.load()
+        let discarded = [
+            "worktree records": before.worktreeMeta.keys
+                .filter { Self.worktreeKey($0, belongsToRepo: record.id) }.count,
+            "lineage entries": before.worktreeLineageById.keys
+                .filter { Self.worktreeKey($0, belongsToRepo: record.id) }.count,
+            "folder workspaces": before.folderWorkspaces
+                .filter { $0.repoId.caseInsensitiveCompare(record.id) == .orderedSame }.count,
+            "remote worktrees": before.remoteWorktrees
+                .filter { $0.repoId.caseInsensitiveCompare(record.id) == .orderedSame }.count,
+        ]
         try store.modify { data in
             data.repos.removeAll {
                 $0.id.caseInsensitiveCompare(record.id) == .orderedSame
@@ -148,6 +167,11 @@ public final class WorkspaceService {
             gitServices.removeValue(forKey: key)?.shutdown(removeWorktrees: false)
         }
         WorktreeManager.removeEmptyDirectory(worktreeContainerURL(for: record))
+        // After the removal, not before: a line claiming something was discarded
+        // when the write then threw would be worse than no line at all.
+        auditLog.record("repo_removed", origin: origin,
+                        targetID: record.id, targetName: record.displayName,
+                        targetPath: record.path, discarded: discarded)
         publishReposChanged()
         return record
     }

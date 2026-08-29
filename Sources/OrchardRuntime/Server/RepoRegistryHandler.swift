@@ -78,7 +78,7 @@ public struct RepoRegistryHandler: CommandHandler {
                 {
                     return .failure(id: request.id, error: refusal)
                 }
-                let removed = try await service.removeRepo(record.id)
+                let removed = try await service.removeRepo(record.id, origin: .cli)
                 var object = try JSONBridge.value(removed).objectValue ?? [:]
                 object["removed"] = .bool(true)
                 if forget {

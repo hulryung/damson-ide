@@ -301,11 +301,11 @@ final class WorkspaceServiceTests: XCTestCase {
         XCTAssertEqual(service.repo(path: repo)?.id, record.id)
         XCTAssertEqual(service.repo(path: repo.appendingPathComponent("."))?.id, record.id)
 
-        let removed = try service.removeRepo("path:\(repo.path)")
+        let removed = try service.removeRepo("path:\(repo.path)", origin: .test)
         XCTAssertEqual(removed.id, record.id)
         XCTAssertTrue(service.listRepos().isEmpty)
         XCTAssertNil(service.repo(path: repo))
-        XCTAssertThrowsError(try service.removeRepo(record.id)) { error in
+        XCTAssertThrowsError(try service.removeRepo(record.id, origin: .test)) { error in
             XCTAssertEqual((error as? WorkspaceError)?.code, "unknown_repo")
         }
     }
@@ -316,7 +316,7 @@ final class WorkspaceServiceTests: XCTestCase {
         let service = makeService()
         let folderRepo = try service.addRepo(path: folder, kind: .folder)
         XCTAssertEqual(try service.listWorkspaces(repo: folderRepo.id).count, 1)
-        _ = try service.removeRepo(folderRepo.id)
+        _ = try service.removeRepo(folderRepo.id, origin: .test)
         XCTAssertTrue(service.store.load().folderWorkspaces.isEmpty)
         XCTAssertTrue(FileManager.default.fileExists(atPath: folder.path))
 
@@ -325,7 +325,7 @@ final class WorkspaceServiceTests: XCTestCase {
         let created = try await service.create(WorkspaceCreateRequest(repo: gitRepo.id, name: "keep-me"))
         XCTAssertNotNil(service.store.load().worktreeMeta[created.workspace.id])
         XCTAssertNotNil(service.store.load().worktreeLineageById[created.workspace.id])
-        _ = try service.removeRepo(gitRepo.id)
+        _ = try service.removeRepo(gitRepo.id, origin: .test)
         XCTAssertTrue(service.listRepos().isEmpty)
         XCTAssertNil(service.store.load().worktreeMeta[created.workspace.id])
         XCTAssertNil(service.store.load().worktreeLineageById[created.workspace.id])
@@ -361,7 +361,7 @@ final class WorkspaceServiceTests: XCTestCase {
         // the path under test (crash between rm and rmdir, or an outside delete).
         try FileManager.default.createDirectory(at: container, withIntermediateDirectories: true)
         XCTAssertTrue(FileManager.default.fileExists(atPath: container.path))
-        _ = try service.removeRepo(record.id)
+        _ = try service.removeRepo(record.id, origin: .test)
         XCTAssertFalse(FileManager.default.fileExists(atPath: container.path),
                        "repo remove must rmdir the empty per-repo container")
     }
@@ -380,7 +380,7 @@ final class WorkspaceServiceTests: XCTestCase {
         XCTAssertEqual(afterAdd?.map(\.id), [record.id])
 
         _ = try service.addRepo(path: repo, displayName: "ignored")
-        _ = try service.removeRepo(record.id)
+        _ = try service.removeRepo(record.id, origin: .test)
         let afterRemove = await iterator.next()
         XCTAssertEqual(afterRemove?.count, 0)
     }
@@ -441,7 +441,7 @@ final class WorkspaceServiceTests: XCTestCase {
         let listed = try service.listWorkspaces()
         XCTAssertEqual(listed.map(\.id), ["\(record.id)::\(repo.standardizedFileURL.path)"])
 
-        _ = try service.removeRepo(record.id)
+        _ = try service.removeRepo(record.id, origin: .test)
         _ = await iterator.next()
         XCTAssertTrue(try service.listWorkspaces().isEmpty)
         XCTAssertThrowsError(try service.show(selector: "path:\(repo.path)")) { error in

@@ -867,10 +867,33 @@ final class AppStore: ObservableObject {
         }
     }
 
+    /// Close Project. Two things used to be wrong here and both are the same
+    /// mistake: the sidebar was updated before the registry, and the registry's
+    /// answer was thrown away. A removal that failed still made the project
+    /// disappear, so the app showed a repo as closed that was still registered —
+    /// and it came back at the next launch with no explanation.
+    ///
+    /// Now the registry goes first and the row only follows if it succeeded. A
+    /// refusal is shown rather than swallowed: `removeRepo` throws typed
+    /// `WorkspaceError`s, and the user is entitled to the one they hit.
     func removeProject(_ project: ProjectSession) {
         let selector = project.repoID ?? project.repo.path
+        do {
+            _ = try workspaceService.removeRepo(selector, origin: .gui)
+        } catch {
+            presentCloseFailure(project, error)
+            return
+        }
         detachProject(project)
-        _ = try? workspaceService.removeRepo(selector)
+    }
+
+    private func presentCloseFailure(_ project: ProjectSession, _ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "Couldn't close “\(project.name)”"
+        alert.informativeText = (error as? WorkspaceError)?.message
+            ?? String(describing: error)
+        alert.informativeText += "\n\nThe project is still open and nothing was discarded."
+        alert.runModal()
     }
 
     private func defaultSelection(for project: ProjectSession) -> WorkbenchKey {

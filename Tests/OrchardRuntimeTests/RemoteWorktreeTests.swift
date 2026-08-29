@@ -594,7 +594,7 @@ final class RemoteHostStampTests: XCTestCase {
     func testClosingAProjectDropsItsRemoteWorktreeRecords() throws {
         try seed(hostId: "ssh:build", path: "/srv/repo/wt")
         let repo = try XCTUnwrap(service.listRepos().first)
-        _ = try service.removeRepo(repo.id)
+        _ = try service.removeRepo(repo.id, origin: .test)
         XCTAssertTrue(store.load().remoteWorktrees.isEmpty)
     }
 }
