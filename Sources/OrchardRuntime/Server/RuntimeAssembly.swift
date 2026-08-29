@@ -280,6 +280,10 @@ public final class OrchardRuntimeHost {
         registry.register(AutomationCommandHandler(service: automationService))
         registry.register(ChecksCommandHandler(checks: checksService,
                                               workspaces: workspaceService))
+        // T92: the first GitHub write. Its own service rather than a widened
+        // ChecksService — a reading cache has no business in a create path.
+        registry.register(PullRequestCommandHandler(creation: PullRequestCreationService(),
+                                                    workspaces: workspaceService))
         registry.register(PortCommandHandler(
             ports: portService, workspaces: workspaceService, terminals: terminalService))
         self.registry = registry

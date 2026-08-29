@@ -409,6 +409,37 @@ public enum OrchardCommands {
                     "checks show fetches a GitHub Actions job log. A check that is not an Actions job answers not_an_actions_job with its details URL; an unfinished job answers log_pending.",
                     "Typed errors: invalid_argument, check_not_found, plus the unavailable reason codes when checks show is asked for a snapshot that has no checks.",
                 ]),
+            // T92. The first write to GitHub. `pr eligibility` is a reading and
+            // answers ok:true with a typed refusal; `pr create` is a write, so a
+            // refusal is ok:false and a nonzero exit — a script must not read "no
+            // pull request was opened" as success.
+            CommandSpec(
+                name: "pr",
+                summary: "Check whether a pull request can be opened from a worktree, and open it",
+                usage: "orchard pr eligibility|create [options]",
+                flags: [
+                    flag("worktree", "Worktree selector", "selector"),
+                    flag("base", "Base branch (default: the repository's default branch)", "ref"),
+                    flag("title", "Pull request title", "text"),
+                    flag("body", "Pull request body", "text"),
+                    flag("draft", "Open it as a draft"),
+                    flag("cwd", "Working directory for worktree resolution", "path"),
+                    json,
+                ],
+                positionalArgs: ["eligibility|create"],
+                examples: [
+                    "orchard pr eligibility",
+                    "orchard pr eligibility --base release/2 --json",
+                    "orchard pr create --title \"Open pull requests from Orchard\" --draft",
+                ],
+                notes: [
+                    "pr eligibility never fails because a pull request cannot be opened: every dead end is an ok:true answer with a typed refusal (code, headline, gh's own detail, remedy).",
+                    "Refusal codes: not_a_worktree, remote_unsupported, gh_not_installed, gh_not_authenticated, detached_head, no_git_remote, unsupported_forge, branch_not_pushed, unpushed_commits, base_equals_head, base_ref_missing, no_base_ref, nothing_to_propose, pull_request_exists, empty_title, api_error, gh_timed_out.",
+                    "existingLookup is found|notFound|unavailable. `unavailable` means the lookup itself failed and is never reported as notFound — a swallowed error read as 'no pull request exists' is how a second one gets opened.",
+                    "Orchard never pushes a branch for you: neither verb pushes, ever. When needsPush is set the branch is not on GitHub yet; push it yourself (git push -u) or use the Push button in the pull-request sheet.",
+                    "pr create sends the body exactly as given. The repository's template is reported by pr eligibility and never spliced in automatically — a body the caller has not read is not published under their name.",
+                    "pr create refuses with ok:false and the refusal's own code, so a failed create is a nonzero exit.",
+                ]),
             command("terminal", "List, create, inspect, and control runtime terminals", [
                 flag("worktree", "Worktree selector for list or create", "selector"),
                 flag("terminal", "Terminal handle", "handle"),
